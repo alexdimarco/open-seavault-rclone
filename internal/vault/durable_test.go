@@ -15,7 +15,7 @@ import (
 // withRenameSeam saves the rename injection points and restores them at test
 // end, and installs a classifier that treats retryable (and anything wrapping
 // it) as a transient sharing violation. It lets a portable test drive the
-// Windows retry loop on any OS (design D5.1, R9).
+// Windows retry loop on any OS.
 func withRenameSeam(t *testing.T, retryable error) {
 	t.Helper()
 	origFn, origSleep, origRetry := renameFn, renameSleep, renameRetryable
@@ -23,7 +23,7 @@ func withRenameSeam(t *testing.T, retryable error) {
 	renameRetryable = func(err error) bool { return retryable != nil && errors.Is(err, retryable) }
 }
 
-// R9: a sharing violation on the first renameAttempts-1 tries, then success, is
+// a sharing violation on the first renameAttempts-1 tries, then success, is
 // retried to completion with the documented exponential backoff.
 func TestRenameWithRetrySucceedsAfterTransientViolations(t *testing.T) {
 	fake := errors.New("fake ERROR_SHARING_VIOLATION")
@@ -56,7 +56,7 @@ func TestRenameWithRetrySucceedsAfterTransientViolations(t *testing.T) {
 	}
 }
 
-// R9: a permanent sharing violation surfaces after exactly renameAttempts tries.
+// a permanent sharing violation surfaces after exactly renameAttempts tries.
 func TestRenameWithRetrySurfacesPermanentViolation(t *testing.T) {
 	fake := errors.New("permanent ERROR_LOCK_VIOLATION")
 	withRenameSeam(t, fake)
@@ -73,7 +73,7 @@ func TestRenameWithRetrySurfacesPermanentViolation(t *testing.T) {
 	}
 }
 
-// R9: an error that is NOT a sharing violation is returned on the first try with
+// an error that is NOT a sharing violation is returned on the first try with
 // no retry and no sleep (POSIX rename semantics; rename_other.go).
 func TestRenameWithRetryReturnsNonRetryableImmediately(t *testing.T) {
 	retryable := errors.New("would-retry")
@@ -103,8 +103,8 @@ func TestGenericErrorIsNeverRetryableRename(t *testing.T) {
 	}
 }
 
-// R11: an upper- or mixed-case chunk/manifest filename parses to the same
-// lower-case id as its canonical name (design D6.1).
+// an upper- or mixed-case chunk/manifest filename parses to the same
+// lower-case id as its canonical name.
 func TestIDsFromFileNamesAreLowerCased(t *testing.T) {
 	loHex := strings.Repeat("ab", 32) // 64 hex chars, lower
 	hiHex := strings.ToUpper(loHex)
@@ -123,7 +123,7 @@ func TestIDsFromFileNamesAreLowerCased(t *testing.T) {
 	}
 }
 
-// R11: GC keeps a live chunk whose on-disk name has been case-folded to
+// GC keeps a live chunk whose on-disk name has been case-folded to
 // upper-case; without the lower-casing it would be deleted as unreferenced.
 func TestGCKeepsLiveChunkUnderUpperCaseName(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
@@ -142,7 +142,7 @@ func TestGCKeepsLiveChunkUnderUpperCaseName(t *testing.T) {
 	if len(rec.Chunks) == 0 {
 		t.Fatal("expected at least one chunk")
 	}
-	// Back-date the chunk objects (conditions/F2): the chunk-mtime fence must be
+	// Back-date the chunk objects: the chunk-mtime fence must be
 	// CLEARED at the final run so the ONLY thing that can keep the object alive
 	// past every fence is the case-folding liveness match — not a young mtime.
 	old := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC).Add(-500 * time.Hour)
@@ -161,11 +161,11 @@ func TestGCKeepsLiveChunkUnderUpperCaseName(t *testing.T) {
 	}
 	// A single --confirm run structurally removes NOTHING (phase 1 only writes
 	// intents), so asserting RemovedChunks==0 after one run is vacuous — it holds
-	// even when the object is misclassified as garbage (conditions/F2). Drive the
+	// even when the object is misclassified as garbage. Drive the
 	// whole two-phase fenced protocol PAST the fence with a controlled clock so
 	// the recorded time, this device's first-seen record, and the chunk mtime all
 	// age beyond it: only then can GC delete a chunk it deems unreferenced. If the
-	// upper-case name defeated the D6.1 liveness match, run 3 would collect these
+	// upper-case name defeated the liveness match, run 3 would collect these
 	// LIVE chunks here.
 	seenDir := filepath.Join(t.TempDir(), "gc-seen")
 	t0 := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -187,9 +187,9 @@ func TestGCKeepsLiveChunkUnderUpperCaseName(t *testing.T) {
 	}
 }
 
-// R8: two on-disk copies of the same losing manifest converge to ONE conflict
+// two on-disk copies of the same losing manifest converge to ONE conflict
 // path, because conflictPath is now seeded from the record's content, not the
-// device-local on-disk filename (design D4.3).
+// device-local on-disk filename.
 func TestConflictPathConvergesAcrossOnDiskFilenames(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
 	const pw = "password"
@@ -205,7 +205,7 @@ func TestConflictPathConvergesAcrossOnDiskFilenames(t *testing.T) {
 	// Two sync clients each left a differently-named copy of the SAME losing
 	// record on disk. They are one peer device's concurrent edit duplicated under
 	// two names, so both copies carry the SAME disjoint peer vector clock (design
-	// D4.2): concurrent with this device's edit (kept as a conflict), and
+	// ): concurrent with this device's edit (kept as a conflict), and
 	// identical to each other (must converge to ONE conflict path, not two).
 	copyA := strings.TrimSuffix(orig, ".manifest") + ".deviceA-sync-conflict.manifest"
 	copyB := strings.TrimSuffix(orig, ".manifest") + ".deviceB (conflicted copy).manifest"
@@ -235,7 +235,7 @@ func TestConflictPathConvergesAcrossOnDiskFilenames(t *testing.T) {
 	}
 }
 
-// R8: conflictPath is a pure function of the original path and the record's
+// conflictPath is a pure function of the original path and the record's
 // content — deterministic, and sensitive to the content it seeds from.
 func TestConflictPathIsContentSeededAndDeterministic(t *testing.T) {
 	rec := FileRecord{

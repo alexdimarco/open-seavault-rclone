@@ -12,19 +12,19 @@ import (
 )
 
 // GCFenceDefault is the default age below which a garbage-collection intent
-// cannot fire and an atomic-write temp orphan is left alone (design D3.1, D5.3).
+// cannot fire and an atomic-write temp orphan is left alone.
 // The standalone Compact/CompactPlan entry points (which take no fence) sweep
 // .tmp-* orphans older than it; the fenced `gc [--confirm] --fence N` path
-// threads N instead, and the two-phase chunk collection (§3) reuses it as its
+// threads N instead, and the two-phase chunk collection reuses it as its
 // own default. A young temp file may be a rename still in flight, so it is kept.
 const GCFenceDefault = 72 * time.Hour
 
 // CompactReport summarises a Compact run, or — from CompactPlan — what one would
-// do (design D4.4). Conflicts and TmpOrphans list the affected virtual/temp
+// do. Conflicts and TmpOrphans list the affected virtual/temp
 // paths so `seavault gc` can print the plan; RemovedManifests counts the
 // duplicate, generation-suppressed, and superseded-tombstone manifest files that
 // Compact deletes (their on-disk names are not user-meaningful). Errors collects
-// every failure encountered while applying the plan — never swallowed (D4.4);
+// every failure encountered while applying the plan — never swallowed;
 // Compact returns a non-nil error when it is non-empty.
 type CompactReport struct {
 	Conflicts        []string `json:"conflicts"`
@@ -39,32 +39,32 @@ func (r CompactReport) Materialised() bool {
 	return len(r.Conflicts) > 0 || r.RemovedManifests > 0 || len(r.TmpOrphans) > 0
 }
 
-// Compact applies the reconcilePlan a pure load computed (design D4.4, P0-6/P2):
+// Compact applies the reconcilePlan a pure load computed (/P2):
 // it materialises each losing edit as a deterministic *.conflict-* manifest,
 // removes redundant/superseded manifest files, and sweeps atomic-write temp
 // orphans older than the GC fence from the chunk, manifest, and gc-intents trees — all under
 // v.mu, with Windows retry semantics, collecting every error instead of swallowing
 // it. It is idempotent: a second run recomputes the plan from the now-settled disk
-// state and finds nothing to do. Reads never call it (invariant I2); the passive
-// sync watcher never calls it (R18) — only `seavault compact`, `seavault gc
+// state and finds nothing to do. Reads never call it; the passive
+// sync watcher never calls it — only `seavault compact`, `seavault gc
 // --confirm`, and POST /api/compact do.
 func (v *Vault) Compact() (CompactReport, error) {
 	return v.compact(time.Now(), true, GCFenceDefault)
 }
 
-// CompactPlan computes what Compact would do without touching disk (design D4.4,
-// D5.3): `seavault gc` prints it as the dry-run plan and orphan list.
+// CompactPlan computes what Compact would do without touching disk (
+// ): `seavault gc` prints it as the dry-run plan and orphan list.
 func (v *Vault) CompactPlan() (CompactReport, error) {
 	return v.compact(time.Now(), false, GCFenceDefault)
 }
 
 // compact is the shared engine for Compact (apply=true) and CompactPlan
-// (apply=false). now is injectable so a test can age .tmp-* orphans across the
-// fence deterministically. fence is the age below which a .tmp-* orphan is kept
+// (apply=false). now is injectable so a test can age.tmp-* orphans across the
+// fence deterministically. fence is the age below which a.tmp-* orphan is kept
 // (a rename may still be in flight): the standalone Compact/CompactPlan entry
 // points, which take no fence, pass GCFenceDefault, while GarbageCollect threads
 // the run's --fence so `gc [--confirm] --fence N` sweeps orphans older than N
-// (design D5.3).
+// .
 func (v *Vault) compact(now time.Time, apply bool, fence time.Duration) (CompactReport, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -133,11 +133,11 @@ func (v *Vault) compact(now time.Time, apply bool, fence time.Duration) (Compact
 }
 
 // sweepTmpOrphans finds (and, when apply is set, removes) atomic-write temp files
-// left by a crash between CreateTemp and rename (design D5.3, R6b) in any of the
+// left by a crash between CreateTemp and rename (R6b) in any of the
 // three synced trees atomicWriteFile targets: objects/chunks, manifests, and
 // gc-intents (writeIntent, gc.go, writes each intent through atomicWriteFile too).
 // Only orphans older than fence — the run's GC fence — are touched: a young
-// .tmp-* may be a write still in flight. Real <id>.intent files lack the .tmp-
+// .tmp-* may be a write still in flight. Real <id>.intent files lack the.tmp-
 // prefix and are never touched. Returns the orphan paths and any errors.
 func (v *Vault) sweepTmpOrphans(now time.Time, apply bool, fence time.Duration) ([]string, []string) {
 	var orphans, errs []string

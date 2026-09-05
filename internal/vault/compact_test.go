@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// R7 (design §4, P0-6, invariant I2): a delete tombstone that wins over a live
+// a delete tombstone that wins over a live
 // loser leaves the deleted path absent and the loser present as a *.conflict-*
 // entry carrying the loser's chunks — all IN MEMORY, with zero writes to the
 // metadata dir on load or read. Compact materialises the conflict and a second
@@ -148,7 +148,7 @@ func TestTombstoneWinnerKeepsLoserAsConflictWithoutWriting(t *testing.T) {
 	}
 }
 
-// R6b (design D5.3): Compact sweeps atomic-write .tmp-* orphans older than the GC
+// R6b: Compact sweeps atomic-write.tmp-* orphans older than the GC
 // fence from both objects/chunks and manifests, and keeps young ones (a rename
 // may still be in flight). The clock is injected so both branches are exercised
 // deterministically.
@@ -215,12 +215,12 @@ func TestCompactSweepsOldTmpOrphans(t *testing.T) {
 	}
 }
 
-// Regression (integrity/F4-gc-intents-tmp-orphan-never-swept): writeIntent
+// Regression: writeIntent
 // (gc.go) writes each intent through atomicWriteFile, so a crash between
-// CreateTemp and rename leaves a .tmp-* orphan in the SYNCED gc-intents/ tree —
-// the same window D5.3/R6b concede for chunks and manifests. sweepTmpOrphans must
+// CreateTemp and rename leaves a.tmp-* orphan in the SYNCED gc-intents/ tree —
+// the same window /R6b concede for chunks and manifests. sweepTmpOrphans must
 // cover gc-intents/ too, or that orphan is never reclaimed and syncs to the
-// provider forever. A real <id>.intent file (no .tmp- prefix) must survive.
+// provider forever. A real <id>.intent file (no.tmp- prefix) must survive.
 func TestCompactSweepsOldTmpOrphansInGCIntents(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
 	const password = "password"
@@ -274,7 +274,7 @@ func TestCompactSweepsOldTmpOrphansInGCIntents(t *testing.T) {
 		}
 	}
 	if !sweptOld {
-		t.Fatalf("old gc-intents .tmp-* orphan %s must be reported swept, got TmpOrphans=%#v", oldTmp, report.TmpOrphans)
+		t.Fatalf("old gc-intents.tmp-* orphan %s must be reported swept, got TmpOrphans=%#v", oldTmp, report.TmpOrphans)
 	}
 	if _, statErr := os.Stat(oldTmp); !os.IsNotExist(statErr) {
 		t.Fatalf("old gc-intents orphan %s should have been removed, stat err: %v", oldTmp, statErr)

@@ -209,11 +209,11 @@ func TestManifestConflictCopyIsPreserved(t *testing.T) {
 	// The conflicting manifest was dropped onto disk by an external sync client,
 	// behind this open vault's back. It represents ANOTHER device's concurrent
 	// edit, so we rewrite the copied manifest to carry that peer's disjoint vector
-	// clock (design D4.2, P1-8): under A2 a same-device *dominated* copy is
+	// clock: under A2 a same-device *dominated* copy is
 	// cleanly superseded (no conflict), and only a genuinely CONCURRENT edit
 	// survives as a conflict — which is exactly what a cloud "conflicted copy" is.
 	rewriteManifestClock(t, v, copyPath, map[string]int64{"peer-device-00000000000000000000": 1})
-	// A load is now PURE (design D4.1, invariant I2): the reload surfaces the
+	// A load is now PURE: the reload surfaces the
 	// concurrent copy as an in-memory *.conflict-* entry with ConflictOf set, but
 	// writes NOTHING to the metadata dir. Only Compact materialises it.
 	if err := v.ReloadIndex(); err != nil {
@@ -273,7 +273,7 @@ func TestManifestConflictCopyIsPreserved(t *testing.T) {
 	}
 }
 
-// R17 (design D4.2, P0-6): a delete tombstone carries the generation of the live
+// a delete tombstone carries the generation of the live
 // record it superseded. On a pure load, a live loser under that tombstone is
 // suppressed ONLY when its generation is at or below the tombstone's
 // deletedGeneration (a stale copy the deleter had already seen); a loser above it
@@ -386,7 +386,8 @@ func TestRemoveTombstoneWinsOverOlderConflictCopy(t *testing.T) {
 	})
 }
 
-// R17 (design D4.2, end-to-end via the real delete path): a normal Remove records
+// (end-to-end via the real delete path): a normal Remove records
+//
 // the deleted record's generation as the tombstone's deletedGeneration, so a
 // stale synced copy the deleter had already seen (same generation) is suppressed
 // on the next load rather than resurrected as a conflict.
@@ -434,7 +435,7 @@ func sameChunks(a, b []ChunkRef) bool {
 }
 
 // metaRootOf resolves the metadata directory a created vault actually uses
-// (SeaVaultData for vaults created by this version, .seavault for legacy ones),
+// (SeaVaultData for vaults created by this version.seavault for legacy ones),
 // so test helpers locate chunks/manifests without hardcoding the layout.
 func metaRootOf(t *testing.T, root string) string {
 	t.Helper()

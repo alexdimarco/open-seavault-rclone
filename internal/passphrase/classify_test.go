@@ -5,7 +5,7 @@ package passphrase
 
 import "testing"
 
-// TestClassifyStdin is the table half of R16 (design D8.2), asserted on every OS.
+// TestClassifyStdin is the table half of, asserted on every OS.
 // Each row pins how Read must treat a given stdin: a live console reads with echo
 // suppressed; a recognised mintty/cygwin pty is refused; a data pipe or file (or
 // an unrecognised type) is read as a line; a console-class handle whose console

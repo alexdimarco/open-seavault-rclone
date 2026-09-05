@@ -18,7 +18,7 @@ const (
 )
 
 // isRetryableRenameError reports whether a failed rename is a transient Windows
-// sharing conflict worth retrying (design D5.1).
+// sharing conflict worth retrying.
 func isRetryableRenameError(err error) bool {
 	var errno syscall.Errno
 	if !errors.As(err, &errno) {

@@ -53,7 +53,7 @@ func TestDryRunPushUsesCopyOnly(t *testing.T) {
 		t.Fatalf("expected copy with --dry-run: %s", joined)
 	}
 	if !strings.Contains(joined, vault.MetadataDirName) {
-		t.Fatalf("expected remote .seavault path: %s", joined)
+		t.Fatalf("expected remote.seavault path: %s", joined)
 	}
 }
 

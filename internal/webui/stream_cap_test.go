@@ -37,7 +37,7 @@ func davGetReq(t *testing.T, s *Server, virtualPath string) *http.Request {
 	req := httptest.NewRequest(http.MethodGet, urlPath, nil)
 	// The embedded localdav server enforces a loopback Host allowlist; drive it
 	// under a loopback Host, with a logged-in session cookie, as a GUI client
-	// would. /dav authenticates with the davToken (design D4.1).
+	// would. /dav authenticates with the davToken.
 	req.Host = "127.0.0.1"
 	req.AddCookie(newTestSession(s, true))
 	return req
@@ -47,7 +47,7 @@ func davGetReq(t *testing.T, s *Server, virtualPath string) *http.Request {
 //
 // handleWebDAV builds a fresh localdav.Server on every /dav request. The
 // streaming-GET semaphore that is supposed to cap concurrent decrypt streams
-// (bounding read-path memory, design §12 "proven by construction") is a field
+// (bounding read-path memory, "proven by construction") is a field
 // on that Server. If each throwaway Server mints its own semaphore, the cap is
 // per-request, not global: N concurrent authenticated Range GETs each get a
 // fresh full budget and decrypt chunks simultaneously.

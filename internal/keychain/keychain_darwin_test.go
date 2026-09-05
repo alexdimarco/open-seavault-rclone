@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// TestSetSendsCommandOnStdin is the darwin-only half of R15: Set exec's exactly
+// TestSetSendsCommandOnStdin is the darwin-only half of: Set exec's exactly
 // ["security","-i"] and writes the add-generic-password command — carrying the
 // account and secret — to stdin, so neither ever appears in argv (I5).
 func TestSetSendsCommandOnStdin(t *testing.T) {

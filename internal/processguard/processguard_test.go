@@ -20,7 +20,7 @@ func TestIsSeaVaultProcessMatchesNameAndArgs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isSeaVaultProcess(tt.proc, "seavault"); got != tt.want {
-				t.Fatalf("isSeaVaultProcess() = %v, want %v", got, tt.want)
+				t.Fatalf("isSeaVaultProcess = %v, want %v", got, tt.want)
 			}
 		})
 	}

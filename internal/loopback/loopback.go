@@ -16,15 +16,15 @@ import (
 // HostAllowed reports whether rawHost (an HTTP Host header value, which may
 // carry a port and/or IPv6 brackets) names this loopback listener.
 //
-// It allows: any IP that net.ParseIP considers loopback (127.0.0.0/8 and ::1,
-// including the IPv4-mapped form ::ffff:127.0.0.1); a NON-loopback IP literal
+// It allows: any IP that net.ParseIP considers loopback (127.0.0.0/8 and::1,
+// including the IPv4-mapped form::ffff:127.0.0.1); a NON-loopback IP literal
 // only when it matches an entry of extra (compared with net.IP.Equal when that
 // entry parses as an IP, else case-insensitively as a string); the name
 // "localhost" (case-insensitive); and any entry of extra (case-insensitive) for
 // name hosts. An empty or unparsable host is not allowed. No DNS lookups are
 // ever performed.
 //
-// Before II-1 this returned ip.IsLoopback() for ANY IP literal and returned
+// Before this returned ip.IsLoopback for ANY IP literal and returned
 // BEFORE consulting extra, so "--allow-host 192.168.1.5" was silently inert and
 // the documented --insecure-bind LAN workflow could not work. Honouring IP
 // entries STRENGTHENS the gate: loopback stays auto-allowed, a non-loopback IP is
@@ -66,7 +66,7 @@ func hostOnly(rawHost string) string {
 	if h == "" {
 		return ""
 	}
-	// net.SplitHostPort removes a trailing :port and, for bracketed IPv6 hosts,
+	// net.SplitHostPort removes a trailing:port and, for bracketed IPv6 hosts,
 	// the surrounding brackets.
 	if host, _, err := net.SplitHostPort(h); err == nil {
 		return host

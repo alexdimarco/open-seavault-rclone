@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// R10: on unix, atomicWriteFile fsyncs the containing directory after the
+// on unix, atomicWriteFile fsyncs the containing directory after the
 // rename, so the durable path is exercised for both a chunk write and a manifest
-// write (design D5.2, P3 atomicwrite-no-dir-fsync).
+// write (P3 atomicwrite-no-dir-fsync).
 func TestFsyncDirCalledForChunkAndManifestWrites(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
 	const pw = "password"

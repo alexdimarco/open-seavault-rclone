@@ -18,7 +18,7 @@ import (
 // combined output. A darwin-tagged test overrides it to assert the argv and the
 // command written to stdin without touching the real login keychain. Its
 // captured output is deliberately never woven into an error message (design
-// D8.1) so a desynchronised command stream cannot echo a secret fragment into a
+// ) so a desynchronised command stream cannot echo a secret fragment into a
 // log.
 var runSecurity = func(stdin string, args ...string) ([]byte, error) {
 	cmd := exec.Command("security", args...)
@@ -43,7 +43,7 @@ func Get(account string) (string, error) {
 	return strings.TrimRight(string(out), "\r\n"), nil
 }
 
-// Set stores the password without ever placing it in argv (design D8.1, I5): the
+// Set stores the password without ever placing it in argv (I5): the
 // add-generic-password command — with the secret in a `-w` argument — is written
 // to `security -i` on stdin, and argv is exactly ["security","-i"]. A secret or
 // account with a control byte is refused before any exec (the line-oriented

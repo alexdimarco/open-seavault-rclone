@@ -14,7 +14,7 @@ import (
 )
 
 // The 0.15.0 fixture commit: the last release-line commit whose binary this
-// version must stay format-compatible with (invariant I1). It creates hidden
+// version must stay format-compatible with. It creates hidden
 // .seavault vaults.
 const legacy015Commit = "ab64d05"
 
@@ -29,12 +29,13 @@ func runFixtureCmd(t *testing.T, dir string, env []string, name string, args ...
 	return string(out), err
 }
 
-// R4 / I1 (P0-4, §12): build the 0.15.0 binary from commit ab64d05 and prove
-// BOTH directions of the compatibility boundary. Forward: a .seavault vault the
+//	/ I1: build the 0.15.0 binary from commit ab64d05 and prove
+//
+// BOTH directions of the compatibility boundary. Forward: a.seavault vault the
 // 0.15.0 binary created is opened, read, and written by this version, and the
 // 0.15.0 binary still reads it after this version wrote to it. Reverse: a vault
 // this version creates (visible SeaVaultData) is NOT located by the 0.15.0
-// binary, which reports "no vault" — the intended one-way boundary (D1.3). The
+// binary, which reports "no vault" — the intended one-way boundary. The
 // test skips only when git is unavailable.
 func TestCrossVersion015Fixture(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
@@ -56,7 +57,7 @@ func TestCrossVersion015Fixture(t *testing.T) {
 	// A shallow or partial clone (a common CI default; this repo's CI fetches
 	// nothing and runs offline) may not contain the fixture commit. Probe for it
 	// and SKIP legibly rather than letting `git worktree add` turn a missing
-	// environmental precondition into a red gate (friction Cold C6). This matches
+	// environmental precondition into a red gate (C6). This matches
 	// the git/go LookPath skip pattern above and the repo's "red = the code is
 	// wrong" discipline.
 	if out, err := runFixtureCmd(t, repoRoot, os.Environ(), "git", "cat-file", "-e", legacy015Commit+"^{commit}"); err != nil {
@@ -79,13 +80,13 @@ func TestCrossVersion015Fixture(t *testing.T) {
 	const pw = "correct horse battery staple"
 	pwEnv := append(os.Environ(), "SEAVAULT_PASSWORD="+pw, "SEAVAULT_APP_HOME="+t.TempDir())
 
-	// ---- Forward: 0.15.0 creates a .seavault vault; this version opens it. ----
+	// ---- Forward: 0.15.0 creates a.seavault vault; this version opens it. ----
 	oldVault := filepath.Join(t.TempDir(), "oldvault")
 	if out, err := runFixtureCmd(t, "", pwEnv, oldBin, "init", "--kdf", "pbkdf2", "--pbkdf2-iterations", "1000", oldVault); err != nil {
 		t.Fatalf("0.15.0 init: %v\n%s", err, out)
 	}
 	if !fileExists(filepath.Join(oldVault, ".seavault", "vault.json")) {
-		t.Fatal("the 0.15.0 binary must create a hidden .seavault vault")
+		t.Fatal("the 0.15.0 binary must create a hidden.seavault vault")
 	}
 	src := filepath.Join(t.TempDir(), "hello.txt")
 	if err := os.WriteFile(src, []byte("cross-version payload"), 0o600); err != nil {
@@ -98,10 +99,10 @@ func TestCrossVersion015Fixture(t *testing.T) {
 	// This version opens the 0.15.0 vault and reads the file back unchanged.
 	v, err := Open(oldVault, pw)
 	if err != nil {
-		t.Fatalf("this version must open a 0.15.0 .seavault vault (invariant I1): %v", err)
+		t.Fatalf("this version must open a 0.15.0.seavault vault: %v", err)
 	}
 	if filepath.Base(v.MetaRoot) != ".seavault" {
-		t.Fatalf("MetaRoot must resolve to the legacy .seavault dir, got %q", v.MetaRoot)
+		t.Fatalf("MetaRoot must resolve to the legacy.seavault dir, got %q", v.MetaRoot)
 	}
 	var buf bytes.Buffer
 	if err := v.WriteFileTo("hello.txt", &buf); err != nil {
@@ -127,7 +128,7 @@ func TestCrossVersion015Fixture(t *testing.T) {
 		t.Fatalf("0.15.0 list must show both the original and the new file; got:\n%s", listOut)
 	}
 
-	// ---- I1 / Condition 4: this version rotates the password; the 0.15.0 binary
+	// ---- I1 / the review: this version rotates the password; the 0.15.0 binary
 	// STILL opens the vault with the NEW password (the legacy WrappedKeys wrap is
 	// kept current and Version stays 2), and the OLD password no longer opens. This
 	// proves an A2 password rotation does not lock out a grace-release peer. ----
@@ -147,7 +148,7 @@ func TestCrossVersion015Fixture(t *testing.T) {
 	newPWEnv := append(os.Environ(), "SEAVAULT_PASSWORD="+newPW, "SEAVAULT_APP_HOME="+t.TempDir())
 	listAfterRotate, err := runFixtureCmd(t, "", newPWEnv, oldBin, "list", oldVault)
 	if err != nil {
-		t.Fatalf("the 0.15.0 binary must STILL open the vault with the new password after an A2 rotation (legacy wrap kept current, Condition 4): %v\n%s", err, listAfterRotate)
+		t.Fatalf("the 0.15.0 binary must STILL open the vault with the new password after an A2 rotation (legacy wrap kept current, ): %v\n%s", err, listAfterRotate)
 	}
 	if !strings.Contains(listAfterRotate, "hello.txt") || !strings.Contains(listAfterRotate, "added.txt") {
 		t.Fatalf("the 0.15.0 binary must read both files after the rotation; got:\n%s", listAfterRotate)
@@ -173,7 +174,7 @@ func TestCrossVersion015Fixture(t *testing.T) {
 	if refErr == nil {
 		t.Fatalf("the 0.15.0 binary must NOT locate a SeaVaultData vault, but list succeeded:\n%s", refusedOut)
 	}
-	// Documented outcome (D1.3): the 0.15.0 binary looks only for .seavault, so it
+	// Documented outcome: the 0.15.0 binary looks only for.seavault, so it
 	// reports the metadata as absent rather than corrupting anything. The exact
 	// message is a not-found error on <root>/.seavault/vault.json.
 	if !strings.Contains(strings.ToLower(refusedOut), ".seavault") && !strings.Contains(strings.ToLower(refusedOut), "no such file") && !strings.Contains(strings.ToLower(refusedOut), "not found") {

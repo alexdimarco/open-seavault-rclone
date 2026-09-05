@@ -133,13 +133,13 @@ func conflictPathsOf(files map[string]FileRecord, base string) []string {
 	return out
 }
 
-// --- R9: 3+ concurrent writers, dominance, content-key winner, fallback -------
+// ---: 3+ concurrent writers, dominance, content-key winner, fallback -------
 
-// TestConcurrentAntichainConvergesToOneWinner is R9's core: three concurrent
+// TestConcurrentAntichainConvergesToOneWinner is 's core: three concurrent
 // writers with disjoint vector clocks form a 3-record antichain. Reconciliation
 // keeps ALL three (none dominates), elects exactly ONE canonical winner by the
 // device-independent content key, and materialises the rest as conflicts — and
-// the choice is invariant under the load/WalkDir order (Condition 2). The shuffle
+// the choice is invariant under the load/WalkDir order. The shuffle
 // is the proof the winner is content-chosen, never filename- or sort-order-chosen.
 func TestConcurrentAntichainConvergesToOneWinner(t *testing.T) {
 	const p = "content/doc.txt"
@@ -196,7 +196,7 @@ func TestConcurrentAntichainConvergesToOneWinner(t *testing.T) {
 	}
 }
 
-// TestDominatingClockSupersedesCleanly is R9's dominance leg: a record whose
+// TestDominatingClockSupersedesCleanly is 's dominance leg: a record whose
 // clock DOMINATES another (the same lineage re-edited) supersedes it cleanly —
 // planned removal, no conflict copy. This is the A2 improvement over A1, which
 // kept every live loser as a spurious conflict.
@@ -217,7 +217,7 @@ func TestDominatingClockSupersedesCleanly(t *testing.T) {
 	}
 }
 
-// TestNoClockRecordsUseGenerationFallback is R9's fallback leg: two records with
+// TestNoClockRecordsUseGenerationFallback is 's fallback leg: two records with
 // NO vector clock (a 0.16-written pair) reconcile by the A1 Generation order —
 // the higher generation wins the slot, the other survives as a conflict — never
 // by dominance (there is no clock to dominate with).
@@ -238,7 +238,7 @@ func TestNoClockRecordsUseGenerationFallback(t *testing.T) {
 	}
 }
 
-// TestConcurrentAntichainConvergesEndToEnd stages the R9 scenario as real on-disk
+// TestConcurrentAntichainConvergesEndToEnd stages the scenario as real on-disk
 // manifests and reloads the vault, proving the pure-function convergence holds
 // through the actual load/reconcile path (winner live at the path, two conflicts).
 func TestConcurrentAntichainConvergesEndToEnd(t *testing.T) {
@@ -272,9 +272,9 @@ func TestConcurrentAntichainConvergesEndToEnd(t *testing.T) {
 	}
 }
 
-// --- R10: delete-vs-edit under vector clocks ----------------------------------
+// ---: delete-vs-edit under vector clocks ----------------------------------
 
-// TestDeleteVsEditUnderClocks is R10. Concurrent delete and edit (disjoint
+// TestDeleteVsEditUnderClocks is. Concurrent delete and edit (disjoint
 // clocks): the path is deleted AND the edit is preserved as a conflict. A delete
 // whose clock DOMINATES the edit (the deleter saw it): a clean delete, no
 // conflict. The generation/deletedGeneration fallback must NOT override the
@@ -319,7 +319,7 @@ func TestDeleteVsEditUnderClocks(t *testing.T) {
 	})
 }
 
-// TestDeleteVsEditConcurrentEndToEnd stages R10's concurrent case as real on-disk
+// TestDeleteVsEditConcurrentEndToEnd stages 's concurrent case as real on-disk
 // manifests through a full reload: the path is absent (deleted) and the peer's
 // concurrent edit survives as a conflict entry with its chunk.
 func TestDeleteVsEditConcurrentEndToEnd(t *testing.T) {
@@ -353,7 +353,7 @@ func TestDeleteVsEditConcurrentEndToEnd(t *testing.T) {
 	}
 }
 
-// --- Clock aging (D4.4) -------------------------------------------------------
+// --- Clock aging -------------------------------------------------------
 
 // TestClockAgesOutStaleEntry proves the aging horizon: a foreign clock entry that
 // does not advance across clockAgeCompactions local writes of a record is dropped
@@ -471,7 +471,7 @@ func TestActivePeerSurvivesAging(t *testing.T) {
 }
 
 // TestDeviceIDStableAcrossOpens proves a vault reads the same stable writer key
-// across reopens (design D4.1): the vector clock's identity must not churn.
+// across reopens: the vector clock's identity must not churn.
 func TestDeviceIDStableAcrossOpens(t *testing.T) {
 	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
 	root := filepath.Join(t.TempDir(), "vault")

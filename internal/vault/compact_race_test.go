@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// Regression for integrity/F3-compact-races-concurrent-commit-loses-edit.
+// Regression for.
 //
 // Compact holds v.mu across plan+mutate and removes each conflict loser by its
 // plan-time Source (compact.go). commitFileManifest must therefore perform its
@@ -21,7 +21,7 @@ import (
 // commit that rewrites the canonical manifest — after Compact computed a plan in
 // which the canonical file is the loser it will remove, but before the remove —
 // lands the new edit on disk exactly where Compact then deletes it. The edit is
-// silently lost (invariant I4: "a concurrent edit is never silently lost").
+// silently lost (: "a concurrent edit is never silently lost").
 //
 // This models the interleaving deterministically: a synced sync-conflict sibling
 // outranks the local canonical (making the canonical the loser Compact removes),

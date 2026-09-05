@@ -13,7 +13,7 @@ import (
 
 // TestSyncWatcherPicksUpExternalChange verifies the GUI server's background
 // watcher refreshes the open vault when another process (simulating the
-// Nextcloud sync client) writes into .seavault underneath it.
+// Nextcloud sync client) writes into.seavault underneath it.
 func TestSyncWatcherPicksUpExternalChange(t *testing.T) {
 	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
 	s, err := New("")

@@ -41,7 +41,7 @@ func TestMain(m *testing.M) {
 
 // newTestSession inserts a GUI session into s and returns the cookie that names
 // it. Every GUI request (except the Host-guard probe and the launch redemption)
-// now needs one; the shared helpers attach one automatically. See design §9.
+// now needs one; the shared helpers attach one automatically. See.
 func newTestSession(s *Server, loggedIn bool) *http.Cookie {
 	id, err := randomToken()
 	if err != nil {
@@ -549,7 +549,7 @@ func davRequest(t *testing.T, s *Server, method, virtualPath string, body *bytes
 	req := httptest.NewRequest(method, urlPath, body)
 	// The embedded localdav server enforces a loopback Host allowlist; drive it
 	// under a loopback Host as a real GUI client would. /dav uses the distinct
-	// davToken, not the CSRF token (design D4.1). A session cookie is attached
+	// davToken, not the CSRF token. A session cookie is attached
 	// so the flow also holds when a GUI password is configured.
 	req.Host = "127.0.0.1"
 	req.AddCookie(newTestSession(s, true))
@@ -631,7 +631,7 @@ func TestIntegratedWebDAVFileManagerSmoke(t *testing.T) {
 	if rr.Code != http.StatusOK || rr.Body.String() != "alpha" {
 		t.Fatalf("GET moved failed: %d %q", rr.Code, rr.Body.String())
 	}
-	// Export ZIP now goes through a single-use ticket (design D4.2): the CSRF
+	// Export ZIP now goes through a single-use ticket: the CSRF
 	// token no longer rides in the download URL.
 	ticketRR := postJSON(t, s, "/api/export-zip/ticket", map[string]any{"path": "docs"})
 	if ticketRR.Code != http.StatusOK {
@@ -675,11 +675,11 @@ func TestIntegratedWebDAVSecurityControls(t *testing.T) {
 
 	rr := davRequest(t, s, http.MethodPut, ".SeAvAuLt/evil", bytes.NewReader([]byte("x")), nil)
 	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected case-insensitive .seavault rejection, got %d %s", rr.Code, rr.Body.String())
+		t.Fatalf("expected case-insensitive.seavault rejection, got %d %s", rr.Code, rr.Body.String())
 	}
 	rr = davRequest(t, s, http.MethodPut, ".seavault/evil", bytes.NewReader([]byte("x")), nil)
 	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected .seavault rejection, got %d %s", rr.Code, rr.Body.String())
+		t.Fatalf("expected.seavault rejection, got %d %s", rr.Code, rr.Body.String())
 	}
 	rr = davRequest(t, s, http.MethodPut, "../evil", bytes.NewReader([]byte("x")), nil)
 	if rr.Code != http.StatusBadRequest {
@@ -717,7 +717,7 @@ func TestGuiAuthShowsLoginLandingAndProtectsAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// DEVIATION (R3/D3.3 step 4): with a GUI password set, GET / WITHOUT a
+	// DEVIATION (/ step 4): with a GUI password set, GET / WITHOUT a
 	// session is now the static 403 page, not the login form. The old assertion
 	// (auth-off/landing showed the login page without a session) contradicted the
 	// new "everything needs a session" rule, so it is inverted here.
@@ -842,7 +842,7 @@ func TestResetConfigClearsGuiAuthAndConfig(t *testing.T) {
 	}
 	cookie := newTestSession(s, true)
 
-	// DEVIATION (R4/D5): a bare POST confirm=RESET no longer resets. The reset
+	// DEVIATION (/D5): a bare POST confirm=RESET no longer resets. The reset
 	// must carry a nonce minted by the GET page, so drive the page-then-post flow.
 	nonce := getResetNonce(t, s, cookie)
 	form := url.Values{"confirm": {"RESET"}, "nonce": {nonce}}
@@ -918,7 +918,7 @@ func TestResetConfigRequiresNonceAndSameSite(t *testing.T) {
 	}
 }
 
-// TestHostGuardRejectsForeignHost covers the webui half of R2 (design D1.2/D3.5):
+// TestHostGuardRejectsForeignHost covers the webui half of:
 // a foreign Host is rejected on the app, the API and the WebDAV mount, while
 // loopback names and the configured extra Host are accepted for both / and /dav.
 func TestHostGuardRejectsForeignHost(t *testing.T) {
@@ -971,7 +971,7 @@ func TestHostGuardRejectsForeignHost(t *testing.T) {
 	}
 }
 
-// TestLaunchSecretCreatesSession covers R3 (design D3.2/D3.3): / without a
+// TestLaunchSecretCreatesSession covers: / without a
 // session is a 403 page that never leaks the CSRF token; ?redeemed=1 shows the
 // cookie-blocked variant; a wrong launch secret is 403; the right one sets a
 // session cookie and 302s to /?redeemed=1, after which / renders.
@@ -1040,7 +1040,7 @@ func TestLaunchSecretCreatesSession(t *testing.T) {
 	}
 }
 
-// TestDistinctWebDAVAndExportTokens covers R5 (design D4): the CSRF token is not
+// TestDistinctWebDAVAndExportTokens covers: the CSRF token is not
 // a WebDAV token, the davToken is; the legacy ?token= export form is gone; the
 // ticket flow works exactly once.
 func TestDistinctWebDAVAndExportTokens(t *testing.T) {
@@ -1110,7 +1110,7 @@ func TestDistinctWebDAVAndExportTokens(t *testing.T) {
 	}
 }
 
-// TestLogSaveRejectedByForeignHost covers R13 (design D1.2/P1-13): a POST with a
+// TestLogSaveRejectedByForeignHost covers: a POST with a
 // valid CSRF token but a foreign Host is 403 and writes nothing.
 func TestLogSaveRejectedByForeignHost(t *testing.T) {
 	s, err := New("")
@@ -1137,8 +1137,8 @@ func TestLogSaveRejectedByForeignHost(t *testing.T) {
 	}
 }
 
-// TestBrowserHeartbeatExtendsExpiringSession covers the webui half of R14
-// (design D3.2): a session one second from expiry is slid forward 12h by a
+// TestBrowserHeartbeatExtendsExpiringSession covers the webui half of
+// : a session one second from expiry is slid forward 12h by a
 // heartbeat, because the session check refreshes the TTL before dispatch.
 func TestBrowserHeartbeatExtendsExpiringSession(t *testing.T) {
 	s, err := New("")
@@ -1169,7 +1169,7 @@ func TestBrowserHeartbeatExtendsExpiringSession(t *testing.T) {
 	}
 }
 
-// TestBrowserSessionDropsTokenQuery covers D3.4: the browser-session SSE stream
+// TestBrowserSessionDropsTokenQuery covers: the browser-session SSE stream
 // authenticates by the session cookie alone; it no longer requires ?token= and
 // no longer 403s when the query is absent.
 func TestBrowserSessionDropsTokenQuery(t *testing.T) {
@@ -1193,7 +1193,7 @@ func TestBrowserSessionDropsTokenQuery(t *testing.T) {
 }
 
 // insertSession inserts a GUI session with a controlled cookieIssued/expires and
-// returns the cookie naming it, so the cookie-re-issue behaviour (II-4) can be
+// returns the cookie naming it, so the cookie-re-issue behaviour can be
 // driven with a deliberately stale or fresh browser cookie.
 func insertSession(t *testing.T, s *Server, loggedIn bool, expires, issued time.Time) *http.Cookie {
 	t.Helper()
@@ -1207,7 +1207,7 @@ func insertSession(t *testing.T, s *Server, loggedIn bool, expires, issued time.
 	return &http.Cookie{Name: guiSessionCookie, Value: id}
 }
 
-// TestSessionCookieReissuedAsServerTTLSlides covers friction II-4 (design D3.2):
+// TestSessionCookieReissuedAsServerTTLSlides covers:
 // sessionOf slides the server-side expiry on every gated request, but the browser
 // cookie's Expires was written once at launch and never re-issued, so an actively
 // used tab was force-expired by the browser at launch+12h. A gated request on a
@@ -1304,7 +1304,7 @@ func TestSessionCookieReissuedAsServerTTLSlides(t *testing.T) {
 	})
 }
 
-// TestWebDAVStatusFlagsNativeClientsAndNote covers friction II-2 (design D3.3
+// TestWebDAVStatusFlagsNativeClientsAndNote covers (the design
 // step 3): with a GUI password set, /dav additionally requires a login cookie no
 // native client can present, so the copied WebDAV URL 401s for Finder/Explorer/
 // rclone. /api/webdav must report nativeClients=false and a note pointing at
@@ -1363,7 +1363,7 @@ func TestWebDAVStatusFlagsNativeClientsAndNote(t *testing.T) {
 	}
 }
 
-// TestNoSessionPageStatesPlainRecovery covers friction C2: the no-session 403
+// TestNoSessionPageStatesPlainRecovery covers: the no-session 403
 // page names the plain-language recovery step for an icon-launched owner.
 func TestNoSessionPageStatesPlainRecovery(t *testing.T) {
 	s, err := NewWithConfig("", appconfig.Config{Version: appconfig.Version, GUI: appconfig.GUIConfig{Protocol: "http"}})
@@ -1382,7 +1382,7 @@ func TestNoSessionPageStatesPlainRecovery(t *testing.T) {
 	}
 }
 
-// TestResetConfigSuccessLinksBackToApp covers friction C4: after a successful
+// TestResetConfigSuccessLinksBackToApp covers: after a successful
 // reset the primary button links back into the app through a fresh launch
 // redemption (sessions were cleared, so /login -> / would 403). The launch secret
 // must appear ONLY on the success page, never on the initial/failure page.
@@ -1432,7 +1432,7 @@ func TestResetConfigSuccessLinksBackToApp(t *testing.T) {
 	}
 }
 
-// R18 (design D4.4): POST /api/compact requires a session and a matching CSRF
+// POST /api/compact requires a session and a matching CSRF
 // token, runs Vault.Compact, and returns the report. A pure load performed by
 // the sync watcher (ReloadIfChanged) or any read materialises nothing on disk;
 // only the explicit /api/compact call does.
@@ -1448,7 +1448,7 @@ func TestApiCompactMaterialisesConflictWithSessionAndCSRF(t *testing.T) {
 	}
 
 	// Build a GENUINE pending conflict on disk behind the vault's back (design
-	// D4.2, P1-8): under the A2 vector clock a same-device re-edit is cleanly
+	// ): under the A2 vector clock a same-device re-edit is cleanly
 	// superseded, so a real conflict needs two DIFFERENT devices editing the path
 	// without seeing each other (disjoint clocks → concurrent → one canonical plus
 	// one *.conflict-* entry).
@@ -1502,7 +1502,7 @@ func TestApiCompactMaterialisesConflictWithSessionAndCSRF(t *testing.T) {
 	// Compact actually applied the plan on disk (not a dry run): the LOSER's source
 	// manifest is removed and re-materialised at the conflict name. Which of the
 	// two concurrent copies loses is content-key-chosen (never filename-chosen,
-	// design D4.2), so exactly one of the two original sources survives — the
+	// ), so exactly one of the two original sources survives — the
 	// winner keeps its file, the loser's is gone.
 	_, canonExists := os.Stat(canonicalSource)
 	_, sibExists := os.Stat(loserSource)
@@ -1524,7 +1524,7 @@ func manifestFileSet(t *testing.T, dir string) map[string]struct{} {
 }
 
 // stageConcurrentConflict stages a genuine causal conflict on disk for the
-// server's open vault (design D4.2, P1-8): a SECOND device installation edits
+// server's open vault: a SECOND device installation edits
 // virtualPath without seeing this device, so the two manifests carry disjoint
 // vector clocks and reconcile as CONCURRENT — kept as one canonical winner plus
 // one *.conflict-* entry — instead of one cleanly superseding the other (which a
@@ -1583,8 +1583,8 @@ func stageConcurrentConflict(t *testing.T, s *Server, virtualPath, pw, bodyA, bo
 	return docManifest, sibling
 }
 
-// --- STAGE B: fenced GUI gc (friction II-1), warning banner, pending-deletion
-// and conflict visibility, and scoped upload-error hint (A1 friction backlog).
+// --- STAGE B: fenced GUI gc, warning banner, pending-deletion
+// and conflict visibility, and scoped upload-error hint (A1).
 
 // metaFingerprint hashes every file under root (relative path, size, mtime, and
 // content) so a test can assert a code path wrote NOTHING in the metadata dir.
@@ -1672,7 +1672,7 @@ func makeGCCandidate(t *testing.T, v *vault.Vault) {
 	}
 }
 
-// II-1: POST /api/gc is gated by the session (a missing session is 403, before
+// POST /api/gc is gated by the session (a missing session is 403, before
 // any gc work) and only accepts POST (a GET is 405).
 func TestApiGCRequiresSessionAndPostMethod(t *testing.T) {
 	s, err := New("")
@@ -1699,7 +1699,7 @@ func TestApiGCRequiresSessionAndPostMethod(t *testing.T) {
 	}
 }
 
-// II-1: confirm=false is a dry run — it returns the unreferenced-chunk
+// confirm=false is a dry run — it returns the unreferenced-chunk
 // candidates and writes NOTHING in the metadata dir (fingerprint unchanged).
 func TestApiGCDryRunReturnsCandidatesWithoutWriting(t *testing.T) {
 	s, err := New("")
@@ -1736,7 +1736,7 @@ func TestApiGCDryRunReturnsCandidatesWithoutWriting(t *testing.T) {
 	}
 }
 
-// II-1: confirm=true writes deletion intents but removes NOTHING before the
+// confirm=true writes deletion intents but removes NOTHING before the
 // fence has elapsed (the intent, first-seen record, and chunk mtime are all
 // young), and the chunk objects survive.
 func TestApiGCConfirmWritesIntentsRemovesNothingBeforeFence(t *testing.T) {
@@ -1786,7 +1786,7 @@ func TestApiGCConfirmWritesIntentsRemovesNothingBeforeFence(t *testing.T) {
 	}
 }
 
-// II-1 / Cold C5: a sub-1h fence is clamped up to the 1h minimum and the
+// a sub-1h fence is clamped up to the 1h minimum and the
 // response explains the clamp (parity with the CLI fence notice).
 func TestApiGCClampsSubHourFenceInResponse(t *testing.T) {
 	s, err := New("")
@@ -1814,7 +1814,7 @@ func TestApiGCClampsSubHourFenceInResponse(t *testing.T) {
 	}
 }
 
-// Owner C1/C2: the index page carries a visible warnings banner element and the
+// /C2: the index page carries a visible warnings banner element and the
 // JS feeds res.warnings from init/open into it (not only into the JSON dump).
 func TestIndexSurfacesWarningsBanner(t *testing.T) {
 	s, err := New("")
@@ -1839,7 +1839,7 @@ func TestIndexSurfacesWarningsBanner(t *testing.T) {
 	}
 }
 
-// Owner C5: the Verify report renders a pending-deletions line from
+// the Verify report renders a pending-deletions line from
 // report.pendingIntents (GUI parity with the CLI's pending-gc-intents line).
 func TestIndexVerifyReportShowsPendingDeletions(t *testing.T) {
 	s, err := New("")
@@ -1863,7 +1863,7 @@ func TestIndexVerifyReportShowsPendingDeletions(t *testing.T) {
 	}
 }
 
-// Owner C4: a conflict entry carries conflictOf in the /api/files listing, and
+// a conflict entry carries conflictOf in the /api/files listing, and
 // the WebDAV file table renders a "conflict copy of <original>" badge from it.
 func TestConflictEntrySurfacesInListingAndDavBadge(t *testing.T) {
 	s, err := New("")
@@ -1874,7 +1874,7 @@ func TestConflictEntrySurfacesInListingAndDavBadge(t *testing.T) {
 	v := s.vault
 
 	// Build a GENUINE pending sync-conflict on disk behind the vault's back
-	// (design D4.2, P1-8): two DIFFERENT devices edit doc.txt without seeing each
+	// : two DIFFERENT devices edit doc.txt without seeing each
 	// other, so the copies carry disjoint vector clocks and reconcile as
 	// concurrent (a same-device re-edit would be cleanly superseded, no conflict).
 	stageConcurrentConflict(t, s, "doc.txt", "passphrase", "v1 device A", "v2 device B")
@@ -1917,7 +1917,7 @@ func TestConflictEntrySurfacesInListingAndDavBadge(t *testing.T) {
 	}
 }
 
-// Owner C3: the large-folder ingest hint is only composed onto size/limit upload
+// the large-folder ingest hint is only composed onto size/limit upload
 // errors, not name-validation errors — the browser-upload catch routes its
 // message through composeUploadError instead of unconditionally appending it.
 func TestUploadErrorHintScopedToSizeLimits(t *testing.T) {
@@ -1946,7 +1946,7 @@ func TestUploadErrorHintScopedToSizeLimits(t *testing.T) {
 	}
 }
 
-// TestGUIRecoveryRedeemWorksWhenLockedOut is the tombstone for friction II-1: the
+// TestGUIRecoveryRedeemWorksWhenLockedOut is the tombstone for: the
 // GUI recovery-redeem must work in the locked-out state it exists for (an owner
 // who forgot the password cannot open the vault first). Before the fix
 // handleRecoveryRedeem required s.vault != nil and returned 409 "no vault is open"
@@ -1988,7 +1988,7 @@ func TestGUIRecoveryRedeemWorksWhenLockedOut(t *testing.T) {
 		"newPassword": "a brand new vault password",
 	})
 	if rr.Code != http.StatusOK {
-		t.Fatalf("redeem when locked out must succeed (II-1), got %d %s", rr.Code, rr.Body.String())
+		t.Fatalf("redeem when locked out must succeed, got %d %s", rr.Code, rr.Body.String())
 	}
 	s.mu.Lock()
 	reopened := s.vault != nil

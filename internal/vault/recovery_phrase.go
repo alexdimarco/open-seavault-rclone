@@ -9,13 +9,13 @@ import (
 	"strings"
 )
 
-// recoveryPhraseBits is the entropy of a minted recovery secret (design D3.3,
-// P1-7): a fresh 256-bit value. 32 bytes of base32 (no padding) render as 52
+// recoveryPhraseBits is the entropy of a minted recovery secret (
+// ): a fresh 256-bit value. 32 bytes of base32 (no padding) render as 52
 // characters, grouped for legibility below.
 const recoveryPhraseBits = 256
 
 // recoveryGroupSize is the number of base32 characters per printed group. 52
-// characters split into 13 groups of 4 (design D3.3 "grouped phrase").
+// characters split into 13 groups of 4 (the design "grouped phrase").
 const recoveryGroupSize = 4
 
 // recoveryB32 is RFC 4648 base32 with padding stripped — cgo-free, zero-module
@@ -25,7 +25,7 @@ var recoveryB32 = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 // mintRecoverySecret draws a fresh 256-bit recovery value and returns both its
 // canonical wrap secret (the ungrouped base32 string fed to the KDF) and the
-// grouped display phrase shown to the owner once (design D3.3, Condition 12).
+// grouped display phrase shown to the owner once.
 // The random bytes never leave this function; only the derived strings do.
 func mintRecoverySecret() (secret, phrase string, err error) {
 	raw, err := randomBytes(recoveryPhraseBits / 8)
@@ -58,7 +58,7 @@ func groupRecovery(canon string) string {
 // upper-case, keep only the base32 alphabet (A–Z, 2–7), drop every space, dash,
 // or stray character. So "abcd efgh", "ABCD-EFGH", and "abcdefgh" all canonicalise
 // identically, and a recovery phrase read back or redeemed with different grouping
-// still derives the same wrap key (design D3.3).
+// still derives the same wrap key.
 func canonicalRecovery(s string) string {
 	var b strings.Builder
 	for _, r := range strings.ToUpper(s) {
@@ -73,8 +73,8 @@ func canonicalRecovery(s string) string {
 }
 
 // RecoveryPhraseMatches reports whether a read-back or redeemed phrase matches the
-// minted phrase after canonicalisation, compared in constant time (design D3.3,
-// Condition 12: the mandatory read-back). An empty canonical form never matches,
+// minted phrase after canonicalisation, compared in constant time (
+// the mandatory read-back). An empty canonical form never matches,
 // so an all-whitespace or empty read-back always aborts.
 func RecoveryPhraseMatches(minted, input string) bool {
 	want := canonicalRecovery(minted)

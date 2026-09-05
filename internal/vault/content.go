@@ -30,8 +30,8 @@ func NormalizeContentPath(input string) (string, error) {
 	// entrypoint (get, read, delete, export, overwrite). It must NOT reject a
 	// metadata-name segment here: an existing peer/legacy path that contains one
 	// (content/SeaVaultData/notes.txt) has to stay fully reachable — no existing
-	// file ever becomes unreachable or uneditable (design D7.1, finding peer/F3).
-	// The "neither name can be CREATED as a virtual path" rule of D1.2 is a
+	// file ever becomes unreachable or uneditable.
+	// The "neither name can be CREATED as a virtual path" rule of is a
 	// new-path-only gate (reservedNewPathError), applied by the create
 	// entrypoints beside the portable-name gate, never on this shared path.
 	if vp == ContentRootName || strings.HasPrefix(vp, ContentRootName+"/") {
@@ -42,13 +42,13 @@ func NormalizeContentPath(input string) (string, error) {
 
 // reservedNewPathError reports an error when a NEW virtual path names a segment
 // this version will not create — either metadata dir name (SeaVaultData,
-// .seavault) or the directory marker (design D1.2). It is a create-time POLICY
+// .seavault) or the directory marker. It is a create-time POLICY
 // gate applied ONLY when the target does not yet exist in the index: an existing
 // peer/legacy path that already carries such a segment stays reachable —
-// readable, gettable, exportable, overwritable and deletable (design D7.1,
-// finding peer/F3). Firing this on an existing path is exactly the F3
+// readable, gettable, exportable, overwritable and deletable (
+// ). Firing this on an existing path is exactly the F3
 // regression, so callers guard it with an idx.Files existence check, the same
-// shape the ValidatePortableName gate uses (backlog B6).
+// shape the ValidatePortableName gate uses.
 func reservedNewPathError(vp string) error {
 	if ReservedContentSegment(vp) {
 		return fmt.Errorf("reserved virtual path %q is not allowed", vp)
@@ -57,12 +57,12 @@ func reservedNewPathError(vp string) error {
 }
 
 // ReservedContentSegment reports whether a normalized content path names a
-// segment design D1.2 forbids CREATING — a metadata dir name (SeaVaultData or
+// segment the design forbids CREATING — a metadata dir name (SeaVaultData or
 // .seavault) or the directory marker. Boundary layers that create paths (the
 // WebDAV PUT/MKCOL/MOVE/COPY destinations, the webui upload/rename) call it to
 // refuse a NEW reserved destination with a clean client error, while an EXISTING
 // reserved path a peer or legacy client created stays reachable for read, get,
-// export and delete (design D7.1, finding peer/F3). It expects an
+// export and delete. It expects an
 // already-normalized content path (see NormalizeContentPath).
 func ReservedContentSegment(vp string) bool {
 	return containsReservedSegment(vp)
@@ -95,18 +95,18 @@ func normalizeContentDirPath(input string) (string, error) {
 
 // containsReservedSegment reports whether any segment of a virtual path is a
 // name this version will not CREATE: the directory marker or either metadata dir
-// name (design D1.2). It backs the create-time gate (reservedNewPathError) only.
+// name. It backs the create-time gate (reservedNewPathError) only.
 // It is deliberately NOT used to classify an EXISTING path as internal or to
 // reject reads/mutates — an existing metadata-name content path is ordinary,
-// reachable content (design D7.1, finding peer/F3), and the genuinely internal
+// reachable content, and the genuinely internal
 // artifact is the directory marker, recognised on its own by IsInternalVirtualPath.
 func containsReservedSegment(vp string) bool {
 	for _, seg := range strings.Split(vp, "/") {
 		if strings.EqualFold(seg, DirectoryMarkerName) {
 			return true
 		}
-		// Reject EITHER metadata directory name (design D1.2): neither SeaVaultData
-		// nor .seavault may be created as a virtual path segment.
+		// Reject EITHER metadata directory name: neither SeaVaultData
+		// nor.seavault may be created as a virtual path segment.
 		if isMetadataDirName(seg) {
 			return true
 		}
@@ -124,7 +124,7 @@ func IsDirectoryMarkerPath(vp string) bool {
 // such artifact is the empty-directory marker (<dir>/.seavault-dir). A path
 // whose segment merely equals a metadata dir name (content/SeaVaultData/…) is
 // NOT internal — it is ordinary content a peer or another-OS client created and
-// stays fully visible and reachable (design D7.1, finding peer/F3). Treating it
+// stays fully visible and reachable. Treating it
 // as internal is what silently vanished the file from `list` and export.
 func IsInternalVirtualPath(vp string) bool {
 	if vp == "" {

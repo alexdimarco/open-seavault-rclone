@@ -199,7 +199,7 @@ func (f *FileReader) ModTime() time.Time { return f.modTime }
 // its own earlier index snapshot uses this to re-derive the validator from the
 // generation whose bytes the reader actually serves, closing the window where a
 // same-path overwrite between the two snapshots would label new bytes with the
-// old generation's validator (localdav finding IC-3).
+// old generation's validator (localdav).
 func (f *FileReader) Generation() int64 { return f.rec.Generation }
 
 // Close releases the reader's one-chunk cache. It is idempotent.
@@ -220,9 +220,9 @@ func (f *FileReader) Close() error {
 // stale cached "present" verdict would otherwise leave open: a chunk removed
 // after the presence sweep (external sync or GC) surfaces as a clean
 // ErrChunksPending here instead of truncating an already-committed 200 in
-// http.ServeContent (finding IC-2). Chunks resident in Cache are not stat-ed:
+// http.ServeContent. Chunks resident in Cache are not stat-ed:
 // they are served from memory regardless of the on-disk object. A caller wanting
-// the whole file re-verified passes off=0, length=Size().
+// the whole file re-verified passes off=0, length=Size.
 func (f *FileReader) VerifyChunkPresence(off, length int64) error {
 	if off < 0 {
 		off = 0

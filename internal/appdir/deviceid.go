@@ -14,7 +14,7 @@ import (
 )
 
 // deviceIDFileName is the device-identity store's basename. It lives directly
-// under appdir.DataDir (design D4.1, P1-8, Condition 11) — NOT inside
+// under appdir.DataDir — NOT inside
 // appconfig.json — so a config reset (which os.Removes appconfig.json) does not
 // regenerate it and the per-record vector clock keeps a stable writer identity
 // across resets. It is the same durability tier as the gc-seen and vault-anchor
@@ -54,14 +54,14 @@ func validDeviceID(s string) bool {
 }
 
 // DeviceID returns this installation's stable device identifier, creating and
-// persisting it on first use (design D4.1, P1-8, Condition 11). The value is a
+// persisting it on first use. The value is a
 // random 16-byte quantity rendered as 32 lowercase hex characters. It is the
 // writer key of the per-record vector clock: it must be stable across app
 // restarts and across a config reset, so it is stored under appdir.DataDir
 // (which the reset flows never touch), not in appconfig.json.
 //
 // A reinstall or an app-data wipe legitimately mints a NEW id — a returning
-// device with a fresh id is a genuine new causal writer (design D4.4), so this
+// device with a fresh id is a genuine new causal writer, so this
 // loses no data; it only grows the clock by one entry, which aging prunes.
 //
 // Creation is best-effort against a concurrent second process: after writing its

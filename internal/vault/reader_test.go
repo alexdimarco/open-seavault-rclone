@@ -15,7 +15,7 @@ import (
 
 // pseudoRandomBytes returns n deterministic, well-varied bytes so the
 // content-defined chunker splits an input of a few KB into many small chunks
-// under testParams() {64,128,256}.
+// under testParams {64,128,256}.
 func pseudoRandomBytes(n int) []byte {
 	b := make([]byte, n)
 	x := uint32(0x12345678)
@@ -86,7 +86,7 @@ func TestFileReaderReadAt(t *testing.T) {
 
 	size := fr.Size()
 	if size != int64(len(data)) {
-		t.Fatalf("Size() = %d, want %d", size, len(data))
+		t.Fatalf("Size = %d, want %d", size, len(data))
 	}
 	offs := fr.offsets
 	if len(offs) < 5 {
@@ -273,13 +273,13 @@ func TestFileReaderModTimeAndClose(t *testing.T) {
 	}
 	want := time.Unix(readerTestModUnix, 0).UTC()
 	if !fr.ModTime().Equal(want) {
-		t.Fatalf("ModTime() = %v, want %v", fr.ModTime(), want)
+		t.Fatalf("ModTime = %v, want %v", fr.ModTime(), want)
 	}
 	if fr.Size() != int64(len(data)) {
-		t.Fatalf("Size() = %d, want %d", fr.Size(), len(data))
+		t.Fatalf("Size = %d, want %d", fr.Size(), len(data))
 	}
 	if err := fr.Close(); err != nil {
-		t.Fatalf("Close() = %v", err)
+		t.Fatalf("Close = %v", err)
 	}
 	if _, err := fr.ReadAt(make([]byte, 1), 0); err == nil {
 		t.Fatal("ReadAt after Close should fail")

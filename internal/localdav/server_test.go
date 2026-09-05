@@ -64,7 +64,7 @@ func chunksDir(v *vault.Vault) string {
 	return filepath.Join(v.MetaRoot, "objects", "chunks")
 }
 
-// ---- R1: seavault serve authentication -------------------------------------
+// ----: seavault serve authentication -------------------------------------
 
 func TestBasicAuthRequiredAndEnforced(t *testing.T) {
 	v := newTestVault(t)
@@ -114,7 +114,7 @@ func TestBasicAuthRequiredAndEnforced(t *testing.T) {
 	}
 }
 
-// ---- R2: Host allowlist (localdav half) ------------------------------------
+// ----: Host allowlist (localdav half) ------------------------------------
 
 func TestHostGuard(t *testing.T) {
 	v := newTestVault(t)
@@ -164,7 +164,7 @@ func TestHostGuard(t *testing.T) {
 	}
 }
 
-// ---- R6: Range reads via ServeContent --------------------------------------
+// ----: Range reads via ServeContent --------------------------------------
 
 func TestRangeAndHeadViaServeContent(t *testing.T) {
 	v := newTestVault(t)
@@ -227,7 +227,7 @@ func TestPendingChunkYields409(t *testing.T) {
 	}
 }
 
-// ---- R8: COPY honours Overwrite --------------------------------------------
+// ----: COPY honours Overwrite --------------------------------------------
 
 func TestCopyOverwriteSemantics(t *testing.T) {
 	v := newTestVault(t)
@@ -267,7 +267,7 @@ func TestCopyOverwriteSemantics(t *testing.T) {
 	}
 }
 
-// ---- R9: MKCOL missing parent / MOVE of a marker-only dir ------------------
+// ----: MKCOL missing parent / MOVE of a marker-only dir ------------------
 
 func TestMkcolMissingParent409(t *testing.T) {
 	v := newTestVault(t)
@@ -304,7 +304,7 @@ func TestMoveMarkerOnlyDirectory(t *testing.T) {
 	}
 }
 
-// ---- R10: PROPFIND Depth: infinity -----------------------------------------
+// ----: PROPFIND Depth: infinity -----------------------------------------
 
 func TestPropfindDepthInfinityForbidden(t *testing.T) {
 	v := newTestVault(t)
@@ -324,7 +324,7 @@ func TestPropfindDepthInfinityForbidden(t *testing.T) {
 	}
 }
 
-// ---- R11: opt-in OS junk dropping ------------------------------------------
+// ----: opt-in OS junk dropping ------------------------------------------
 
 func TestDropOSJunk(t *testing.T) {
 	// DropOSJunk on: PUT is a no-op 201; DELETE 204; GET 404; nothing stored.
@@ -366,11 +366,11 @@ func TestDropOSJunk(t *testing.T) {
 		}
 	}
 	if !stored {
-		t.Fatal("default policy should store .DS_Store")
+		t.Fatal("default policy should store.DS_Store")
 	}
 }
 
-// ---- R12: write-inactivity deadline armed on the stream --------------------
+// ----: write-inactivity deadline armed on the stream --------------------
 
 // deadlineRecorder is an httptest recorder that also satisfies the
 // SetWriteDeadline seam used by http.ResponseController, recording how many
@@ -409,16 +409,16 @@ func TestWriteDeadlineArmedPerWrite(t *testing.T) {
 	}
 }
 
-// ---- R16: read-inactivity deadline armed on the PUT body -------------------
+// ----: read-inactivity deadline armed on the PUT body -------------------
 
-// readDeadlineRecorder is the PUT-side counterpart to deadlineRecorder (R12):
+// readDeadlineRecorder is the PUT-side counterpart to deadlineRecorder:
 // an httptest recorder that also satisfies the SetReadDeadline seam used by
 // http.ResponseController, recording how many times the read deadline is
 // (re)armed as the request body is consumed. handlePut wraps r.Body in a
 // deadlineReader whose Read first calls SetReadDeadline via
 // http.NewResponseController(w), so a stalled/slow uploader is cut after
-// bodyInactivity (design D6.2, pre-code Condition C2). Without that wrap this
-// seam is never touched and calls() stays 0.
+// bodyInactivity (pre-code Condition C2). Without that wrap this
+// seam is never touched and calls stays 0.
 type readDeadlineRecorder struct {
 	*httptest.ResponseRecorder
 	mu       sync.Mutex
@@ -438,10 +438,10 @@ func (d *readDeadlineRecorder) calls() int {
 	return d.setCalls
 }
 
-// TestReadDeadlineArmedPerRead is the tombstone for the PUT half of D6.2/C2:
+// TestReadDeadlineArmedPerRead is the tombstone for the PUT half of /C2:
 // a PUT whose uploader stalls has its read deadline armed as the body is read.
 // Neutralize by dropping the deadlineReader wrap in handlePut (pass r.Body
-// straight to PutReader) and this fails with calls()==0.
+// straight to PutReader) and this fails with calls==0.
 func TestReadDeadlineArmedPerRead(t *testing.T) {
 	v := newTestVault(t)
 	s := &Server{Vault: v}
@@ -469,7 +469,7 @@ func TestReadDeadlineArmedPerRead(t *testing.T) {
 	}
 }
 
-// ---- R14: a streaming GET does not block a concurrent PROPFIND -------------
+// ----: a streaming GET does not block a concurrent PROPFIND -------------
 
 // blockingRecorder blocks the first body Write until release is closed, after
 // signalling started.
@@ -530,7 +530,7 @@ func TestStreamingGetDoesNotBlockPropfind(t *testing.T) {
 	<-getDone
 }
 
-// ---- R15: presence/stat cache and shared chunk cache -----------------------
+// ----: presence/stat cache and shared chunk cache -----------------------
 
 // withOpenCounter wraps the presence-checking open seam and returns a pointer
 // to the number of stat sweeps performed.
@@ -774,11 +774,11 @@ func TestGetEtagMatchesServedGeneration(t *testing.T) {
 	// snapshotted.
 	got := rr.Header().Get("ETag")
 	if got == etagG1 {
-		t.Fatalf("IC-3: response served generation-2 bytes %q under the stale generation-1 ETag %s; "+
+		t.Fatalf("IC-3: response served generation-2 bytes %q under the stale generation-1 ETag %s;"+
 			"an If-Range resume would stitch new content onto old bytes under a matching validator", body, etagG1)
 	}
 	if got != etagG2 {
-		t.Fatalf("IC-3: response ETag %q matches neither the served generation-2 record etag %s; "+
+		t.Fatalf("IC-3: response ETag %q matches neither the served generation-2 record etag %s;"+
 			"the validator must describe the bytes it labels", got, etagG2)
 	}
 }

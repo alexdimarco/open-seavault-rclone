@@ -39,10 +39,10 @@ func TestEnsureLoopbackBind(t *testing.T) {
 	}
 }
 
-// TestResolveServeCredentials covers the D2.2 password-source precedence
+// TestResolveServeCredentials covers the password-source precedence
 // (--password-file > SEAVAULT_SERVE_PASSWORD > generated), the generated-password
 // shape, and the --quiet-credentials rules (error without a source; suppress the
-// echo with a source). Regression R14 (cmd half). Every row is asserted.
+// echo with a source). Regression (cmd half). Every row is asserted.
 func TestResolveServeCredentials(t *testing.T) {
 	dir := t.TempDir()
 	fileWins := filepath.Join(dir, "pw-file-wins")
@@ -135,8 +135,8 @@ func TestResolveServeCredentialsGeneratedUnique(t *testing.T) {
 	}
 }
 
-// TestBuildLoopbackServer asserts the D6.1 header/idle timeouts are armed on the
-// http.Server used by serve and gui. Regression R12 (cmd half).
+// TestBuildLoopbackServer asserts the header/idle timeouts are armed on the
+// http.Server used by serve and gui. Regression (cmd half).
 func TestBuildLoopbackServer(t *testing.T) {
 	handler := localdavHandlerStub{}
 	srv := buildLoopbackServer("127.0.0.1:0", handler)
@@ -158,7 +158,7 @@ type localdavHandlerStub struct{}
 
 func (localdavHandlerStub) ServeHTTP(_ http.ResponseWriter, _ *http.Request) {}
 
-// TestListenErrorHint (II-3, friction Owner C5): now that `seavault gui` no
+// TestListenErrorHint (, C5): now that `seavault gui` no
 // longer SIGKILLs other seavault processes, a second listener on a bound address
 // fails to bind, and the operator must be told the port is taken. A real bind
 // conflict is provoked by pre-binding the port, then wrapped with the hint.
@@ -172,7 +172,7 @@ func TestListenErrorHint(t *testing.T) {
 	}
 	defer ln.Close()
 	addr := ln.Addr().String()
-	// buildLoopbackServer(addr).ListenAndServe() cannot bind the in-use addr and
+	// buildLoopbackServer(addr).ListenAndServe cannot bind the in-use addr and
 	// returns immediately with the bind error.
 	bindErr := buildLoopbackServer(addr, localdavHandlerStub{}).ListenAndServe()
 	if bindErr == nil {
@@ -194,7 +194,7 @@ func TestListenErrorHint(t *testing.T) {
 	}
 }
 
-// TestPrintLaunchGuidance (C1, friction Owner C1): the fallback line is always
+// TestPrintLaunchGuidance (C1, C1): the fallback line is always
 // printed to stdout, and an openBrowser failure is surfaced to stderr instead of
 // being discarded. open is injected to drive both paths.
 func TestPrintLaunchGuidance(t *testing.T) {
@@ -266,7 +266,7 @@ func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
 func (f fakeFileInfo) IsDir() bool        { return false }
 func (f fakeFileInfo) Sys() any           { return nil }
 
-// TestStdoutLooksRedirected (friction Cold C5): a character device is a terminal
+// TestStdoutLooksRedirected (C5): a character device is a terminal
 // (not redirected); everything else (regular file, pipe) is a redirect/log. Every
 // row asserted.
 func TestStdoutLooksRedirected(t *testing.T) {
@@ -301,7 +301,7 @@ func TestStdoutLooksRedirected(t *testing.T) {
 	}
 }
 
-// TestKeychainUnavailableNote (friction Cold C4): a nil error prints nothing; a
+// TestKeychainUnavailableNote (C4): a nil error prints nothing; a
 // real error yields a single-line note naming the fallback. Every row asserted.
 func TestKeychainUnavailableNote(t *testing.T) {
 	if s := keychainUnavailableNote(nil); s != "" {
@@ -373,7 +373,8 @@ func TestUsageTextServeCredentialAndVersion(t *testing.T) {
 	}
 }
 
-// R12 (cmd leg, design D6.2): cmdInit enforces the KDF strength floor before it
+// (cmd leg): cmdInit enforces the KDF strength floor before it
+//
 // prompts for a password. A below-floor request is refused with an error naming
 // the floor and creates no vault; a minimum-compliant request succeeds.
 func TestCmdInitEnforcesKDFFloor(t *testing.T) {
@@ -403,7 +404,8 @@ func TestCmdInitEnforcesKDFFloor(t *testing.T) {
 	}
 }
 
-// R6 (CLI): `gc --confirm` writes deletion intents for the unreferenced chunks
+//	(CLI): `gc --confirm` writes deletion intents for the unreferenced chunks
+//
 // left by a delete and removes nothing before the fence; `gc --json` emits a
 // parseable report that lists the pending intents.
 func TestCmdGCConfirmWritesIntentsAndJSON(t *testing.T) {
@@ -472,8 +474,8 @@ func TestCmdGCConfirmWritesIntentsAndJSON(t *testing.T) {
 	}
 }
 
-// Regression for integrity/F1-p03-gate-bypassed-by-open-marker-repair (design
-// D2.2/P0-3): a hostile sync server that deletes every manifest under an intact
+// Regression for (design
+// /): a hostile sync server that deletes every manifest under an intact
 // vault.json while keeping the live-file chunks must NOT be able to drive the CLI
 // `gc --confirm` into queueing and deleting those surviving chunks. Every CLI gc
 // invocation re-Opens the vault (Open -> EnsureContentLayout); if that resurrected
@@ -601,24 +603,24 @@ func captureOutputs(t *testing.T, fn func() error) (stdout, stderr string, err e
 	return outBuf.String(), errBuf.String(), runErr
 }
 
-// Tombstone for finding conditions/F3 (design D1.3, review backlog B4): the
-// Open-time preflight note for a legacy .seavault vault under a sync-client
+// Tombstone for (review): the
+// Open-time preflight note for a legacy.seavault vault under a sync-client
 // folder was set on the vault (vault.go openNote) and surfaced by the GUI
-// (webui handleOpen -> v.PreflightNote()), but NO CLI Open command surfaced it.
+// (webui handleOpen -> v.PreflightNote), but NO CLI Open command surfaced it.
 // A CLI user who opens a legacy vault stored under Nextcloud/Dropbox/etc must see
-// the same one-line D1.3 note the GUI shows on Open. This drives the exact
-// production sequence: cmdList -> vault.Open -> v.PreflightNote().
+// the same one-line note the GUI shows on Open. This drives the exact
+// production sequence: cmdList -> vault.Open -> v.PreflightNote.
 func TestCmdOpenSurfacesLegacyPreflightNoteUnderSyncFolder(t *testing.T) {
 	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
 	t.Setenv("SEAVAULT_PASSWORD", "correct horse battery staple")
 	const pw = "correct horse battery staple"
 
-	// A vault root whose path carries a known sync-client segment (D1.3 matcher).
+	// A vault root whose path carries a known sync-client segment (matcher).
 	root := filepath.Join(t.TempDir(), "Nextcloud", "vault")
 	if err := cmdInit([]string{"--kdf", "argon2id", "--argon2-time", "2", "--argon2-memory", "19456", "--argon2-parallelism", "1", root}); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	// The Open-time D1.3 note this root must produce (the short Owner-C2 note, not
+	// The Open-time note this root must produce (the short Owner-C2 note, not
 	// the create-time one); a vacuous pass (empty note) is a bug.
 	want := vault.LegacyOpenPreflightNote(root)
 	if want == "" {
@@ -645,21 +647,21 @@ func TestCmdOpenSurfacesLegacyPreflightNoteUnderSyncFolder(t *testing.T) {
 		t.Fatalf("list (SeaVaultData): %v", err)
 	}
 	if strings.Contains(stderrNew, want) {
-		t.Fatalf("a non-legacy SeaVaultData vault must not emit the D1.3 preflight note on CLI open; stderr:\n%s", stderrNew)
+		t.Fatalf("a non-legacy SeaVaultData vault must not emit the preflight note on CLI open; stderr:\n%s", stderrNew)
 	}
 
-	// Make it a legacy vault: rename the visible dir to the hidden .seavault name a
+	// Make it a legacy vault: rename the visible dir to the hidden.seavault name a
 	// 0.15.0 client would have created.
 	if err := os.Rename(newMeta, filepath.Join(root, vault.MetadataDirName)); err != nil {
-		t.Fatalf("rename to legacy .seavault: %v", err)
+		t.Fatalf("rename to legacy.seavault: %v", err)
 	}
 
 	stdout, stderrLegacy, err := captureOutputs(t, func() error { return cmdList([]string{"--no-keychain", root}) })
 	if err != nil {
-		t.Fatalf("list (legacy .seavault): %v", err)
+		t.Fatalf("list (legacy.seavault): %v", err)
 	}
 	if !strings.Contains(stderrLegacy, want) {
-		t.Fatalf("`seavault list` of a legacy .seavault vault under a sync folder must surface the D1.3 preflight note on stderr.\nstderr:\n%s", stderrLegacy)
+		t.Fatalf("`seavault list` of a legacy.seavault vault under a sync folder must surface the preflight note on stderr.\nstderr:\n%s", stderrLegacy)
 	}
 	// The note is advisory: it must go to stderr, never contaminate the stdout file
 	// listing a caller may parse.
@@ -684,7 +686,7 @@ func manifestNameSet(t *testing.T, dir string) map[string]struct{} {
 }
 
 // buildConcurrentConflict stages a genuine causal conflict on disk for
-// virtualPath (design D4.2, P1-8): two DIFFERENT device installations each write
+// virtualPath: two DIFFERENT device installations each write
 // the path without seeing the other, so their manifests carry disjoint vector
 // clocks and reconcile as CONCURRENT — kept as one canonical winner plus one
 // *.conflict-* entry — rather than one cleanly superseding the other (which a
@@ -740,7 +742,8 @@ func buildConcurrentConflict(t *testing.T, vaultPath, pw, virtualPath, bodyA, bo
 	return manifestsDir
 }
 
-// R7 (cmd leg, design D4.4): `seavault gc` is a dry run that prints the
+// (cmd leg): `seavault gc` is a dry run that prints the
+//
 // compaction plan (conflict copies to materialise, temp orphans) and writes
 // nothing; `seavault compact` applies it and is idempotent.
 func TestCmdGCDryRunAndCompact(t *testing.T) {
@@ -753,7 +756,7 @@ func TestCmdGCDryRunAndCompact(t *testing.T) {
 		t.Fatalf("init: %v", err)
 	}
 
-	// Build a GENUINE pending conflict on disk (design D4.2, P1-8): under the A2
+	// Build a GENUINE pending conflict on disk: under the A2
 	// vector clock a same-device re-edit is cleanly superseded, so a real conflict
 	// needs two DIFFERENT devices editing without seeing each other (disjoint
 	// clocks → concurrent → kept as one canonical + one conflict).
@@ -761,14 +764,14 @@ func TestCmdGCDryRunAndCompact(t *testing.T) {
 
 	manifestsBeforeDry := len(manifestNameSet(t, manifestsDir))
 	out, errOut, err := captureOutputs(t, func() error { return cmdGC([]string{"--no-keychain", vaultPath}) })
-	// Friction II-2: a bare dry run that found an actionable plan (here a conflict
+	// Friction: a bare dry run that found an actionable plan (here a conflict
 	// to materialise) must exit 3 with an advisory on stderr, not exit 0 silently.
 	var ec *exitCodeError
 	if !errors.As(err, &ec) || ec.code != 3 {
 		t.Fatalf("a dry run with pending work must return exit code 3, got %v", err)
 	}
 	if !strings.Contains(errOut, "gc: dry run") || !strings.Contains(errOut, "pass --confirm") {
-		t.Fatalf("dry run must write the II-2 advisory to stderr, got:\n%s", errOut)
+		t.Fatalf("dry run must write the advisory to stderr, got:\n%s", errOut)
 	}
 	if !strings.Contains(out, "conflict copies to materialise: 1") {
 		t.Fatalf("gc dry run should list one pending conflict, got:\n%s", out)
@@ -800,7 +803,7 @@ func TestCmdGCDryRunAndCompact(t *testing.T) {
 	}
 }
 
-// TestGCDryRunAdvisory (friction II-2): the helper that turns a completed gc
+// TestGCDryRunAdvisory: the helper that turns a completed gc
 // report into the one-line stderr advisory and the process exit code. A dry run
 // that found something actionable (unreferenced chunks, pending intents, or a
 // non-empty compaction plan) yields the advisory and exit code 3; a dry run with
@@ -892,7 +895,7 @@ func TestGCDryRunAdvisory(t *testing.T) {
 	}
 }
 
-// TestClampFence (friction Cold C5): the helper mirrors vault.GarbageCollect's
+// TestClampFence (C5): the helper mirrors vault.GarbageCollect's
 // fence clamping and reports a one-line notice exactly when the requested fence
 // was changed. Every row asserted.
 func TestClampFence(t *testing.T) {
@@ -943,7 +946,7 @@ func TestClampFence(t *testing.T) {
 	}
 }
 
-// TestExportMappingLines (friction Operator C6, D7.2): the (original -> written)
+// TestExportMappingLines (C6): the (original -> written)
 // mapping the CLI prints. A real export lists only the sanitised/disambiguated
 // entries (silence when every file kept its name); a dry run lists every planned
 // destination and flags the renamed ones.
@@ -1006,7 +1009,7 @@ func TestExportMappingLines(t *testing.T) {
 	}
 }
 
-// TestKeychainStatusLine (friction Cold C6): a reachable service with no entry
+// TestKeychainStatusLine (C6): a reachable service with no entry
 // reports "no keychain entry for this vault" (not the install advice); an
 // unreachable service surfaces the original error. Every row asserted.
 func TestKeychainStatusLine(t *testing.T) {
@@ -1046,7 +1049,7 @@ func TestKeychainStatusLine(t *testing.T) {
 	}
 }
 
-// TestSubcommandSynopses (friction Cold C5): compact/verify --help carry a
+// TestSubcommandSynopses (C5): compact/verify --help carry a
 // one-line synopsis, and writeSubcommandUsage renders the usage line, the
 // synopsis, and the flag defaults into the FlagSet's output.
 func TestSubcommandSynopses(t *testing.T) {
@@ -1071,7 +1074,7 @@ func TestSubcommandSynopses(t *testing.T) {
 }
 
 // TestCmdVaultSealUnsealFormat drives the CLI seal-format/unseal-format path
-// (design D1.4, P1-20, Condition 14): seal-format --yes prints the device signal
+// : seal-format --yes prints the device signal
 // and bumps the on-disk Version to 3 / MinReader to 3; unseal-format restores
 // Version 2 / MinReader 2; and seal-format with no --yes and a closed stdin
 // aborts without changing anything.
@@ -1138,7 +1141,7 @@ func TestCmdVaultSealUnsealFormat(t *testing.T) {
 	}
 }
 
-// TestFormatReaderSignal covers both Condition 14 display branches: an EMPTY
+// TestFormatReaderSignal covers both the review display branches: an EMPTY
 // inventory becomes the explicit no-telemetry warning (the operator must not read
 // silence as "no other devices"); a non-empty one lists each device and its
 // reader format level.
@@ -1156,14 +1159,14 @@ func TestFormatReaderSignal(t *testing.T) {
 }
 
 // TestPutRatchetsConfigMACThenDetectsForgery is the tombstone for finding
-// config-server/F1-ratchet-never-wired (design D2.4, R4/R5, build-order step 3).
+// .
 // EnsureConfigMAC — the ConfigMAC ratchet — was defined (internal/vault/configmac.go)
 // but never invoked by any production command, so a vault created by `init` and
 // used only via put/get NEVER acquired a configTag. The common grace-release
-// vault was therefore left permanently on TOFU: T-A2-1 config forgery (VaultID /
+// vault was therefore left permanently on TOFU: config forgery (VaultID /
 // ChunkParams / KDF / wrap edits) went completely undetected because there was no
-// tag to verify against — R4's core scenario failed in the shipped binary. This
-// test drives the real CLI: `put` is a write-capable command, so per D2.4 it MUST
+// tag to verify against — 's core scenario failed in the shipped binary. This
+// test drives the real CLI: `put` is a write-capable command, so per it MUST
 // opportunistically ratchet a tag on the first such open; a subsequent
 // MAC-covered, unwrap-independent forgery (chunk.minSize) must then be caught as
 // ErrConfigTampered. Before the fix the tag is absent (the first assertion fires)
@@ -1180,12 +1183,12 @@ func TestPutRatchetsConfigMACThenDetectsForgery(t *testing.T) {
 	cfgPath := filepath.Join(vaultPath, "SeaVaultData", "vault.json")
 
 	// A fresh init writes no tag: the grace-release vault stays on TOFU until a
-	// write-capable open ratchets one (design D2.4, invariant I2).
+	// write-capable open ratchets one.
 	if tag := readConfigTagForTest(t, cfgPath); tag != "" {
 		t.Fatalf("init must not write a configTag (TOFU until first write-capable open), got %q", tag)
 	}
 
-	// put is a write-capable command: it MUST ratchet a ConfigTag (design D2.4).
+	// put is a write-capable command: it MUST ratchet a ConfigTag.
 	src := filepath.Join(t.TempDir(), "f3.txt")
 	if err := os.WriteFile(src, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1196,19 +1199,19 @@ func TestPutRatchetsConfigMACThenDetectsForgery(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 	if tag := readConfigTagForTest(t, cfgPath); tag == "" {
-		t.Fatal("finding config-server/F1: a write-capable `put` did not ratchet a ConfigTag; the grace-release vault is left permanently on TOFU and T-A2-1 config forgery is undetectable")
+		t.Fatal("a write-capable `put` did not ratchet a ConfigTag; the grace-release vault is left permanently on TOFU and config forgery is undetectable")
 	}
 
 	// Act as the hostile config server: forge a MAC-covered, unwrap-independent
 	// field (chunk.minSize) directly in vault.json. The ratcheted tag no longer
-	// verifies, so the next open must hard-refuse (R4).
+	// verifies, so the next open must hard-refuse.
 	forgeConfigMinSizeForTest(t, cfgPath, 512)
 
 	_, _, err := captureOutputs(t, func() error {
 		return cmdList([]string{"--no-keychain", vaultPath})
 	})
 	if !errors.Is(err, vault.ErrConfigTampered) {
-		t.Fatalf("finding config-server/F1: forging a MAC-covered field after `put` must be caught as ErrConfigTampered, got %v", err)
+		t.Fatalf("forging a MAC-covered field after `put` must be caught as ErrConfigTampered, got %v", err)
 	}
 }
 

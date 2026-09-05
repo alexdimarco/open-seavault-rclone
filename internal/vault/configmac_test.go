@@ -25,8 +25,8 @@ func isolateAppHome(t *testing.T) {
 }
 
 // readTestAnchor reads the device-local freshness anchor for a specific OPEN
-// vault. It resolves the anchor path exactly as production does (v.anchorPath(),
-// keyed by the master-derived anchor id — finding config-server/F3), so the test
+// vault. It resolves the anchor path exactly as production does (v.anchorPath,
+// keyed by the master-derived anchor id —), so the test
 // always reads the same file Open writes, regardless of the plaintext VaultID.
 func readTestAnchor(t *testing.T, v *Vault) (freshnessAnchor, bool) {
 	t.Helper()
@@ -52,7 +52,7 @@ func configTagOf(t *testing.T, root string) string {
 
 // ratchetTaggedVault opens root, runs the write-capable ratchet, and asserts a
 // tag was written — the "first write-capable open" that latches a ConfigTag and
-// the device anchor (design D2.4). Returns the opened, now-anchored vault.
+// the device anchor. Returns the opened, now-anchored vault.
 func ratchetTaggedVault(t *testing.T, root, password string) *Vault {
 	t.Helper()
 	v, err := Open(root, password)
@@ -72,7 +72,7 @@ func ratchetTaggedVault(t *testing.T, root, password string) *Vault {
 	return v
 }
 
-// R4 (design §2, P0-3, T-A2-1): once a vault carries a ConfigMAC, flipping ANY
+// once a vault carries a ConfigMAC, flipping ANY
 // MAC-covered field is caught after a CORRECT password as ErrConfigTampered; an
 // untampered tagged config opens; and a WRONG password still fails as a wrong
 // password — never as a MAC error (the check runs only after a successful
@@ -152,11 +152,11 @@ func TestConfigMACDetectsTamper(t *testing.T) {
 	})
 }
 
-// R5 (design §2, D2.4, Condition 6): the has-tag ratchet and strip resolution.
+// the has-tag ratchet and strip resolution.
 // A genuinely-legacy vault (this device never anchored a tag) opens via TOFU and
 // gets a tag on the first write-capable open; once a device has anchored hasTag,
 // a config that arrives with the tag stripped is a HARD ErrConfigTampered; and a
-// strip can never advance the device's epoch high-water (backlog B-1).
+// strip can never advance the device's epoch high-water.
 func TestConfigTagRatchetAndStrip(t *testing.T) {
 	isolateAppHome(t)
 
@@ -187,7 +187,7 @@ func TestConfigTagRatchetAndStrip(t *testing.T) {
 			t.Fatal("vault.json must carry a configTag after the ratchet")
 		}
 		// The ratchet writes ONLY the tag and bumps the epoch; it must NOT bump
-		// Version (design D2.4 — that is seal-format's job).
+		// Version (the design — that is seal-format's job).
 		if cfg.Version != 2 {
 			t.Fatalf("the ratchet must keep Version=2, got %d", cfg.Version)
 		}
@@ -227,7 +227,7 @@ func TestConfigTagRatchetAndStrip(t *testing.T) {
 			t.Fatalf("a stripped tag on an anchored-hasTag device must be ErrConfigTampered, got %v", err)
 		}
 
-		// The strip must not have advanced the epoch high-water (backlog B-1) nor
+		// The strip must not have advanced the epoch high-water nor
 		// cleared the anchored hasTag bit.
 		after, _ := readTestAnchor(t, v)
 		if after.FormatEpoch != highWater {
@@ -242,7 +242,7 @@ func TestConfigTagRatchetAndStrip(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "vault")
 		createTestVault(t, root, r4Password)
 		// Resolve the anchor path production will consult (the master-derived id,
-		// finding config-server/F3) by opening the untagged vault once — a TOFU open
+		// ) by opening the untagged vault once — a TOFU open
 		// that records no anchor — then write garbage at exactly that path.
 		v0, err := Open(root, r4Password)
 		if err != nil {

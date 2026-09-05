@@ -32,7 +32,7 @@ func (v *Vault) EnsureContentLayout() error {
 
 	if !hasRootMarker {
 		// Do NOT re-create the content marker when doing so would MASK a wiped or
-		// replaced index (design D2.2, P0-3): if the loaded index is otherwise empty
+		// replaced index: if the loaded index is otherwise empty
 		// but the on-disk store shows a populated vault we failed to load — manifest
 		// files present (a replaced index) or chunk objects present with no manifests
 		// (a wiped store) — recreating the marker here makes the loaded index
@@ -97,7 +97,7 @@ func (v *Vault) EnsureContentLayout() error {
 				continue
 			}
 			// The old-layout record moved to content/; tombstone its old path with
-			// a clock that dominates it (design D4.3), so a stale synced copy at the
+			// a clock that dominates it, so a stale synced copy at the
 			// old path is a clean supersede rather than a resurrected conflict.
 			tombClock := v.advanceClock(movedClock[oldPath], time.Now().UTC().UnixNano())
 			if err := v.commitTombstone(oldPath, 0, movedGen[oldPath], tombClock); err != nil {
@@ -111,7 +111,7 @@ func (v *Vault) EnsureContentLayout() error {
 
 // markerWouldMaskWipe reports whether re-creating the content marker on the
 // given (already loaded) index would mask a wiped or replaced index under an
-// intact vault.json (design D2.2, P0-3). It is true only for a manifest-store
+// intact vault.json. It is true only for a manifest-store
 // vault whose loaded index is EMPTY while the on-disk store still shows a
 // previously populated vault we could not load: manifest files are present (the
 // index was replaced — e.g. id/path-mismatched or undecryptable manifests), or
@@ -148,11 +148,11 @@ func (v *Vault) EnsureDirectory(virtualPath string) error {
 	if _, ok := idx.Files[marker]; ok {
 		return nil
 	}
-	// Create-time gates for a NEW directory only (design D7.1/D1.2, B6): no
+	// Create-time gates for a NEW directory only (B6): no
 	// metadata-name segment may be CREATED as a virtual path, and the new leaf
 	// (marker is <dir>/.seavault-dir) must be portable. An existing reserved dir
 	// short-circuits at the marker check above, so this never blocks reaching one
-	// a peer/legacy client created (finding peer/F3).
+	// a peer/legacy client created.
 	if err := reservedNewPathError(path.Dir(marker)); err != nil {
 		return err
 	}

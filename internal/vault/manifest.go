@@ -25,8 +25,8 @@ type ManifestRecord struct {
 	UpdatedAt string `json:"updatedAt"`
 	Deleted   bool   `json:"deleted,omitempty"`
 	// DeletedGeneration is the generation of the live record this delete
-	// superseded (design D4.2, P0-6). It is additive: 0.15.0 readers ignore an
-	// unknown JSON field (invariant I1), and a tombstone written by 0.15.0 (or by
+	// superseded. It is additive: 0.15.0 readers ignore an
+	// unknown JSON field, and a tombstone written by 0.15.0 (or by
 	// any path that does not know the superseded generation) carries 0. The pure
 	// load uses it to tell a stale copy the deleter had already seen (loser
 	// generation <= DeletedGeneration -> suppressed) from a newer edit the deleter
@@ -34,10 +34,10 @@ type ManifestRecord struct {
 	// survives as a conflict).
 	DeletedGeneration int64 `json:"deletedGeneration,omitempty"`
 	// Clock is the additive per-record vector clock at the manifest level (design
-	// D4.1, P1-8), mirroring FileRecord.Clock so a tombstone (whose File may be
+	// ), mirroring FileRecord.Clock so a tombstone (whose File may be
 	// empty) can still carry causal ordering. Additive/omitempty: a 0.16-written
 	// manifest has no clock and reconciliation falls back to Generation. The
-	// causal-compare and join paths land in slice 5.
+	// causal-compare and join paths land in.
 	Clock map[string]int64 `json:"clock,omitempty"`
 	File  FileRecord       `json:"file,omitempty"`
 }
@@ -50,7 +50,7 @@ type manifestCandidate struct {
 }
 
 // plannedConflict is a losing LIVE manifest that a load decided to materialise
-// as a deterministic *.conflict-* entry (design D4.3). Compact writes Rec at
+// as a deterministic *.conflict-* entry. Compact writes Rec at
 // Path and then removes the loser file at Source; the entry is also placed in
 // the in-memory index (Rec.ConflictOf set) on every load so it is visible and
 // its chunks count as live for GC without any write (I2).
@@ -61,9 +61,9 @@ type plannedConflict struct {
 }
 
 // reconcilePlan is the set of on-disk mutations a pure load COMPUTED but did not
-// perform (design D4.1, invariant I2). loadManifestIndex never removes or writes
+// perform. loadManifestIndex never removes or writes
 // a manifest; every mutation it would once have made on load is recorded here for
-// Compact (D4.4) to apply under an explicit command.
+// Compact to apply under an explicit command.
 type reconcilePlan struct {
 	// conflicts are losing live records to materialise (write Path, remove Source).
 	conflicts []plannedConflict
@@ -78,11 +78,11 @@ type reconcilePlan struct {
 }
 
 // loadManifestIndex is a PURE function of the manifest files on disk (design
-// D4.1, invariant I2): it decrypts and reconciles them into an in-memory index
+// ): it decrypts and reconciles them into an in-memory index
 // but performs NO writes — no os.Remove, no saveFileManifest. Every mutation it
 // would once have made on load (removing redundant/stale copies, materialising a
 // losing edit as a *.conflict-* copy) is returned in the reconcilePlan for
-// Compact (D4.4) to apply under an explicit command. Conflict entries are still
+// Compact to apply under an explicit command. Conflict entries are still
 // placed in the returned in-memory index with ConflictOf set, so a losing edit
 // is visible and its chunks count as live for GC without any write. The caller
 // (cachedIndexLocked via loadIndexFromDisk) holds v.mu.
@@ -169,9 +169,9 @@ func (v *Vault) loadManifestIndex() (Index, reconcilePlan, error) {
 }
 
 // manifestFilesPresent reports whether the manifests directory holds at least
-// one file whose name parses as a manifest (a 64-hex id followed by .manifest).
+// one file whose name parses as a manifest (a 64-hex id followed by.manifest).
 // It never decrypts, so it is cheap enough to run on every first index load
-// (design D2.1): the downgrade-detection check needs only file presence, not
+// : the downgrade-detection check needs only file presence, not
 // content. A missing manifests directory yields (false, nil).
 func (v *Vault) manifestFilesPresent() (bool, error) {
 	root := filepath.Join(v.MetaRoot, ManifestDirName)
@@ -199,7 +199,7 @@ func (v *Vault) manifestFilesPresent() (bool, error) {
 }
 
 // manifestStoreState summarises the manifests directory for the GC refusal gate
-// (design D2.2): whether any manifest file exists at all, and whether any of them
+// : whether any manifest file exists at all, and whether any of them
 // decrypts to a NON-tombstone record. An undecryptable manifest counts toward
 // hasAny (a file is present) but not toward hasNonTombstone (it is not a
 // classifiable live record).
@@ -257,7 +257,7 @@ func manifestIDFromFileName(name string) string {
 	}
 	prefix := name[:idx]
 	// Lower-case the parsed id so a case-folded manifest name maps to the same
-	// derived id as its canonical lower-case object (design D6.1,
+	// derived id as its canonical lower-case object (
 	// P3 hex-case-mismatch-gc).
 	if len(prefix) >= 64 && isHex(prefix[:64]) {
 		return strings.ToLower(prefix[:64])
@@ -291,14 +291,14 @@ func normalizeRecordMetadata(rec FileRecord, updatedAt string) FileRecord {
 }
 
 // reconcilePathCandidates reconciles every on-disk manifest copy of ONE virtual
-// path into the causal winner and the losing conflicts/removals (design D4.2,
-// P1-8). It is a PURE function of the candidate SET and independent of the order
-// in which they were loaded (Condition 2): a caller may pass them in any order —
+// path into the causal winner and the losing conflicts/removals (
+// ). It is a PURE function of the candidate SET and independent of the order
+// in which they were loaded: a caller may pass them in any order —
 // including a shuffled WalkDir order — and always gets the identical winner,
 // conflict paths, and removals. That order-independence is what makes every
-// device in a fleet converge on the same canonical file (R9).
+// device in a fleet converge on the same canonical file.
 //
-// Two decisions, kept separate (design D4.2) — and they MUST stay separate:
+// Two decisions, kept separate — and they MUST stay separate:
 //  1. Dominance prunes causally-superseded copies. A record whose vector clock
 //     is strictly dominated by SOME other record's is causally superseded and is
 //     dropped CLEANLY (planned removal, no conflict copy). What survives is the
@@ -312,15 +312,15 @@ func normalizeRecordMetadata(rec FileRecord, updatedAt string) FileRecord {
 //     a deterministic *.conflict-* entry.
 //
 // The pruning MUST happen BEFORE the winner sort, not inside candidateCompare
-// (config-server/F2-candidatecompare-intransitive). Dominance is a PARTIAL order
+// . Dominance is a PARTIAL order
 // and the content key is a TOTAL order; folding both into one per-pair comparator
 // makes it intransitive — with A dominating B and C concurrent with both, ordered
 // by content key ka<kc<kb, the comparator reports A>B (dominance), B>C and C>A
 // (content), a 3-cycle. sort.SliceStable then has no canonical result: the winner
 // depends on the on-disk (WalkDir) order, which sync clients shuffle differently
 // per device, so honest fleet members would reconcile the same path to different
-// canonical files (a Condition 2 / R9 break), and a dominated record could even
-// land in the live slot while its dominator is demoted to a conflict (a T-A2-3
+// canonical files (a the review / break), and a dominated record could even
+// land in the live slot while its dominator is demoted to a conflict (a
 // causal inversion). Pruning first guarantees the records that reach the sort are
 // mutually concurrent, so candidateCompare never exercises its dominance branch
 // there and is a genuine total order.
@@ -355,7 +355,7 @@ func reconcilePathCandidates(p string, list []manifestCandidate) (live *FileReco
 	// member dominates another (its dominance branch is dead on this input), so it
 	// reduces to the concurrent content-key tiebreak — or, for a no-clock pair,
 	// the A1 Generation fallback — and sort.SliceStable is deterministic
-	// regardless of the load order (Condition 2).
+	// regardless of the load order.
 	sorted := append([]manifestCandidate(nil), antichain...)
 	sort.SliceStable(sorted, func(i, j int) bool { return candidateCompare(sorted[i], sorted[j]) > 0 })
 	winner := sorted[0]
@@ -381,12 +381,12 @@ func reconcilePathCandidates(p string, list []manifestCandidate) (live *FileReco
 			continue
 		}
 
-		// A live loser under a delete-tombstone winner (design D4.2/D4.3, P0-6):
+		// A live loser under a delete-tombstone winner:
 		// the A1 deletedGeneration suppression, kept as the FALLBACK for the
 		// field-less / no-clock case only. When both records carry clocks the
 		// causal decision above is authoritative — a concurrent edit (not
 		// dominated by the tombstone) must survive as a conflict even if its
-		// generation sits at or below the tombstone's deletedGeneration (R10), so
+		// generation sits at or below the tombstone's deletedGeneration, so
 		// the generation shortcut is skipped whenever both sides are clocked.
 		if winner.Record.Deleted && winner.Record.DeletedGeneration > 0 && !bothClocked(winner.Record, loser.Record) {
 			loserGen := loser.Record.File.Generation
@@ -408,10 +408,10 @@ func reconcilePathCandidates(p string, list []manifestCandidate) (live *FileReco
 }
 
 // candidateCompare orders the manifest copies of one path for the winner sort in
-// reconcilePathCandidates (design D4.2, Condition 2). It is a genuine TOTAL order
+// reconcilePathCandidates. It is a genuine TOTAL order
 // ONLY over a set with no dominance relations — a causally-concurrent antichain —
 // which is exactly the input reconcilePathCandidates hands it, having pruned every
-// dominated record FIRST (config-server/F2-candidatecompare-intransitive). Over
+// dominated record FIRST. Over
 // such a set the dominance branch below is never taken, so the effective order is
 // the concurrent content-key tiebreak (or the A1 Generation fallback for a
 // no-clock pair), both transitive, and the stable sort is deterministic regardless
@@ -490,9 +490,9 @@ func generationCompare(a, b manifestCandidate) int {
 }
 
 // concurrentTiebreak breaks a causally-concurrent (or clock-equal) pair
-// deterministically and device-independently (design D4.2). A tombstone takes
+// deterministically and device-independently. A tombstone takes
 // the live slot over a concurrent edit (the A1 rule, preserved), so a delete and
-// a concurrent edit converge to "path deleted, edit kept as a conflict" (R10).
+// a concurrent edit converge to "path deleted, edit kept as a conflict".
 // Among records of the same deleted-ness the canonical winner is the larger
 // content key — the hash over chunk ids+sizes+generation+updatedAt — never the
 // on-disk filename. A final canonical clock serialisation keeps the order total
@@ -524,7 +524,7 @@ func concurrentTiebreak(a, b manifestCandidate) int {
 
 // clockOf returns a record's vector clock, preferring the FileRecord clock (the
 // live-record home) and falling back to the manifest-level clock (a tombstone,
-// whose File is minimal, carries its clock there — design D4.1). An empty result
+// whose File is minimal, carries its clock there —). An empty result
 // means the record predates the clock (a 0.16 writer) and reconciliation uses
 // the Generation fallback for it.
 func clockOf(rec ManifestRecord) map[string]int64 {
@@ -536,13 +536,13 @@ func clockOf(rec ManifestRecord) map[string]int64 {
 
 // bothClocked reports whether both records carry a vector clock, i.e. the causal
 // comparison is authoritative and the A1 Generation/deletedGeneration fallbacks
-// should stand aside (design D4.2).
+// should stand aside.
 func bothClocked(a, b ManifestRecord) bool {
 	return len(clockOf(a)) > 0 && len(clockOf(b)) > 0
 }
 
 // clockDominates reports whether clock a STRICTLY dominates clock b (design
-// D4.2, the happens-after relation): a[k] >= b[k] for every k, and a[k] > b[k]
+// , the happens-after relation): a[k] >= b[k] for every k, and a[k] > b[k]
 // for at least one k. Two empty or identical clocks never dominate; concurrent
 // clocks (each ahead on some key) never dominate. Callers compare only clocked
 // records — an absent entry reads as 0, which is the correct vector-clock
@@ -576,7 +576,7 @@ func clockDominates(a, b map[string]int64) bool {
 }
 
 // isCausallyDominated reports whether some OTHER candidate in the set strictly
-// dominates target's vector clock (design D4.2). A dominated record is causally
+// dominates target's vector clock. A dominated record is causally
 // superseded and is dropped cleanly rather than kept as a conflict. A record
 // with no clock never counts as dominated (Generation decides it instead), and a
 // no-clock candidate can never dominate anything.
@@ -601,7 +601,7 @@ func isCausallyDominated(target manifestCandidate, all []manifestCandidate) bool
 }
 
 // contentKey is the device-independent content hash used to pick the canonical
-// winner of a concurrent antichain (design D4.2): the full SHA-256 over the
+// winner of a concurrent antichain: the full SHA-256 over the
 // record's chunk ids+sizes, generation, updatedAt, and deleted-ness — the same
 // inputs conflictSuffix seeds a conflict name from, so winner selection and
 // conflict naming stay consistent and neither depends on the on-disk filename.
@@ -618,7 +618,7 @@ func contentKey(rec ManifestRecord) string {
 // clockString is a canonical, order-independent serialisation of a vector clock
 // (keys sorted) used only as the final total-order tiebreak in concurrentTiebreak
 // so two records with identical content but different clocks still order
-// deterministically (Condition 2).
+// deterministically.
 func clockString(clock map[string]int64) string {
 	if len(clock) == 0 {
 		return ""
@@ -636,7 +636,7 @@ func clockString(clock map[string]int64) string {
 }
 
 // joinClock merges src into dst by element-wise maximum (the vector-clock join,
-// design D4.1): dst[k] becomes max(dst[k], src[k]) for every k in src. It is how
+// ): dst[k] becomes max(dst[k], src[k]) for every k in src. It is how
 // a local write carries forward every device entry it has seen for a path.
 func joinClock(dst, src map[string]int64) {
 	for k, v := range src {
@@ -647,15 +647,15 @@ func joinClock(dst, src map[string]int64) {
 }
 
 // conflictPath is the deterministic virtual path a losing manifest is
-// materialised under. Per design D4.3 the disambiguating suffix is seeded from
+// materialised under. Per the design the disambiguating suffix is seeded from
 // device-stable CONTENT — the loser's chunk ids and sizes, generation and
 // updatedAt — and never from the on-disk manifest filename, which sync clients
 // rename differently on every device. Two on-disk copies of the same losing
-// record therefore converge to one conflict path (R8), instead of accumulating a
+// record therefore converge to one conflict path, instead of accumulating a
 // distinct copy per device-local rename. It is a pure function: given the same
 // original path and record it always returns the same result, and stage 3's
 // Compact relies on that. Convergence across a fleet is conditional on every
-// device running >= A1 (a 0.15 peer still seeds from the on-disk name; §12).
+// device running >= A1 (a 0.15 peer still seeds from the on-disk name).
 func conflictPath(original string, rec FileRecord) string {
 	dir, file := path.Split(original)
 	if file == "" {
@@ -667,10 +667,10 @@ func conflictPath(original string, rec FileRecord) string {
 // conflictSuffix is the device-stable, deterministic disambiguator appended to a
 // name when two records would otherwise collide: "conflict-<stamp>-<hash>",
 // where the stamp is the record's UpdatedAt and the hash is over the loser's
-// chunk ids and sizes, generation and UpdatedAt (design D4.3). It is seeded only
+// chunk ids and sizes, generation and UpdatedAt. It is seeded only
 // from record content — never from an on-disk filename that sync clients rename
 // per device — so the same record yields the same suffix on every device.
-// conflictPath uses it for reconciled losers; export (D7.2) uses it to keep two
+// conflictPath uses it for reconciled losers; export uses it to keep two
 // files that sanitise to the same portable name from clobbering each other.
 func conflictSuffix(rec FileRecord) string {
 	updatedAt := rec.UpdatedAt
@@ -718,7 +718,7 @@ func (v *Vault) saveFileManifest(virtualPath string, rec FileRecord) error {
 
 // saveTombstone writes a delete tombstone. generation is the tombstone's own
 // ordering generation (a fresh nextGeneration value); deletedGeneration is the
-// generation of the LIVE record this delete superseded (design D4.2), written so
+// generation of the LIVE record this delete superseded, written so
 // a later pure load can suppress a stale copy the deleter had already seen while
 // letting a newer edit survive as a conflict. A caller that does not know the
 // superseded generation (a migration, a legacy path) passes 0, which reproduces
@@ -728,9 +728,9 @@ func (v *Vault) saveTombstone(virtualPath string, generation, deletedGeneration 
 }
 
 // saveTombstoneWithClock is saveTombstone carrying an additive vector clock
-// (design D4.1/D4.3): the tombstone's clock lets a later load decide delete-vs-
+// : the tombstone's clock lets a later load decide delete-vs-
 // edit causally — a delete that DOMINATES an edit is a clean delete, a concurrent
-// edit survives as a conflict (R10) — instead of relying on the deletedGeneration
+// edit survives as a conflict — instead of relying on the deletedGeneration
 // fallback alone. A nil clock reproduces the field-less (0.16) tombstone, which
 // reconciliation still handles by the Generation/deletedGeneration path.
 func (v *Vault) saveTombstoneWithClock(virtualPath string, generation, deletedGeneration int64, clock map[string]int64) error {
@@ -767,7 +767,7 @@ func (v *Vault) saveManifestRecord(rec ManifestRecord) error {
 	if rec.File.Generation == 0 {
 		rec.File.Generation = unixNanoOrNow(rec.UpdatedAt)
 	}
-	// Mirror the vector clock to the manifest level (design D4.1): the FileRecord
+	// Mirror the vector clock to the manifest level: the FileRecord
 	// clock is the source of truth for a live record, but a tombstone's File is
 	// minimal, so reconciliation reads the clock via clockOf (File first, then
 	// here). Keeping both in step means a future field-less read path still finds

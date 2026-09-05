@@ -38,10 +38,10 @@ type Result struct {
 	RsyncOutput string            `json:"rsyncOutput,omitempty"`
 	Results     []vault.PutResult `json:"results"`
 	// Warnings carries the advisory lines the vault layer records for a put
-	// (design D1.2): a source directory merely NAMED like a SeaVault metadata dir
-	// (a second vault's SeaVaultData, a legacy .seavault in a backup tree) that
+	// : a source directory merely NAMED like a SeaVault metadata dir
+	// (a second vault's SeaVaultData, a legacy.seavault in a backup tree) that
 	// was imported as plain content rather than skipped. Dropping these here is
-	// finding peer/F4 — the operator sees per-file success with no advisory.
+	//  — the operator sees per-file success with no advisory.
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -177,7 +177,7 @@ func putViaRsync(ctx context.Context, v *vault.Vault, sourcePath string, virtual
 
 	// Exclude exactly THIS vault's own metadata directory, anchored to its relative
 	// path within the source, rather than an unanchored any-depth name match
-	// (design D1.2). A foreign metadata-named directory nested in the source is
+	// . A foreign metadata-named directory nested in the source is
 	// therefore staged and imported as plain content (PutPath warns about it),
 	// never silently dropped here.
 	args := []string{"-a"}
@@ -238,7 +238,7 @@ func rejectMetadataSource(vaultRoot, src string) error {
 		return err
 	}
 	// Refuse a source under EITHER metadata directory name of THIS vault (design
-	// D1.2): both the visible SeaVaultData and the legacy .seavault layout.
+	// ): both the visible SeaVaultData and the legacy.seavault layout.
 	for _, name := range vault.MetadataDirNames {
 		meta := filepath.Join(root, name)
 		rootRel, relErr := filepath.Rel(meta, src)

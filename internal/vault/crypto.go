@@ -39,7 +39,7 @@ const (
 
 // errWrongSecret is the single generic unlock failure returned whenever a
 // supplied secret does not open a vault — the legacy top-level wrap, or any
-// WrapEntry (design D3.2, P1-7). It is deliberately the SAME value for every
+// WrapEntry. It is deliberately the SAME value for every
 // path so a wrong secret yields no per-entry oracle: the caller cannot learn
 // which entry (or how many) were tried, only that none matched. Its message is
 // unchanged from the pre-A2 wrong-password error so existing callers and 0.16
@@ -122,7 +122,7 @@ func NormalizeKDFConfig(cfg KDFConfig, creating bool) (KDFConfig, error) {
 	return cfg, nil
 }
 
-// KDF strength floors (design D6.2, P2 kdf-no-floor-weak-defaults). Enforced at
+// KDF strength floors (P2 kdf-no-floor-weak-defaults). Enforced at
 // creation entrypoints only (cmdInit, the webui create-vault handler), never
 // inside NormalizeKDFConfig, which existing tests rely on to normalise weak or
 // bare configs without rejecting them.
@@ -135,7 +135,7 @@ const (
 	minPBKDF2Iterations    = 600000
 )
 
-// ValidateKDFStrength enforces the D6.2 minimum work-factor floors on a KDF
+// ValidateKDFStrength enforces the minimum work-factor floors on a KDF
 // config that has ALREADY been run through NormalizeKDFConfig(cfg, true). The
 // error names the floor so an operator knows what to raise. Callers must
 // normalise first; passing an un-normalised (e.g. algorithm-only) config gives
@@ -225,19 +225,19 @@ func deriveSubkey(master []byte, info string) []byte {
 }
 
 // wrapEntryAAD returns the AES-256-GCM associated data for a wrap entry (design
-// D3.1/D2.5, P1-7). An empty WrapEntry.AAD selects the legacy bare wrap AAD —
+// ). An empty WrapEntry.AAD selects the legacy bare wrap AAD —
 // used by migrated wraps, protected against a Version downgrade only by the
-// config MAC covering Version (slice 3). A non-empty AAD is the scheme tag of a
+// config MAC covering Version. A non-empty AAD is the scheme tag of a
 // newly-created vault's versioned wrap: the current config Version is
 // interpolated so a Version downgrade breaks the unwrap independent of the MAC.
-// The tag itself is MAC-covered (slice 3), so it cannot be stripped to force the
+// The tag itself is MAC-covered, so it cannot be stripped to force the
 // bare-AAD path.
 // wrapEntryAAD returns the AEAD additional-data for a wrap entry. A2 writes only
 // e.AAD=="" (the bare, version-independent wrapAAD): version-binding the AAD is
 // redundant with the ConfigMAC (which covers Version) AND incompatible with
 // seal-format's legitimate Version bump, since this interpolates the CURRENT
 // config version at read time. The non-empty branch is read-tolerance only,
-// for a possible future scheme that pins the bound version per entry (design D2.5).
+// for a possible future scheme that pins the bound version per entry.
 func wrapEntryAAD(e WrapEntry, version int) []byte {
 	if e.AAD == "" {
 		return []byte(wrapAAD)
@@ -302,7 +302,7 @@ func unwrapKeys(password string, cfg KDFConfig, nonceB64, ctB64 string) (Keys, e
 }
 
 // unwrapEntry unwraps the master||index bundle from a single WrapEntry (design
-// D3.2, P1-7): derive the wrap key from the entry's own KDF salt/cost, then open
+// ): derive the wrap key from the entry's own KDF salt/cost, then open
 // its AES-256-GCM ciphertext under the entry's AAD (bare or versioned, see
 // wrapEntryAAD). A failed AEAD open returns the generic errWrongSecret so a
 // caller trying several entries gets no per-entry oracle; a malformed entry

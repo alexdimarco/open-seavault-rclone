@@ -113,7 +113,7 @@ func (b *Backend) copy(ctx context.Context, op transport.Operation, src, dst str
 }
 
 // localMeta resolves the local vault's metadata directory, accepting BOTH the
-// visible SeaVaultData and the legacy .seavault name (design D1.2).
+// visible SeaVaultData and the legacy.seavault name.
 func localMeta(root string) string {
 	name, _, err := vault.ResolveMetaDir(root)
 	if err != nil {
@@ -123,8 +123,8 @@ func localMeta(root string) string {
 }
 
 // remoteMeta mirrors the local metadata directory name onto the remote path so a
-// push/pull round-trips symmetrically for both the SeaVaultData and .seavault
-// layouts (design D1.2). localRoot supplies the resolved name.
+// push/pull round-trips symmetrically for both the SeaVaultData and.seavault
+// layouts. localRoot supplies the resolved name.
 func remoteMeta(remote, localRoot string) string {
 	name, _, err := vault.ResolveMetaDir(localRoot)
 	if err != nil {

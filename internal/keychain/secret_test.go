@@ -9,10 +9,10 @@ import (
 	"testing"
 )
 
-// TestSecurityCommandLineQuoting covers the all-OS half of R15: the helper wraps
+// TestSecurityCommandLineQuoting covers the all-OS half of: the helper wraps
 // each value in double quotes and escapes embedded quotes and backslashes so the
 // literal account and secret survive `security`'s interactive parser, and the
-// service/flag skeleton is exactly as design D8.1 specifies.
+// service/flag skeleton is exactly as the design specifies.
 func TestSecurityCommandLineQuoting(t *testing.T) {
 	got := securityCommandLine(`acc"ount`, `p\a"ss`)
 	// The command verb and flags, in order.
@@ -32,7 +32,7 @@ func TestSecurityCommandLineQuoting(t *testing.T) {
 	}
 }
 
-// TestSecretIsStorable covers the control-character refusal of R15 on every OS:
+// TestSecretIsStorable covers the control-character refusal of on every OS:
 // a control byte in either the account or the secret yields ErrSecretNotStorable,
 // while ordinary printable UTF-8 (including spaces and high runes) is storable.
 func TestSecretIsStorable(t *testing.T) {

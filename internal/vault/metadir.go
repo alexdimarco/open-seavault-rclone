@@ -11,22 +11,22 @@ import (
 )
 
 // MetadataDirNames are the directory names, preferred first, under which a vault
-// keeps its encrypted metadata (design D1.1, P0-4). New vaults use the visible
+// keeps its encrypted metadata. New vaults use the visible
 // "SeaVaultData"; ".seavault" is the legacy hidden name a 0.15.0 client created
 // and still opens. The legacy MetadataDirName constant is retained for callers
 // that have not moved to the list; new code resolves through MetadataDirNames.
 var MetadataDirNames = []string{"SeaVaultData", ".seavault"}
 
 // ErrAmbiguousMetadataDir is returned when a vault root holds BOTH a
-// SeaVaultData/vault.json and a .seavault/vault.json: the tool refuses to guess
-// which is authoritative rather than silently picking one (design D1.1).
+// SeaVaultData/vault.json and a.seavault/vault.json: the tool refuses to guess
+// which is authoritative rather than silently picking one.
 var ErrAmbiguousMetadataDir = errors.New("vault root holds both a SeaVaultData and a .seavault metadata directory; refusing to guess which is authoritative — keep one and remove or rename the other")
 
 // ResolveMetaDir reports which metadata directory a vault root uses. It returns
 // the first name in MetadataDirNames whose <root>/<name>/vault.json exists
 // (exists=true); if none exists it returns the preferred name with exists=false;
 // if BOTH names hold a vault.json it returns ErrAmbiguousMetadataDir (design
-// D1.1). It never silently picks between the two.
+// ). It never silently picks between the two.
 func ResolveMetaDir(root string) (name string, exists bool, err error) {
 	var found []string
 	for _, n := range MetadataDirNames {
@@ -48,7 +48,7 @@ func ResolveMetaDir(root string) (name string, exists bool, err error) {
 // isMetadataDirName reports whether a bare directory segment matches a known
 // metadata directory name (case-insensitively). It is used by the source-walk
 // exclusions to tell a foreign metadata-named directory (imported as plain
-// content, with a warning) from ordinary content (design D1.2).
+// content, with a warning) from ordinary content.
 func isMetadataDirName(segment string) bool {
 	for _, n := range MetadataDirNames {
 		if strings.EqualFold(segment, n) {
@@ -59,12 +59,12 @@ func isMetadataDirName(segment string) bool {
 }
 
 // syncClientFolderNames are the local sync-client folder names whose presence in
-// a vault root's path triggers the D1.3 preflight note. There is deliberately no
+// a vault root's path triggers the preflight note. There is deliberately no
 // bare "Sync" token (too generic).
 var syncClientFolderNames = []string{"Nextcloud", "ownCloud", "OneDrive", "Dropbox", "Google Drive", "iCloud Drive", "Syncthing"}
 
 // hasSyncClientSegment reports whether any path SEGMENT of root equals a known
-// sync-client folder name, case-insensitively (design D1.3, matcher shape reused
+// sync-client folder name, case-insensitively (matcher shape reused
 // from userpath's segment-wise comparison).
 func hasSyncClientSegment(root string) bool {
 	for _, seg := range strings.Split(filepath.ToSlash(root), "/") {
@@ -81,7 +81,7 @@ func hasSyncClientSegment(root string) bool {
 }
 
 // SyncClientPreflightNote returns the one-line CREATE-time informational note of
-// design D1.3 when the vault root sits under a known sync-client folder, and ""
+// the design when the vault root sits under a known sync-client folder, and ""
 // otherwise. It is used by `init` and the GUI create path. The note states that
 // new vaults use the visible SeaVaultData directory, how to sync a legacy hidden
 // .seavault vault, and the one-way I1 boundary: a vault this version creates is
@@ -99,7 +99,7 @@ func SyncClientPreflightNote(root string) string {
 }
 
 // LegacyOpenPreflightNote returns the one-line note shown when OPENING a legacy
-// hidden .seavault vault under a known sync-client folder (friction Owner C2). It
+// hidden.seavault vault under a known sync-client folder (C2). It
 // is deliberately shorter than SyncClientPreflightNote: opening an existing
 // .seavault vault, the only advice that applies is to enable hidden-file sync so
 // the vault reaches the other devices, so the create-oriented SeaVaultData /

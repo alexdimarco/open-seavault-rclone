@@ -10,18 +10,18 @@ import (
 )
 
 // rewriteConfig is the single funnel every wrap/config mutation goes through
-// (design D3.5): it copies the current config, applies mutate, bumps FormatEpoch,
+// : it copies the current config, applies mutate, bumps FormatEpoch,
 // recomputes the ConfigTag over the master-derived key, publishes vault.json
 // atomically (atomicWriteFile + fsyncDir, the A1 Windows-hardened rename), and
 // THEN advances the device anchor high-water — config first, then anchor
-// (Condition 7). A crash between the two leaves at worst a spurious self-rollback
+// . A crash between the two leaves at worst a spurious self-rollback
 // warning on this device's next Open, never an unprotected window; a crash during
 // the config write leaves the prior fully-tagged config (single-file atomic
 // rename), never a torn or untagged one.
 //
 // The mutation starts from v.Config — the config Open already read, version- and
 // MAC-verified — so a concurrent on-disk change is not silently merged in; the
-// concurrent-divergence case is caught at the NEXT Open (D3.6). The master key
+// concurrent-divergence case is caught at the NEXT Open. The master key
 // (and thus the config-MAC key) is unchanged by any rotation, so the recomputed
 // tag always verifies for the same holder.
 func (v *Vault) rewriteConfig(mutate func(*VaultConfig) error) error {
@@ -53,7 +53,7 @@ func (v *Vault) rewriteConfig(mutate func(*VaultConfig) error) error {
 
 // freshWrapKDF returns a copy of base (same algorithm and cost) with a new random
 // 32-byte salt, so a rewrap derives an independent wrap key even under the same
-// password (design D3.4: fresh salt/nonce on every rotation).
+// password (the design: fresh salt/nonce on every rotation).
 func freshWrapKDF(base KDFConfig) (KDFConfig, error) {
 	salt, err := randomBytes(32)
 	if err != nil {
@@ -65,7 +65,7 @@ func freshWrapKDF(base KDFConfig) (KDFConfig, error) {
 }
 
 // passwordEntryID returns the ID of the existing password WrapEntry (stable per
-// entry, design D3.1), or "" when there is none to reuse.
+// entry), or "" when there is none to reuse.
 func passwordEntryID(c *VaultConfig) string {
 	for _, e := range c.WrapEntries {
 		if e.Type == WrapTypePassword {
@@ -77,9 +77,9 @@ func passwordEntryID(c *VaultConfig) string {
 
 // applyPasswordRewrap rewraps the SAME master||index bundle into the single
 // password WrapEntry AND the legacy top-level fields under newPassword, each with
-// a fresh salt/nonce (design D3.4, Condition 4). It replaces every existing
+// a fresh salt/nonce. It replaces every existing
 // password entry with one new entry (rotation never appends a second password
-// entry, D3.2) and preserves recovery entries untouched. The legacy fields are
+// entry) and preserves recovery entries untouched. The legacy fields are
 // kept current so a 0.16 peer keeps unlocking through the grace release and the
 // old password stops opening on both A1 and A2 clients. No chunk or manifest is
 // rewritten — only the wrap changes. Shared by password change and recovery
@@ -112,7 +112,7 @@ func applyPasswordRewrap(c *VaultConfig, newPassword string, keys Keys) error {
 		kept = append(kept, e)
 	}
 	c.WrapEntries = append(kept, newEntry)
-	// Keep the legacy top-level wrap current (Condition 4): fresh salt/nonce over
+	// Keep the legacy top-level wrap current: fresh salt/nonce over
 	// the same bundle under the new password.
 	legKDF, err := freshWrapKDF(c.KDF)
 	if err != nil {
@@ -128,13 +128,13 @@ func applyPasswordRewrap(c *VaultConfig, newPassword string, keys Keys) error {
 	return nil
 }
 
-// ChangePassword rotates the password of an already-unlocked vault (design D3.4,
-// P1-7): it rewraps the same master||index bundle into the password entry and the
+// ChangePassword rotates the password of an already-unlocked vault (
+// ): it rewraps the same master||index bundle into the password entry and the
 // legacy fields under newPassword (fresh salt/nonce), bumps FormatEpoch, and
 // re-tags the config — all in one rewriteConfig transaction. No chunk or manifest
 // is rewritten, so every file put before the change still decrypts. The OS
 // keychain is NOT touched here; callers refresh it via RefreshKeychainSecret
-// after a successful change (Condition 5) because the vault layer does not own
+// after a successful change because the vault layer does not own
 // the keychain policy.
 func (v *Vault) ChangePassword(newPassword string) error {
 	if newPassword == "" {
@@ -147,7 +147,7 @@ func (v *Vault) ChangePassword(newPassword string) error {
 }
 
 // PrepareRecovery mints a fresh 256-bit recovery secret and returns its grouped
-// display phrase plus a commit closure (design D3.3, Condition 12). The phrase is
+// display phrase plus a commit closure. The phrase is
 // shown to the owner ONCE; the caller must obtain a read-back and verify it with
 // RecoveryPhraseMatches BEFORE calling commit — commit writes the recovery
 // WrapEntry (over the same master||index bundle, in one rewriteConfig
@@ -174,7 +174,7 @@ func (v *Vault) PrepareRecovery() (phrase string, commit func() error, err error
 }
 
 // makeRecoveryEntry wraps the bundle under a recovery secret with a fresh KDF salt
-// (same algorithm/cost as base) and a random entry ID (design D3.1/D3.3).
+// (same algorithm/cost as base) and a random entry ID.
 func makeRecoveryEntry(secret string, base KDFConfig, keys Keys) (WrapEntry, error) {
 	kdf, err := freshWrapKDF(base)
 	if err != nil {
@@ -192,14 +192,14 @@ func makeRecoveryEntry(secret string, base KDFConfig, keys Keys) (WrapEntry, err
 }
 
 // RedeemRecovery completes a recovery redemption in ONE rewriteConfig transaction
-// (design D3.3, Condition 1): it removes the redeemed recovery entry (identified
+// : it removes the redeemed recovery entry (identified
 // by redeemedEntryID, the ID OpenWithRecovery returned) AND rewraps the bundle
 // into the password entry and legacy fields under newPassword. Removing the entry
 // matters because a password rewrap alone leaves master||index unchanged, so the
 // leaked phrase would keep unwrapping it; the redeemed entry must be gone. The
 // transaction is atomic — a crash leaves either the prior tagged config (recovery
 // intact, old password) or the new one (recovery gone, new password), never a
-// half state. The keychain is refreshed by the caller (Condition 5).
+// half state. The keychain is refreshed by the caller.
 func (v *Vault) RedeemRecovery(redeemedEntryID, newPassword string) error {
 	if newPassword == "" {
 		return errors.New("new password must not be empty")
@@ -217,7 +217,7 @@ func (v *Vault) RedeemRecovery(redeemedEntryID, newPassword string) error {
 }
 
 // RevokeRecovery removes a recovery WrapEntry by ID in a rewriteConfig
-// transaction (design D3.3): a specific recovery credential is retired without
+// transaction: a specific recovery credential is retired without
 // touching the password or any other entry. It refuses to remove a password
 // entry (that path is ChangePassword) or an unknown ID.
 func (v *Vault) RevokeRecovery(entryID string) error {
@@ -249,7 +249,7 @@ func removeWrapEntry(c *VaultConfig, id, wantType string) bool {
 	return removed
 }
 
-// WrapEntryRef is a secret-free summary of a wrap entry (design D3.3): the ID and
+// WrapEntryRef is a secret-free summary of a wrap entry: the ID and
 // type only, so a CLI/GUI can list recovery entries for revoke without exposing
 // any ciphertext or salt.
 type WrapEntryRef struct {
@@ -258,7 +258,7 @@ type WrapEntryRef struct {
 }
 
 // WrapEntryRefs returns the ID and type of every wrap entry, in on-disk order
-// (design D3.3). It reads only v.Config, writes nothing (I2), and never returns
+// . It reads only v.Config, writes nothing (I2), and never returns
 // wrap ciphertext or salts.
 func (v *Vault) WrapEntryRefs() []WrapEntryRef {
 	v.mu.Lock()

@@ -109,7 +109,7 @@ func main() {
 
 	if err != nil {
 		// A command that wants a specific, non-1 process exit code (e.g. the gc
-		// dry-run "action required" code 3, friction II-2) returns an
+		// dry-run "action required" code 3) returns an
 		// *exitCodeError. It carries its own exit code and has already written any
 		// human message itself, so main neither prints "error:" nor forces exit 1.
 		var ec *exitCodeError
@@ -122,11 +122,11 @@ func main() {
 }
 
 // exitCodeError lets a command request a specific process exit code without the
-// generic "error: ..." print that main applies to a real failure. The command
+// generic "error:..." print that main applies to a real failure. The command
 // is responsible for emitting any human-facing line before returning it. Exit
 // code 3 means "action required": a bare `seavault gc` dry run found chunks it
 // would reclaim but did not, so an automated caller that omitted --confirm can
-// detect via the exit status that reclamation did not happen (friction II-2).
+// detect via the exit status that reclamation did not happen.
 type exitCodeError struct {
 	code int
 	msg  string
@@ -174,7 +174,7 @@ func cmdInit(args []string) error {
 	default:
 		return fmt.Errorf("unsupported KDF %q", *kdf)
 	}
-	// Enforce the D6.2 KDF strength floors before prompting for a password:
+	// Enforce the KDF strength floors before prompting for a password:
 	// normalise so a request that names only the algorithm gets the defaults,
 	// then validate the normalised config. The check never lives inside
 	// NormalizeKDFConfig (existing tests rely on it not rejecting weak configs).
@@ -219,11 +219,11 @@ func cmdInit(args []string) error {
 
 // openVaultForCLI resolves the vault password (SEAVAULT_PASSWORD, then the OS
 // keychain, then a hidden prompt) and opens the vault, threading the
-// freshness-rollback disposition (design D5.3, Condition 9): a password TYPED at
+// freshness-rollback disposition: a password TYPED at
 // the prompt is an INTERACTIVE unlock (a rollback warns and opens), while a
 // password auto-supplied by SEAVAULT_PASSWORD or the keychain is NON-INTERACTIVE
 // (a rollback hard-refuses with ErrConfigRolledBack unless --accept-rollback).
-// It surfaces the D1.3 preflight note, the D5.3 rollback warning, and the D5.4
+// It surfaces the preflight note, the rollback warning, and the
 // anchor note to stderr, never stdout, so machine-readable output stays clean.
 func openVaultForCLI(vaultPath string, useKeychain, acceptRollback bool) (*vault.Vault, error) {
 	password, _, err := resolveVaultPasswordSource(vaultPath, useKeychain)
@@ -244,16 +244,16 @@ func openVaultForCLI(vaultPath string, useKeychain, acceptRollback bool) (*vault
 }
 
 // openVaultForWrite opens a vault for a WRITE-CAPABLE command (put, remove, gc,
-// compact, serve) and fires the ConfigMAC ratchet (design D2.4, R5, build-order
-// step 3, finding config-server/F1): on the first such open of a legacy/untagged
+// compact, serve) and fires the ConfigMAC ratchet (, build-order
+// step 3): on the first such open of a legacy/untagged
 // vault it opportunistically writes the ConfigTag, bumps FormatEpoch, and latches
-// the device anchor's has-tag bit — ending the TOFU window that T-A2-1 config
+// the device anchor's has-tag bit — ending the TOFU window that config
 // forgery (VaultID / ChunkParams / KDF / wrap edits) exploits. EnsureConfigMAC is
 // a no-op on an already-tagged vault, so repeated write opens ratchet exactly
-// once, and it is NEVER called by a read-only command (invariant I2), so a bare
+// once, and it is NEVER called by a read-only command, so a bare
 // `list`/`get`/`verify` never mutates the config. The ratchet is best-effort: a
 // failed tag write surfaces a warning and does not block the primary operation
-// (the anchor half is already best-effort inside EnsureConfigMAC, design D5.4).
+// (the anchor half is already best-effort inside EnsureConfigMAC).
 func openVaultForWrite(vaultPath string, useKeychain, acceptRollback bool) (*vault.Vault, error) {
 	v, err := openVaultForCLI(vaultPath, useKeychain, acceptRollback)
 	if err != nil {
@@ -312,9 +312,9 @@ func cmdPut(args []string) error {
 	for _, r := range res.Results {
 		fmt.Printf("put %-50s %10d bytes %4d chunks %4d new\n", r.Path, r.Size, r.ChunkCount, r.NewChunkCount)
 	}
-	// Surface the D1.2 advisory lines (a source directory named like a SeaVault
+	// Surface the advisory lines (a source directory named like a SeaVault
 	// metadata dir imported as plain content, never silently skipped). Dropping
-	// these was finding peer/F4.
+	// these was.
 	for _, warning := range res.Warnings {
 		fmt.Fprintln(os.Stderr, "warning:", warning)
 	}
@@ -383,7 +383,7 @@ func cmdExport(args []string) error {
 	} else {
 		fmt.Printf("exported %d file(s), skipped %d, %d bytes to %s\n", res.Exported, res.Skipped, res.Bytes, res.DestPath)
 	}
-	// Surface the (original -> written) mapping (friction Operator C6, D7.2). On a
+	// Surface the (original -> written) mapping (C6). On a
 	// real export only the sanitised/disambiguated entries are listed (silence when
 	// every file kept its name); a dry run lists every planned destination and
 	// flags the ones that will be renamed, so a scripting operator sees in advance
@@ -422,7 +422,7 @@ func exportWrittenDisplay(res vault.ExportResult, e vault.ExportEntry) string {
 }
 
 // exportMappingLines renders the (original -> written) mapping lines for the CLI
-// (friction Operator C6, D7.2). In dry-run mode every planned entry is listed
+// (C6). In dry-run mode every planned entry is listed
 // and the sanitised/disambiguated ones are flagged `(renamed)`; otherwise only
 // the renamed entries are listed under a header, so a plain export whose files
 // all kept their names prints nothing extra. Returns an empty slice when there
@@ -594,14 +594,14 @@ func cmdGC(args []string) error {
 		return err
 	}
 	// Notice when --fence is clamped up to the 1h minimum or falls back to the
-	// default (friction Cold C5), so an operator who passed --fence 30m is not
+	// default (C5), so an operator who passed --fence 30m is not
 	// left believing it took effect. The notice goes to stderr; --json stdout is
 	// unchanged.
 	effectiveFence, fenceNotice := clampFence(*fence)
 	if fenceNotice != "" {
 		fmt.Fprintln(os.Stderr, fenceNotice)
 	}
-	// Default is a dry run (design D3.1): compute candidates and the compaction
+	// Default is a dry run: compute candidates and the compaction
 	// plan, change nothing. --confirm runs the two-phase, fenced collection: it
 	// compacts, writes deletion intents in phase 1, and removes only chunks whose
 	// intent, first-seen record, and file mtime are all older than the fence.
@@ -616,7 +616,7 @@ func cmdGC(args []string) error {
 		return printJSON(report)
 	}
 	printGCReport(report)
-	// Friction II-2: a bare `seavault gc` that would reclaim something but did not
+	// Friction: a bare `seavault gc` that would reclaim something but did not
 	// (no --confirm) writes a one-line advisory to stderr and exits 3, so a legacy
 	// cron/reclaim script no longer no-ops silently with exit 0.
 	if msg, code := gcDryRunAdvisory(report); code != 0 {
@@ -667,7 +667,7 @@ func printCompactPlan(r vault.CompactReport) {
 // --confirm run would act on: unreferenced chunk candidates, deletion intents
 // already pending, or a non-empty compaction plan (conflict copies to
 // materialise, superseded manifests to remove, or temp-file orphans to sweep).
-// It is the trigger for the friction II-2 advisory.
+// It is the trigger for the advisory.
 func gcReportActionable(r vault.GCReport) bool {
 	if len(r.Candidates) > 0 || len(r.Pending) > 0 {
 		return true
@@ -682,7 +682,7 @@ func gcReportActionable(r vault.GCReport) bool {
 }
 
 // gcDryRunAdvisory returns the one-line stderr advisory and the process exit
-// code for a completed gc report (friction II-2, Cold C3 / Operator C1). When
+// code for a completed gc report. When
 // --confirm was absent and the dry run found something actionable, it returns
 // the advisory naming the unreferenced-chunk count and bytes plus exit code 3
 // ("action required"), so a scripted caller that ran a bare `seavault gc` sees —
@@ -700,7 +700,7 @@ func gcDryRunAdvisory(r vault.GCReport) (string, int) {
 // GCFenceDefault 72h) and returns the effective fence alongside a one-line
 // stderr notice when the requested value had to be changed, so an operator who
 // passed --fence 30m is not left believing they set a 30-minute fence (friction
-// Cold C5). A value at or above the 1h minimum is used unchanged (no notice); a
+// ). A value at or above the 1h minimum is used unchanged (no notice); a
 // positive value below it is raised to 1h; a zero or negative value selects the
 // 72h default. The notice is empty exactly when the requested value is used as-is.
 func clampFence(requested time.Duration) (time.Duration, string) {
@@ -714,7 +714,7 @@ func clampFence(requested time.Duration) (time.Duration, string) {
 }
 
 // oldestIntentAge is a human summary of the oldest pending deletion intent for
-// the verify and gc reports (design D3.6).
+// the verify and gc reports.
 func oldestIntentAge(pending []vault.PendingIntent) string {
 	oldest := int64(-1)
 	for _, p := range pending {
@@ -729,21 +729,21 @@ func oldestIntentAge(pending []vault.PendingIntent) string {
 }
 
 // compactSynopsis is the one-line description shown by `compact --help` (friction
-// Cold C5): a cold operator scanning the flags learns what compact does and, in
+// ): a cold operator scanning the flags learns what compact does and, in
 // particular, that it never removes chunk objects (that is gc's job).
 func compactSynopsis() string {
 	return "compact reclaims metadata only: it materialises deferred sync-conflict copies, removes superseded/redundant manifests, and sweeps stale .tmp-* orphans. It never removes chunk objects — use `seavault gc --confirm` to reclaim chunk space."
 }
 
 // verifySynopsis is the one-line description shown by `verify --help` (friction
-// Cold C5).
+// ).
 func verifySynopsis() string {
 	return "verify checks that every referenced chunk is present and decrypts, and lists any garbage-collection deletion intents still pending (a delete in flight)."
 }
 
 // writeSubcommandUsage renders a subcommand's --help block: the usage line, a
 // one-line synopsis, then the flag defaults. Shared by the command's fs.Usage
-// and by tests, so the wiring is exercised (friction Cold C5).
+// and by tests, so the wiring is exercised (C5).
 func writeSubcommandUsage(fs *flag.FlagSet, usageLine, synopsis string) {
 	out := fs.Output()
 	fmt.Fprintf(out, "%s\n\n%s\n\n", usageLine, synopsis)
@@ -853,7 +853,7 @@ func (r *repeatableString) Set(v string) error {
 }
 
 // generateServePassword returns 24 random bytes as base64url without padding
-// (32 characters). See design D2.2.
+// (32 characters). See.
 func generateServePassword() (string, error) {
 	buf := make([]byte, 24)
 	if _, err := rand.Read(buf); err != nil {
@@ -863,7 +863,7 @@ func generateServePassword() (string, error) {
 }
 
 // resolveServeCredentials resolves the WebDAV Basic-auth credentials for
-// `seavault serve`. Password source precedence, first wins (design D2.2):
+// `seavault serve`. Password source precedence, first wins:
 // passwordFile (content, trailing newline trimmed, must be non-empty) >
 // envPassword (SEAVAULT_SERVE_PASSWORD) > a freshly generated 24-byte base64url
 // password (32 chars). printIt reports whether the resolved password should be
@@ -906,7 +906,7 @@ func resolveServeCredentials(user, passwordFile, envPassword string, quiet bool)
 // address: the bind host is added only when it is a real non-loopback,
 // non-unspecified name or IP (loopback and localhost are always accepted, and an
 // unspecified address is never added), followed by the explicit --allow-host
-// values. See design D1.2/D1.4.
+// values. See.
 func allowedHostsForBind(addr string, extra []string) []string {
 	host := addr
 	if h, _, err := net.SplitHostPort(addr); err == nil {
@@ -928,7 +928,7 @@ func allowedHostsForBind(addr string, extra []string) []string {
 }
 
 // buildLoopbackServer constructs the http.Server used by `serve` and `gui` with
-// the Phase 0 header/idle timeouts (design D6.1): ReadHeaderTimeout bounds
+// the Phase 0 header/idle timeouts: ReadHeaderTimeout bounds
 // slowloris header dribbles and IdleTimeout bounds idle keep-alive connections.
 // It sets no ReadTimeout (large uploads) and no WriteTimeout (large downloads and
 // the GUI's SSE browser-session stream).
@@ -942,7 +942,7 @@ func buildLoopbackServer(addr string, h http.Handler) *http.Server {
 }
 
 // listenErrorHint wraps a ListenAndServe/ListenAndServeTLS failure with a legible
-// hint (II-3, friction Owner C5): now that `seavault gui` no longer kills other
+// hint (, C5): now that `seavault gui` no longer kills other
 // seavault processes, a second GUI or serve on the same address fails to bind,
 // and the operator needs to know the port is already taken rather than see a raw
 // "bind: address already in use". A nil error passes through as nil; the original
@@ -955,7 +955,7 @@ func listenErrorHint(addr string, err error) error {
 }
 
 // printLaunchGuidance opens launchURL in the browser when openInBrowser is set
-// and always prints the fallback line to out (C1, friction Owner C1). When the
+// and always prints the fallback line to out (C1, C1). When the
 // injected open function reports an error it is surfaced to errOut instead of
 // being discarded, so a headless / no-default-browser machine no longer strands
 // the owner on an apparently-hung command. open is injected for testability.
@@ -971,14 +971,14 @@ func printLaunchGuidance(out, errOut io.Writer, launchURL string, openInBrowser 
 // stdoutLooksRedirected reports whether stdout (described by fi) is NOT a
 // character device, i.e. a file, pipe, or socket rather than a terminal. Serve
 // uses it to warn that a freshly generated WebDAV credential is being written to
-// a log/redirect (friction Cold C5). Pure and portable: os.ModeCharDevice is
+// a log/redirect (C5). Pure and portable: os.ModeCharDevice is
 // defined on every OS.
 func stdoutLooksRedirected(fi os.FileInfo) bool {
 	return fi.Mode()&os.ModeCharDevice == 0
 }
 
 // keychainUnavailableNote returns the one-line stderr note printed when the OS
-// keychain was tried and returned an error before falling back (friction Cold
+// keychain was tried and returned an error before falling back (
 // C4). A nil error yields the empty string (nothing to print). Only the first
 // line of the error is used to keep the note to a single line.
 func keychainUnavailableNote(err error) string {
@@ -1138,11 +1138,11 @@ func cmdGUI(args []string) error {
 	if fs.NArg() == 1 {
 		initial = fs.Arg(0)
 	}
-	// II-3 (friction Owner C5 / Cold C1): do NOT terminate other seavault
-	// processes here. The old TerminateExistingSeaVaultProcesses() call SIGKILLed
+	//  (C5 /): do NOT terminate other seavault
+	// processes here. The old TerminateExistingSeaVaultProcesses call SIGKILLed
 	// EVERY process named "seavault", silently killing a running `seavault serve`
 	// (a Finder/rclone mount) when the owner opened the GUI. A scoped
-	// single-instance lock is Phase B; until then a second GUI on the same --addr
+	// single-instance lock is; until then a second GUI on the same --addr
 	// surfaces a legible bind failure via listenErrorHint below.
 	cfg, err := appconfig.Load()
 	if err != nil {
@@ -1166,7 +1166,7 @@ func cmdGUI(args []string) error {
 		return err
 	}
 	s.AllowedHosts = allowedHostsForBind(*addr, allowHost)
-	// Pick up changes made to .seavault by an external sync client (e.g. the
+	// Pick up changes made to.seavault by an external sync client (e.g. the
 	// Nextcloud desktop client) underneath this long-lived GUI server.
 	stopWatcher := s.StartSyncWatcher(2 * time.Second)
 	defer stopWatcher()
@@ -1350,8 +1350,8 @@ func cmdProfile(args []string) error {
 }
 
 // keychainStatusLine decides what `seavault keychain status` reports (friction
-// Cold C6). getErr is the result of keychain.Get for the vault; serviceReachable
-// is keychain.Check().Available. When Get succeeded, the entry exists. When Get
+// ). getErr is the result of keychain.Get for the vault; serviceReachable
+// is keychain.Check.Available. When Get succeeded, the entry exists. When Get
 // failed but the service is reachable, the entry is simply absent (secret-tool
 // exit 1 / macOS item-not-found), so it reports "no keychain entry for this
 // vault" rather than the install-libsecret advice. Only when the service itself
@@ -1368,7 +1368,7 @@ func keychainStatusLine(serviceReachable bool, getErr error) (line string, isErr
 	return getErr.Error(), true
 }
 
-// cmdPassword implements `seavault password change` (design D3.4, P1-7): rotate
+// cmdPassword implements `seavault password change`: rotate
 // the vault password by rewrapping the same master||index bundle (no chunk or
 // manifest rewrite) and refreshing the OS keychain entry when one exists.
 func cmdPassword(args []string) error {
@@ -1415,7 +1415,7 @@ func cmdPasswordChange(args []string) error {
 }
 
 // cmdRecovery implements `seavault recovery generate|redeem|revoke|list` (design
-// D3.3, P1-7): the recovery-key lifecycle. generate mints a phrase with a
+// ): the recovery-key lifecycle. generate mints a phrase with a
 // mandatory read-back; redeem consumes a phrase to set a new password; revoke
 // retires one entry; list shows the entry IDs to revoke.
 func cmdRecovery(args []string) error {
@@ -1462,7 +1462,7 @@ func cmdRecoveryGenerate(args []string) error {
 	fmt.Println()
 	fmt.Println("    " + phrase)
 	fmt.Println()
-	// MANDATORY read-back before commit (design D3.3, Condition 12): the owner
+	// MANDATORY read-back before commit: the owner
 	// re-enters the phrase, verified against the in-memory value; a mismatch aborts
 	// with nothing written.
 	readback, err := readRecoveryPhrasePrompt("Re-enter the recovery phrase to confirm: ")
@@ -1497,7 +1497,7 @@ func cmdRecoveryRedeem(args []string) error {
 		return err
 	}
 	// A redeemer typed the phrase, so treat it as an interactive unlock (design
-	// D5.3); --accept-rollback still applies to a restored config.
+	// ); --accept-rollback still applies to a restored config.
 	v, entryID, err := vault.OpenWithRecovery(vaultPath, phrase, vault.OpenOptions{AcceptRollback: *acceptRollback})
 	if err != nil {
 		return err
@@ -1574,7 +1574,7 @@ func cmdRecoveryList(args []string) error {
 }
 
 // cmdVault implements `seavault vault seal-format|unseal-format VAULT` (design
-// D1.4, P1-20): the operator's explicit end of the grace release and its
+// ): the operator's explicit end of the grace release and its
 // reversal. seal-format retires SeaVault 0.16 and older by bumping the on-disk
 // Version to 3 and raising MinReader to 3 in one MAC'd rewrite; unseal-format
 // reverses it while no A3 directory-ID re-key has run.
@@ -1611,8 +1611,8 @@ func cmdVaultSealFormat(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Print whatever device signal exists BEFORE asking to confirm (design D1.4,
-	// Condition 14), so the operator judges "every device upgraded" against the
+	// Print whatever device signal exists BEFORE asking to confirm (
+	// ), so the operator judges "every device upgraded" against the
 	// inventory — or, when it is empty, sees the explicit no-telemetry warning.
 	fmt.Fprint(os.Stderr, formatReaderSignal(v.ReaderInventory()))
 	if !*yes {
@@ -1657,7 +1657,7 @@ func cmdVaultUnsealFormat(args []string) error {
 }
 
 // formatReaderSignal renders the device-local reader inventory seal-format shows
-// before retiring older readers (design D1.4, Condition 14). A non-empty
+// before retiring older readers. A non-empty
 // inventory lists each known DeviceID with the format level it reads and when it
 // was last seen; an EMPTY inventory becomes the explicit no-telemetry warning,
 // because the signal is device-local and cannot see a 0.16 peer (which records
@@ -1676,7 +1676,7 @@ func formatReaderSignal(inv []vault.ReaderRecord) string {
 	return b.String()
 }
 
-// confirmPrompt reads a yes/no answer from stdin (design D1.4: seal-format needs
+// confirmPrompt reads a yes/no answer from stdin (the design: seal-format needs
 // an interactive confirmation or --yes). Only an explicit y/yes confirms; a
 // closed stdin (EOF, an unattended pipe) or any other answer declines, so a
 // non-interactive caller that forgot --yes never accidentally seals.
@@ -2261,7 +2261,7 @@ func resolveVaultArg(input string) (string, error) {
 }
 
 // resolveVaultPasswordSource resolves the vault password AND whether the unlock
-// is interactive (design D5.3, Condition 9). SEAVAULT_PASSWORD and the OS
+// is interactive. SEAVAULT_PASSWORD and the OS
 // keychain are NON-interactive sources (an unattended process cannot read a
 // warning, so a rollback must hard-refuse); the hidden prompt is interactive (a
 // human is present). Precedence matches the historical readPasswordForVault:
@@ -2276,7 +2276,7 @@ func resolveVaultPasswordSource(vaultPath string, useKeychain bool) (password st
 			if kerr == nil && p != "" {
 				return p, false, nil
 			}
-			// friction Cold C4: when the keychain was tried and errored, say so
+			//  C4: when the keychain was tried and errored, say so
 			// before falling back instead of silently swallowing the error.
 			if kerr != nil {
 				fmt.Fprintln(os.Stderr, keychainUnavailableNote(kerr))
@@ -2290,7 +2290,7 @@ func resolveVaultPasswordSource(vaultPath string, useKeychain bool) (password st
 	return p, true, nil
 }
 
-// readNewVaultPassword reads a NEW vault password for a rotation (design D3.4):
+// readNewVaultPassword reads a NEW vault password for a rotation:
 // a hidden prompt with confirmation, or SEAVAULT_NEW_PASSWORD for non-interactive
 // scripting (kept separate from SEAVAULT_PASSWORD, which supplies the CURRENT
 // secret, so the two never collide). It never consults SEAVAULT_PASSWORD.
@@ -2315,7 +2315,7 @@ func readNewVaultPassword() (string, error) {
 	return p1, nil
 }
 
-// readRecoveryPhrasePrompt reads a recovery phrase for a redeem (design D3.3):
+// readRecoveryPhrasePrompt reads a recovery phrase for a redeem:
 // SEAVAULT_RECOVERY_PHRASE for non-interactive scripting, else a hidden prompt.
 // Unlike `recovery generate`, the phrase is a value the operator already holds,
 // so an env override is appropriate here.
@@ -2327,7 +2327,7 @@ func readRecoveryPhrasePrompt(prompt string) (string, error) {
 }
 
 // refreshKeychainAfterRotation updates the OS keychain entry for a vault to a new
-// secret ONLY when one already exists (design D3.4, Condition 5), so the next
+// secret ONLY when one already exists, so the next
 // keychain-backed unlock does not fail with the retired password. A vault with no
 // stored secret is left untouched; a keychain write failure is a non-fatal note.
 func refreshKeychainAfterRotation(vaultID, newSecret string) {

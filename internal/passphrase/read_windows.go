@@ -36,7 +36,7 @@ var (
 
 // setConsoleMode is the exec seam a windows-tagged test overrides to assert the
 // mode Read applies (ENABLE_ECHO_INPUT cleared) and that the original mode is
-// restored afterwards (design D8.2).
+// restored afterwards.
 var setConsoleMode = func(handle uintptr, mode uint32) error {
 	ret, _, err := procSetConsoleMode.Call(handle, uintptr(mode))
 	if ret == 0 {
@@ -106,7 +106,7 @@ func readLine(f *os.File) (string, error) {
 }
 
 // Read prompts on stderr and reads a password from stdin without echoing typed
-// characters where the platform allows it (design D8.2). The decision of how to
+// characters where the platform allows it. The decision of how to
 // read is the pure classifyStdin; the syscall probing here only feeds it.
 func Read(prompt string) (string, error) {
 	fmt.Fprint(os.Stderr, prompt)
@@ -138,7 +138,7 @@ func Read(prompt string) (string, error) {
 
 // readFromConin opens the console input device (CONIN$) directly and reads a line
 // with echo disabled — the fallback when stdin is a console-class handle whose
-// GetConsoleMode failed (design D8.2 step 4). Any failure along the way becomes
+// GetConsoleMode failed (the design step 4). Any failure along the way becomes
 // ErrNoHiddenInput rather than an echoing read.
 func readFromConin() (string, error) {
 	name, err := syscall.UTF16PtrFromString("CONIN$")

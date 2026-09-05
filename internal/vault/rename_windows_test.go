@@ -11,8 +11,9 @@ import (
 	"testing"
 )
 
-// R9 (windows leg, compile-only in CI): the errno classifier retries exactly the
-// three transient sharing errors and nothing else (design D5.1). Runs on the
+//	(windows leg, compile-only in CI): the errno classifier retries exactly the
+//
+// three transient sharing errors and nothing else. Runs on the
 // manual Windows drill.
 func TestIsRetryableRenameErrorClassifiesWindowsErrnos(t *testing.T) {
 	retry := []syscall.Errno{errorAccessDenied, errorSharingViolation, errorLockViolation}

@@ -35,7 +35,7 @@ type ExportEntry struct {
 	Skipped  bool   `json:"skipped,omitempty"`
 	Reason   string `json:"reason,omitempty"`
 	// Error carries a per-entry failure so a single unreadable file does not
-	// abort the whole batch (design D7.2). Empty on success.
+	// abort the whole batch. Empty on success.
 	Error string `json:"error,omitempty"`
 }
 
@@ -90,7 +90,7 @@ func (v *Vault) ExportPath(ctx context.Context, virtualPath string, destPath str
 		exactFile = true
 	}
 	// rels maps each match to the portable, batch-disambiguated relative path it
-	// is written under (design D7.2): illegal segments are sanitised so no colon
+	// is written under: illegal segments are sanitised so no colon
 	// reaches a Windows path, and a name that would collide with another target
 	// already chosen in this batch gains the deterministic conflict suffix so
 	// both files are written and neither clobbers the other.
@@ -155,7 +155,7 @@ func (v *Vault) ExportPath(ctx context.Context, virtualPath string, destPath str
 			}
 			// A checkOverwrite failure other than skip (a stat error or a
 			// fail-policy collision) is per-entry: record it and continue so one
-			// bad destination does not abort the batch (design D7.2).
+			// bad destination does not abort the batch.
 			entry.Error = err.Error()
 			result.Failed++
 			result.Entries = append(result.Entries, entry)
@@ -177,11 +177,11 @@ func (v *Vault) ExportPath(ctx context.Context, virtualPath string, destPath str
 }
 
 // exportTargets computes, for the matched virtual paths in order, the relative
-// on-disk path each is written under (design D7.2). Every segment that fails
+// on-disk path each is written under. Every segment that fails
 // ValidatePortableName is sanitised (so no illegal character — a colon most
 // dangerously — reaches the OS path); when the resulting slash path collides
 // case-insensitively with one already chosen in this batch, the leaf gains the
-// deterministic conflict suffix (D4.3) so both files land and neither clobbers
+// deterministic conflict suffix so both files land and neither clobbers
 // the other. A name that is already portable but folds onto an earlier target
 // gets the bare suffix. The returned paths are slash-separated.
 func exportTargets(matches []string, idx Index, vp string, exactFile bool) map[string]string {

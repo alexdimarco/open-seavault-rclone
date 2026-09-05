@@ -9,9 +9,10 @@ import (
 	"testing"
 )
 
-// R10 (windows leg, compile-only in CI): fsyncDir is a no-op that never errors,
+//	(windows leg, compile-only in CI): fsyncDir is a no-op that never errors,
+//
 // even for a directory that does not exist — Windows has no directory-flush
-// primitive (design D5.2). Runs on the manual Windows drill.
+// primitive. Runs on the manual Windows drill.
 func TestFsyncDirIsNoOpOnWindows(t *testing.T) {
 	if err := fsyncDir(t.TempDir()); err != nil {
 		t.Fatalf("windows fsyncDir must be a no-op, got %v", err)

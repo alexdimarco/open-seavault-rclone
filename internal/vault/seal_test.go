@@ -12,8 +12,8 @@ import (
 	"testing"
 )
 
-// TestSealFormatBumpsVersionAndMinReader is the R11 core (design D1.4, P1-20,
-// Condition 14): seal-format bumps Version 2->3 AND MinReader to the format
+// TestSealFormatBumpsVersionAndMinReader is the core (,
+// ): seal-format bumps Version 2->3 AND MinReader to the format
 // ceiling (3) together in one rewriteConfig; a SupportedFormat=2 reader is then
 // fenced with ErrFormatTooNew while this build (SupportedFormat=3) still opens;
 // unseal-format restores Version 2 / MinReader 2 and re-admits the format-2
@@ -112,8 +112,8 @@ func TestSealFormatBumpsVersionAndMinReader(t *testing.T) {
 	}
 }
 
-// TestUnsealFormatRefusedAfterDirIDReKey proves the A3 guard (design D1.4,
-// Condition 14): once a directory-ID re-key has run (CryptoConfig.DirIDEpoch > 0
+// TestUnsealFormatRefusedAfterDirIDReKey proves the A3 guard (
+// ): once a directory-ID re-key has run (CryptoConfig.DirIDEpoch > 0
 // — the marker A3 will set), unseal-format refuses with ErrUnsealAfterReKey
 // because lowering the Version would re-admit readers that can no longer decode
 // the re-keyed manifests. It writes the marker through the real MAC'd config
@@ -153,7 +153,7 @@ func TestUnsealFormatRefusedAfterDirIDReKey(t *testing.T) {
 	}
 }
 
-// TestReaderSignalRecordedOnOpen is the Condition 14 device-signal leg: each Open
+// TestReaderSignalRecordedOnOpen is the the review device-signal leg: each Open
 // records THIS device's reader signal (DeviceID + SupportedFormat) into the
 // device-local, never-synced inventory seal-format prints, and ReaderInventory
 // reads it back.
@@ -195,8 +195,8 @@ func TestReaderSignalRecordedOnOpen(t *testing.T) {
 	}
 }
 
-// TestSealFormatCrossVersion016Refusal is the R11 interop leg (design D1.4,
-// Conditions 3/14): build the merge-base 0.16 binary, have it create a .seavault
+// TestSealFormatCrossVersion016Refusal is the interop leg (
+// the review/14): build the merge-base 0.16 binary, have it create a.seavault
 // vault it can open; before seal it opens; after this build seal-formats it the
 // 0.16 binary hard-refuses on its OWN Version fence ("unsupported vault version
 // 3"); after unseal-format it opens again. It skips when git/go or the fixture
@@ -234,13 +234,13 @@ func TestSealFormatCrossVersion016Refusal(t *testing.T) {
 	const pw = "correct horse battery staple"
 	pwEnv := append(os.Environ(), "SEAVAULT_PASSWORD="+pw, "SEAVAULT_APP_HOME="+t.TempDir())
 
-	// The legacy binary creates a .seavault vault it can open.
+	// The legacy binary creates a.seavault vault it can open.
 	oldVault := filepath.Join(t.TempDir(), "oldvault")
 	if out, err := runFixtureCmd(t, "", pwEnv, oldBin, "init", "--kdf", "pbkdf2", "--pbkdf2-iterations", "1000", oldVault); err != nil {
 		t.Fatalf("legacy init: %v\n%s", err, out)
 	}
 	if !fileExists(filepath.Join(oldVault, ".seavault", "vault.json")) {
-		t.Fatal("the legacy binary must create a hidden .seavault vault")
+		t.Fatal("the legacy binary must create a hidden.seavault vault")
 	}
 	// Before seal the legacy binary opens it.
 	if out, err := runFixtureCmd(t, "", pwEnv, oldBin, "list", oldVault); err != nil {
@@ -278,8 +278,8 @@ func TestSealFormatCrossVersion016Refusal(t *testing.T) {
 	}
 }
 
-// TestSealClearsLegacyWrapUnsealRestores is the tombstone for conditions/F3
-// (design D3.1): seal-format must clear the 0.16-readable legacy top-level wrap
+// TestSealClearsLegacyWrapUnsealRestores is the tombstone for
+// : seal-format must clear the 0.16-readable legacy top-level wrap
 // so a hostile Version-downgraded config cannot let a forgotten 0.16 peer unwrap
 // via the retained legacy fields, while keeping the vault openable (the credential
 // survives as a password WrapEntry) and letting unseal-format restore 0.16 access.
@@ -309,7 +309,7 @@ func TestSealClearsLegacyWrapUnsealRestores(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// conditions/F3: the legacy top-level wrap is gone.
+	// the legacy top-level wrap is gone.
 	if sealed.WrappedKeys != "" || sealed.WrapNonce != "" {
 		t.Fatalf("seal must clear the legacy top-level wrap, got WrappedKeys=%q WrapNonce=%q", sealed.WrappedKeys, sealed.WrapNonce)
 	}
@@ -327,7 +327,7 @@ func TestSealClearsLegacyWrapUnsealRestores(t *testing.T) {
 		t.Fatalf("sealed vault must still open for a current reader: %v", err)
 	}
 
-	// Unseal restores the legacy wrap so a 0.16 peer can unwrap again (R11).
+	// Unseal restores the legacy wrap so a 0.16 peer can unwrap again.
 	v2, err := Open(root, pw)
 	if err != nil {
 		t.Fatal(err)
@@ -352,7 +352,7 @@ func TestSealClearsLegacyWrapUnsealRestores(t *testing.T) {
 
 // unlockWithLegacyOnly unwraps using ONLY the top-level legacy fields, modelling
 // exactly what a 0.16 peer (which ignores WrapEntries) does. It is the test lens
-// for conditions/F3.
+// for.
 func (cfg VaultConfig) unlockWithLegacyOnly(secret string) (Keys, error) {
 	return unwrapKeys(secret, cfg.KDF, cfg.WrapNonce, cfg.WrappedKeys)
 }

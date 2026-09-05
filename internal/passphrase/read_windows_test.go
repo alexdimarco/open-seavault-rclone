@@ -6,9 +6,9 @@ package passphrase
 
 import "testing"
 
-// TestWithEchoDisabledClearsAndRestores is the windows-tagged half of R16: the
+// TestWithEchoDisabledClearsAndRestores is the windows-tagged half of: the
 // console read path clears ENABLE_ECHO_INPUT before reading and restores the
-// original console mode afterwards (design D8.2). It drives the setConsoleMode
+// original console mode afterwards. It drives the setConsoleMode
 // seam so no real console is needed; it runs only on the manual Windows job.
 func TestWithEchoDisabledClearsAndRestores(t *testing.T) {
 	orig := setConsoleMode

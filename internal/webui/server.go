@@ -60,37 +60,37 @@ type Server struct {
 	config         appconfig.Config
 	// AllowedHosts are extra Host names (besides loopback addresses and
 	// "localhost") that ServeHTTP and the embedded localdav server accept. Set
-	// by cmd gui from the bind host and any --allow-host values. See design D1.2.
+	// by cmd gui from the bind host and any --allow-host values. See.
 	AllowedHosts []string
 	// authSessions maps a session cookie value to its state. A session is created
 	// only by redeeming the launch secret (see handleLaunch); its TTL slides 12h
-	// on every request that passes the session check. See design D3.2.
+	// on every request that passes the session check. See.
 	authSessions map[string]session
 	// exportTickets are single-use, short-lived grants for a ZIP download of a
-	// virtual path, keeping the CSRF token out of the download URL. See D4.2.
+	// virtual path, keeping the CSRF token out of the download URL. See.
 	exportTickets map[string]exportTicket
 	// resetNonces gate POST /reset-config against CSRF; each is minted by the GET
-	// page and consumed once. See design D5.
+	// page and consumed once. See.
 	resetNonces map[string]time.Time
 	// chunkCache is the single shared decrypted-chunk cache handed to every
-	// localdav.Server this GUI constructs. See design D7.4.
+	// localdav.Server this GUI constructs. See.
 	chunkCache *vault.ChunkCache
 	// streamSem is the single shared streaming-GET semaphore handed to every
 	// localdav.Server this GUI constructs, so the MaxStreams cap stays GLOBAL
 	// across /dav requests. handleWebDAV builds a fresh localdav.Server per
 	// request; without one shared semaphore each throwaway Server would mint its
 	// own full budget and the read-path memory bound would not hold. See design
-	// D6.3 and finding OA-1.
+	//  and.
 	streamSem chan struct{}
 	// presence is the single shared (path, generation) presence-sweep cache
-	// handed to every localdav.Server this GUI constructs, so the R15 "stat once
+	// handed to every localdav.Server this GUI constructs, so the "stat once
 	// per 10 s window" optimization stays GLOBAL across /dav requests. Because a
 	// fresh localdav.Server is built per request, a private per-request cache
 	// would bind nothing and re-run the full per-chunk stat sweep on every Range
-	// GET (finding IC-1). The presence key is (path, generation) and is NOT
+	// GET. The presence key is (path, generation) and is NOT
 	// vault-qualified, so the cache is scoped to the open vault: handleWebDAV
 	// replaces it whenever presenceVault no longer matches the current vault. See
-	// design D7.3 and finding IC-1.
+	// the design and.
 	presence      *localdav.PresenceCache
 	presenceVault *vault.Vault
 
@@ -102,7 +102,7 @@ type Server struct {
 	shutdownOnce         sync.Once
 	shutdownCh           chan struct{}
 	// pendingRecovery holds an in-flight recovery-key generation awaiting its
-	// mandatory read-back (design D3.3, Condition 12): the minted phrase and the
+	// mandatory read-back: the minted phrase and the
 	// commit closure that writes the entry only after the owner re-enters the
 	// phrase. A new generate replaces any prior pending one; open/close clear it.
 	// Guarded by mu.
@@ -110,7 +110,7 @@ type Server struct {
 }
 
 // pendingRecovery is a recovery-key generation waiting for the read-back
-// (design D3.3, Condition 12). commit writes the WrapEntry only once
+// . commit writes the WrapEntry only once
 // RecoveryPhraseMatches confirms the re-entered phrase against phrase.
 type pendingRecovery struct {
 	phrase string
@@ -122,7 +122,7 @@ type pendingRecovery struct {
 // is true at creation. cookieIssued records when the browser was last handed a
 // Set-Cookie for this session, so a long-lived tab's cookie Expires can be
 // re-issued as sessionOf slides the server-side expiry, instead of the browser
-// force-expiring the cookie at launch+12h. See design D3.2 / friction II-4.
+// force-expiring the cookie at launch+12h. See the design /.
 type session struct {
 	expires      time.Time
 	loggedIn     bool
@@ -130,7 +130,7 @@ type session struct {
 }
 
 // exportTicket is a single-use grant for a ZIP export of path, valid until
-// expires. See design D4.2.
+// expires. See.
 type exportTicket struct {
 	path    string
 	expires time.Time
@@ -140,29 +140,29 @@ const guiAuthAccount = "seavault-gui-http-auth"
 const guiSessionCookie = "seavault_gui_session"
 
 // defaultGUIChunkCacheBytes sizes the single shared decrypted-chunk cache held
-// by the GUI Server and handed to every localdav.Server it builds. See D7.4.
+// by the GUI Server and handed to every localdav.Server it builds. See.
 const defaultGUIChunkCacheBytes = 64 << 20
 
 // defaultGUIMaxStreams sizes the single shared streaming-GET semaphore held by
 // the GUI Server and handed to every localdav.Server it builds, keeping the
 // concurrent-stream cap global across /dav requests. Mirrors localdav's
-// defaultMaxStreams. See design D6.3.
+// defaultMaxStreams. See.
 const defaultGUIMaxStreams = 8
 
 // sessionTTL is the sliding lifetime of a GUI session; it is refreshed on every
-// request that passes the session check. See design D3.2.
+// request that passes the session check. See.
 const sessionTTL = 12 * time.Hour
 
 // cookieRefreshInterval bounds how stale a browser session cookie may get before
 // a gated request re-issues Set-Cookie with a fresh Expires. Without this the
 // cookie's Expires stays pinned to launch+12h even as the server slides its own
-// expiry, and an actively-used tab is force-expired by the browser. II-4.
+// expiry, and an actively-used tab is force-expired by the browser..
 const cookieRefreshInterval = time.Hour
 
-// exportTicketTTL bounds how long a minted ZIP export ticket stays valid. D4.2.
+// exportTicketTTL bounds how long a minted ZIP export ticket stays valid..
 const exportTicketTTL = 120 * time.Second
 
-// resetNonceTTL bounds how long a /reset-config nonce stays valid. D5.1.
+// resetNonceTTL bounds how long a /reset-config nonce stays valid..
 const resetNonceTTL = 10 * time.Minute
 
 //go:embed assets/svlogo/*.png assets/svlogo/*.ico assets/svlogo/README.txt
@@ -299,7 +299,7 @@ type webdavStatusDTO struct {
 	// (Finder/Explorer/rclone). It is true only for a running vault with no GUI
 	// password; when a GUI password is set /dav additionally requires a login
 	// cookie those clients cannot present. Note carries the plain-language pointer
-	// to seavault serve for that case. See friction II-2.
+	// to seavault serve for that case. See.
 	NativeClients bool   `json:"nativeClients"`
 	Note          string `json:"note,omitempty"`
 }
@@ -456,7 +456,7 @@ func (s *Server) ShutdownNotify() <-chan struct{} { return s.shutdownCh }
 
 // StartSyncWatcher launches a background poller that periodically refreshes the
 // open vault's cached index when another process (e.g. the Nextcloud sync
-// client) changes .seavault on disk underneath this long-lived server. The
+// client) changes.seavault on disk underneath this long-lived server. The
 // vault's own writes are absorbed without a reload (see Vault.ReloadIfChanged),
 // so this only pays the rebuild cost on genuine external changes. It returns a
 // stop function and also exits on server shutdown. interval <= 0 disables it.
@@ -554,7 +554,7 @@ func (s *Server) handleBrowserSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The ?token= query check is gone: this endpoint is reached only after the
-	// ServeHTTP session-cookie check, which a rebinding origin cannot pass. D3.4.
+	// ServeHTTP session-cookie check, which a rebinding origin cannot pass..
 	s.mu.Lock()
 	s.browserSeen = true
 	s.lastBrowserHeartbeat = time.Now()
@@ -652,11 +652,11 @@ func (s *Server) handleSVLogoAsset(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Every response, allowed or not, forbids the Referer from leaking the URL
-	// (which may carry the launch secret before the redirect). D1.2/D4.3.
+	// (which may carry the launch secret before the redirect)..
 	w.Header().Set("Referrer-Policy", "no-referrer")
 
 	// The Host allowlist is the FIRST gate: it defeats DNS rebinding before any
-	// handler runs, and before the favicon/asset/session branches. D1.2.
+	// handler runs, and before the favicon/asset/session branches..
 	if !loopback.HostAllowed(r.Host, s.AllowedHosts) {
 		http.Error(w, hostForbiddenBody(r.Host, s.AllowedHosts), http.StatusForbidden)
 		return
@@ -672,14 +672,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 2: launch-secret redemption is the only way to obtain a session. D3.2.
+	// Step 2: launch-secret redemption is the only way to obtain a session..
 	if r.URL.Path == "/" && r.URL.Query().Has("launch") {
 		s.handleLaunch(w, r)
 		return
 	}
 
 	// Step 3: /dav/* is authenticated by the davToken in the path, not a cookie;
-	// a configured GUI password additionally requires a loggedIn session. D3.3.
+	// a configured GUI password additionally requires a loggedIn session..
 	if strings.HasPrefix(r.URL.Path, "/dav/") {
 		if s.guiAuthEnabled() {
 			sess, ok := s.sessionOf(r)
@@ -694,18 +694,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 4: everything else requires a valid session cookie, regardless of
-	// whether a GUI password is configured. D3.3.
+	// whether a GUI password is configured..
 	sess, ok := s.sessionOf(r)
 	if !ok {
 		s.serveNoSession(w, r)
 		return
 	}
 	// Re-issue the browser cookie with a fresh Expires as the server-side TTL
-	// slides, so an actively-used tab is not force-expired at launch+12h. II-4.
+	// slides, so an actively-used tab is not force-expired at launch+12h..
 	s.refreshSessionCookie(w, r, sess)
 
 	// The browser-session SSE stream and heartbeat keep their early dispatch
-	// (they carry no CSRF header) but sit AFTER the session check. D3.3/D3.4.
+	// (they carry no CSRF header) but sit AFTER the session check..
 	if r.URL.Path == "/api/browser-session" {
 		s.handleBrowserSession(w, r)
 		return
@@ -716,7 +716,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 5: a configured GUI password this session has not satisfied yet limits
-	// the reachable surface to the login/help/reset/logout pages. D3.3.
+	// the reachable surface to the login/help/reset/logout pages..
 	if s.guiAuthEnabled() && !sess.loggedIn {
 		s.serveLoginRequired(w, r)
 		return
@@ -725,7 +725,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.serveAuthorized(w, r)
 }
 
-// serveNoSession answers a request that carries no valid GUI session (D3.3 step
+// serveNoSession answers a request that carries no valid GUI session (step
 // 4): the app pages get a static 403 page pointing at the launch link (or, when
 // the redirect ran but no cookie came back, the cookie-blocked variant); /api/*
 // gets a 403 JSON; anything else a 403 text.
@@ -746,7 +746,7 @@ func (s *Server) serveNoSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveLoginRequired answers a request whose session exists but has not logged
-// in yet (a GUI password is configured). D3.3 step 5.
+// in yet (a GUI password is configured). step 5.
 func (s *Server) serveLoginRequired(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/login":
@@ -807,7 +807,7 @@ func (s *Server) serveAuthorized(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// CSRF: a state-changing API call must present the CSRF token, compared in
-	// constant time. D3.3 step 6.
+	// constant time. step 6.
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-SeaVault-Token")), []byte(s.tokenValue())) != 1 {
 			writeJSON(w, http.StatusForbidden, apiError{Error: "invalid browser session token"})
@@ -817,7 +817,7 @@ func (s *Server) serveAuthorized(w http.ResponseWriter, r *http.Request) {
 	s.serveAPI(w, r)
 }
 
-// hostForbiddenBody is the D1.5 403 body naming the remedy, shared shape with
+// hostForbiddenBody is the 403 body naming the remedy, shared shape with
 // localdav.hostForbiddenBody.
 func hostForbiddenBody(rawHost string, extra []string) string {
 	allowed := "loopback addresses, localhost"
@@ -963,14 +963,14 @@ func (s *Server) guiAuthEnabledLocked() bool {
 
 // LaunchURL returns the URL that redeems the launch secret and creates a GUI
 // session; cmd gui prints and opens it. The secret is never placed in the /dav/
-// URL or any API response. See design D3.1.
+// URL or any API response. See.
 func (s *Server) LaunchURL(base string) string {
 	return base + "/?launch=" + s.launchSecret
 }
 
 // sessionOf returns the session named by the request's cookie, sliding its TTL
 // forward on success. It returns false when the cookie is missing, unknown, or
-// expired. See design D3.2/D3.3.
+// expired. See.
 func (s *Server) sessionOf(r *http.Request) (session, bool) {
 	c, err := r.Cookie(guiSessionCookie)
 	if err != nil || strings.TrimSpace(c.Value) == "" {
@@ -994,7 +994,7 @@ func (s *Server) sessionOf(r *http.Request) (session, bool) {
 // by the browser at launch+12h although sessionOf keeps sliding the server-side
 // expiry. The new Expires is the freshly-slid server-side expiry; recording the
 // re-issue time bounds how often it fires. Every gated path calls it right after
-// a successful sessionOf, including /api/browser-heartbeat. See friction II-4.
+// a successful sessionOf, including /api/browser-heartbeat. See.
 func (s *Server) refreshSessionCookie(w http.ResponseWriter, r *http.Request, sess session) {
 	now := time.Now()
 	if now.Sub(sess.cookieIssued) < cookieRefreshInterval {
@@ -1041,7 +1041,7 @@ func (s *Server) sweepExpiredLocked(now time.Time) {
 // handleLaunch redeems the launch secret. A constant-time match mints a fresh
 // session (loggedIn unless a GUI password is configured), sets the cookie, and
 // redirects to /?redeemed=1 so the secret leaves the address bar. A wrong secret
-// answers 403. The secret is multi-use for the process lifetime. See D3.2.
+// answers 403. The secret is multi-use for the process lifetime. See.
 func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
 	provided := r.URL.Query().Get("launch")
 	if subtle.ConstantTimeCompare([]byte(provided), []byte(s.launchSecret)) != 1 {
@@ -1104,7 +1104,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Success sets loggedIn on the EXISTING session (created by the launch
-	// redemption); no new cookie is issued. D3.3 step 5.
+	// redemption); no new cookie is issued. step 5.
 	c, err := r.Cookie(guiSessionCookie)
 	if err != nil || strings.TrimSpace(c.Value) == "" {
 		s.handleLoginPage(w, r, "Your SeaVault session has expired. Open the launch link printed by seavault gui again.")
@@ -1154,12 +1154,12 @@ func (s *Server) handleHelp(w http.ResponseWriter, r *http.Request) {
 
 // handleResetConfigPage renders the reset page. Every render mints a fresh
 // single-use nonce (16 random bytes hex, 10 min) so a subsequent POST can prove
-// it came from this page (D5.1). launchURL is empty for the initial page and
+// it came from this page. launchURL is empty for the initial page and
 // every failure re-render (so the launch secret never appears on a page a user
 // has not yet reset from); on a SUCCESSFUL reset the caller passes s.LaunchURL("")
 // so the primary button links back into the app through a fresh session
 // redemption instead of to /login, which would 403 now that sessions were
-// cleared. See friction C4.
+// cleared. See.
 func (s *Server) handleResetConfigPage(w http.ResponseWriter, r *http.Request, message, launchURL string) {
 	nonce, err := randomHex(16)
 	if err != nil {
@@ -1180,7 +1180,7 @@ func (s *Server) handleResetConfigPage(w http.ResponseWriter, r *http.Request, m
 	}{Message: message, Nonce: nonce, LaunchURL: launchURL})
 }
 
-// consumeResetNonce removes and validates a reset nonce. D5.2.
+// consumeResetNonce removes and validates a reset nonce..
 func (s *Server) consumeResetNonce(nonce string) bool {
 	if nonce == "" {
 		return false
@@ -1198,7 +1198,7 @@ func (s *Server) handleResetConfig(w http.ResponseWriter, r *http.Request) {
 		s.handleResetConfigPage(w, r, "Could not read the reset form.", "")
 		return
 	}
-	// CSRF gate (a session cookie is already required to reach here). D5.2.
+	// CSRF gate (a session cookie is already required to reach here)..
 	if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
 		s.handleResetConfigPage(w, r, "This reset request was blocked because it did not originate from the SeaVault page (cross-site request).", "")
 		return
@@ -1299,7 +1299,7 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
-	// D6.2 KDF strength floors: normalise (so an algorithm-only request gets the
+	//  KDF strength floors: normalise (so an algorithm-only request gets the
 	// defaults) then validate the normalised config. Never inside Normalize.
 	kdfCfg, err = vault.NormalizeKDFConfig(kdfCfg, true)
 	if err != nil {
@@ -1328,13 +1328,13 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	s.vault = v
 	s.mu.Unlock()
 	warnings := []string{}
-	// Config-MAC ratchet on the write-capable GUI init session (design D2.4,
-	// rotation-recovery/F1): the browser immediately uploads to this vault, so tag
+	// Config-MAC ratchet on the write-capable GUI init session (
+	// ): the browser immediately uploads to this vault, so tag
 	// it now rather than waiting for an explicit rotation, matching the CLI.
 	if note := ratchetForWriteSession(v); note != "" {
 		warnings = append(warnings, note)
 	}
-	// D1.3 preflight note: new vaults use the visible SeaVaultData directory and are
+	//  preflight note: new vaults use the visible SeaVaultData directory and are
 	// not located by 0.15; surface the note when the root sits under a sync folder.
 	if note := vault.SyncClientPreflightNote(vaultPath); note != "" {
 		warnings = append(warnings, note)
@@ -1394,13 +1394,13 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	warnings := []string{}
-	// Config-MAC ratchet on the first write-capable GUI open (design D2.4,
-	// rotation-recovery/F1): a legacy/untagged vault opened as the active session
+	// Config-MAC ratchet on the first write-capable GUI open (
+	// ): a legacy/untagged vault opened as the active session
 	// acquires its ConfigTag here, the same as the CLI openVaultForWrite.
 	if note := ratchetForWriteSession(v); note != "" {
 		warnings = append(warnings, note)
 	}
-	// D1.3 preflight note for a legacy .seavault vault under a sync-client folder.
+	//  preflight note for a legacy.seavault vault under a sync-client folder.
 	if note := v.PreflightNote(); note != "" {
 		warnings = append(warnings, note)
 	}
@@ -1413,7 +1413,7 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 			warnings = append(warnings, "vault opened, but password was not saved to the OS keychain: "+err.Error())
 		}
 	}
-	// D5.3 rollback warning: an interactive GUI login that opened a config older
+	//  rollback warning: an interactive GUI login that opened a config older
 	s.mu.Lock()
 	s.vaultPath = vaultPath
 	s.vault = v
@@ -1423,17 +1423,17 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 }
 
 // ratchetForWriteSession fires the ConfigMAC ratchet for a vault the GUI has just
-// opened as the active, write-capable session (design D2.4, R5, finding
-// rotation-recovery/F1). The GUI uploads and deletes through s.vault exactly as
+// opened as the active, write-capable session (, finding
+// ). The GUI uploads and deletes through s.vault exactly as
 // the CLI put/remove/gc/compact/serve do, so — like the CLI openVaultForWrite —
 // the first such open of a legacy/untagged vault must opportunistically write the
 // ConfigTag, bump FormatEpoch, and latch the device anchor's has-tag bit, ending
-// the TOFU window T-A2-1 config forgery / T-A2-2 rollback exploit. It is a no-op
+// the TOFU window config forgery / rollback exploit. It is a no-op
 // on an already-tagged vault, so re-opens ratchet exactly once, and it is called
 // ONLY from the two write-session entry points (handleInit, handleOpen), never
 // from a read-only surface (verify, or the profile-validation open that discards
 // the vault). Best-effort: a failed tag write is returned as a warning and never
-// blocks opening the vault (the anchor half is already best-effort, design D5.4).
+// blocks opening the vault (the anchor half is already best-effort).
 func ratchetForWriteSession(v *vault.Vault) string {
 	if _, err := v.EnsureConfigMAC(); err != nil {
 		return "vault opened, but its vault.json integrity tag could not be written: " + err.Error()
@@ -1457,7 +1457,7 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 
 // refreshVaultKeychain updates the OS keychain entry for a vault to a new secret
 // ONLY when the keychain is available AND already holds this vault's secret
-// (design D3.4, Condition 5), so the next keychain-backed unlock does not fail
+// , so the next keychain-backed unlock does not fail
 // with the retired password. A missing entry is left untouched; a write failure
 // is swallowed (the rotation already succeeded), mirroring the CLI.
 func (s *Server) refreshVaultKeychain(vaultID, secret string) {
@@ -1474,7 +1474,7 @@ type passwordChangeRequest struct {
 	NewPassword string `json:"newPassword"`
 }
 
-// handlePasswordChange rotates the open vault's password (design D3.4, P1-7): it
+// handlePasswordChange rotates the open vault's password: it
 // rewraps the same master||index under the new password (no chunk rewrite) and
 // refreshes the keychain entry when one exists. It is CSRF-gated by serveAuthorized
 // like every other state-changing API call.
@@ -1509,7 +1509,8 @@ type recoveryEntryDTO struct {
 }
 
 // handleRecoveryList returns the recovery-entry IDs registered for the open vault
-// (design D3.3) so the panel can offer them for revoke. Secret-free: IDs only.
+//
+//	so the panel can offer them for revoke. Secret-free: IDs only.
 func (s *Server) handleRecoveryList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -1529,7 +1530,7 @@ func (s *Server) handleRecoveryList(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRecoveryGenerate mints a recovery phrase and parks it as the pending
-// generation awaiting a read-back (design D3.3, Condition 12). It returns the
+// generation awaiting a read-back. It returns the
 // phrase for one-time display; NOTHING is written until handleRecoveryCommit
 // confirms the read-back. A new generate replaces any prior pending one.
 func (s *Server) handleRecoveryGenerate(w http.ResponseWriter, r *http.Request) {
@@ -1557,7 +1558,7 @@ type recoveryCommitRequest struct {
 }
 
 // handleRecoveryCommit verifies the read-back against the pending phrase and, only
-// on a match, writes the recovery entry (design D3.3, Condition 12). A mismatch
+// on a match, writes the recovery entry. A mismatch
 // leaves the pending generation in place so the owner can retype it; nothing is
 // written until a match.
 func (s *Server) handleRecoveryCommit(w http.ResponseWriter, r *http.Request) {
@@ -1600,7 +1601,7 @@ type recoveryRedeemRequest struct {
 }
 
 // handleRecoveryRedeem consumes a recovery phrase to set a new password on the
-// currently-selected vault (design D3.3, Condition 1): it opens the vault with
+// currently-selected vault: it opens the vault with
 // the phrase, then in one transaction removes the redeemed entry and rewraps
 // under the new password, refreshes the keychain, and adopts the redeemed vault
 // as the open session.
@@ -1617,7 +1618,7 @@ func (s *Server) handleRecoveryRedeem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "a recovery phrase and a new password are both required"})
 		return
 	}
-	// Redeem must work in the LOCKED-OUT state it exists for (friction II-1): an
+	// Redeem must work in the LOCKED-OUT state it exists for: an
 	// owner who forgot the password cannot open the vault first, and OpenWithRecovery
 	// opens via the phrase with no prior unlock. Resolve the target from the request
 	// (the selected/typed vault path) and fall back to the current session path.
@@ -1658,7 +1659,7 @@ type recoveryRevokeRequest struct {
 	ID string `json:"id"`
 }
 
-// handleRecoveryRevoke retires one recovery entry by ID (design D3.3).
+// handleRecoveryRevoke retires one recovery entry by ID.
 func (s *Server) handleRecoveryRevoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -1921,7 +1922,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 // handleExportZipTicket mints a single-use, 120s ZIP export ticket for a virtual
 // path. It requires a session (enforced by the gate) and the CSRF header (a
 // non-GET /api/ call). Expired sessions, tickets and nonces are swept on mint.
-// D4.2.
+// .
 func (s *Server) handleExportZipTicket(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -1960,7 +1961,7 @@ func (s *Server) handleExportZipDownload(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	// Consume the ticket under lock BEFORE streaming, so a ticket is spent
-	// exactly once. D4.2.
+	// exactly once..
 	ticket := r.URL.Query().Get("ticket")
 	now := time.Now()
 	s.mu.Lock()
@@ -2098,10 +2099,10 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCompact runs Vault.Compact on the open vault and returns the report
-// (design D4.4, R18). It is a state-changing POST, so serveAuthorized has already
+// . It is a state-changing POST, so serveAuthorized has already
 // required a session and a matching CSRF token; only an explicit owner action
 // reaches here — the passive sync watcher only ever calls ReloadIfChanged, never
-// Compact (invariant I2).
+// Compact.
 func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -2123,15 +2124,15 @@ func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
 // two-phase, fenced collection; fence is an optional Go duration string (empty
 // uses the 72h default). The GUI's fenced GC mirrors the CLI's `seavault gc
 // [--confirm] [--fence N]` exactly — same defaults, same clamping (friction
-// II-1) — so a GUI-only owner can reclaim chunk space, which `compact` never
+// ) — so a GUI-only owner can reclaim chunk space, which `compact` never
 // does.
 type gcRequest struct {
 	Confirm bool   `json:"confirm"`
 	Fence   string `json:"fence"`
 }
 
-// handleGC runs the fenced garbage collector on the open vault (friction II-1,
-// design D3.1/§3). It is a state-changing POST, so serveAuthorized has already
+// handleGC runs the fenced garbage collector on the open vault (,
+// the design/). It is a state-changing POST, so serveAuthorized has already
 // required a session and a matching CSRF token. confirm=false is a dry run that
 // writes nothing and returns the candidate set, pending intents, and compaction
 // plan; confirm=true compacts then runs both gc phases, queueing deletion
@@ -2192,7 +2193,7 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 // clampGCFence mirrors vault.GarbageCollect's fence clamping (GCFenceMin 1h,
 // GCFenceDefault 72h) and the CLI's clampFence, returning the effective fence
 // plus a one-line notice when the requested value had to change so the GUI can
-// explain it (friction II-1 / Cold C5). A value at or above the 1h minimum is
+// explain it. A value at or above the 1h minimum is
 // used unchanged (no notice); a positive value below it is raised to 1h; zero
 // (an omitted fence) or a negative value selects the 72h default with no notice.
 func clampGCFence(requested time.Duration) (time.Duration, string) {
@@ -2206,13 +2207,13 @@ func clampGCFence(requested time.Duration) (time.Duration, string) {
 }
 
 // gcFenceExplanation renders the plain-language two-step-fence sentence the GUI
-// preview shows a non-technical owner (friction II-1).
+// preview shows a non-technical owner.
 func gcFenceExplanation(fence time.Duration) string {
 	return fmt.Sprintf("Unreferenced data is removed in two steps at least %s apart so other devices can object before anything is deleted.", fence)
 }
 
 // oldestPendingAge is a human summary of the oldest pending deletion intent for
-// the gc preview (design D3.6). It returns "" when nothing is pending.
+// the gc preview. It returns "" when nothing is pending.
 func oldestPendingAge(pending []vault.PendingIntent) string {
 	oldest := int64(-1)
 	for _, p := range pending {
@@ -2913,7 +2914,7 @@ func (s *Server) webdavStatus() webdavStatusDTO {
 	}
 	// With a GUI password set, /dav additionally requires a login cookie that
 	// Finder/Explorer/rclone cannot present, so the copied URL 401s for them.
-	// Surface that plainly and point at the supported seavault serve path. II-2.
+	// Surface that plainly and point at the supported seavault serve path..
 	authEnabled := s.guiAuthEnabledLocked()
 	nativeClients := running && !authEnabled
 	note := ""
@@ -2940,7 +2941,7 @@ func (s *Server) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	// Scope the shared presence-sweep cache to the open vault: the (path,
 	// generation) key is not vault-qualified, so a vault swap (or a close/reopen)
 	// must not answer the new view from the previous view's cached sweep. Replace
-	// the cache whenever the vault pointer changes. See finding IC-1.
+	// the cache whenever the vault pointer changes. See.
 	var presence *localdav.PresenceCache
 	if v != nil {
 		if s.presenceVault != v {
@@ -2963,7 +2964,7 @@ func (s *Server) handleWebDAV(w http.ResponseWriter, r *http.Request) {
 	// /dav requests: without the shared semaphore each throwaway Server would mint
 	// its own full stream budget (OA-1), and without the shared presence cache
 	// each would re-run the full per-chunk stat sweep on every Range GET (IC-1).
-	// See design D6.3/D7.3/§12.
+	// See the design/.
 	dav := &localdav.Server{Vault: v, ReadOnly: readOnly, Prefix: "/dav/" + token + "/", AllowedHosts: allowed, ChunkCache: cache, StreamSem: streamSem, Presence: presence}
 	dav.ServeHTTP(w, r)
 }
@@ -2998,8 +2999,8 @@ func (s *Server) availableVaultStatuses(entries []profile.Entry) []vaultStatusDT
 		if activeVault != nil && samePath(e.VaultPath, activePath) {
 			st.Open = true
 		}
-		// Resolve which metadata directory the vault uses (design D1.2): accept both
-		// the visible SeaVaultData and the legacy .seavault name.
+		// Resolve which metadata directory the vault uses: accept both
+		// the visible SeaVaultData and the legacy.seavault name.
 		metaName, _, resErr := vault.ResolveMetaDir(e.VaultPath)
 		if resErr != nil {
 			metaName = vault.MetadataDirName
@@ -3252,7 +3253,7 @@ small { color:#4b5563; }
 </html>`))
 
 // noSessionPage is the static 403 page shown for / and /files* when the request
-// carries no valid GUI session. D3.3 step 4. It contains no CSRF token.
+// carries no valid GUI session. step 4. It contains no CSRF token.
 var noSessionPage = template.Must(template.New("no-session").Parse(`<!doctype html>
 <html lang="en">
 <head>
@@ -4264,10 +4265,10 @@ function showError(title, detail){
   $('message').textContent = title;
   appendLog(title, detail || '', 'error');
 }
-// showNotices renders any warnings[] an action returned (the D1.3 SeaVaultData /
+// showNotices renders any warnings[] an action returned (the SeaVaultData /
 // hidden-file-sync notes from /api/init and /api/open) as a visible info banner,
 // so a non-technical owner reads them instead of hunting through the JSON log
-// dump. An empty or absent list hides the banner (friction Owner C1/C2).
+// dump. An empty or absent list hides the banner (C1/C2).
 function showNotices(warnings){
   const box = $('noticeBanner');
   if(!box) return;
@@ -4320,11 +4321,11 @@ function formatAge(sec){ sec=Math.max(0, Math.floor(Number(sec||0))); if(sec < 6
 // isLikelySizeLimitError recognises browser-upload size/limit failures so the
 // large-folder ingest hint is only offered when it is relevant. Name-validation
 // refusals (the Windows-portable-name control) do not match, so they are shown
-// without the irrelevant hint (friction Owner C3).
+// without the irrelevant hint (C3).
 function isLikelySizeLimitError(message){ return /too large|body too large|exceeds|maximum|payload too|request entity|size limit|413/i.test(String(message||'')); }
 // composeUploadError appends the large-folder ingest hint to an upload error only
 // when it is a size/limit failure, leaving precise name-validation messages
-// unadorned (friction Owner C3).
+// unadorned (C3).
 function composeUploadError(message){
   const base = String(message||'');
   if(isLikelySizeLimitError(base)){
@@ -4398,7 +4399,7 @@ async function generateRecovery(){
 }
 function recoveryWrittenDown(){
   // Hide and clear the phrase BEFORE the read-back appears, so a correct read-back
-  // evidences an off-screen (paper) capture rather than an on-screen copy (II-2).
+  // evidences an off-screen (paper) capture rather than an on-screen copy.
   $('recoveryPhrase').textContent = '';
   $('recoveryPhraseStep').hidden = true;
   $('recoveryReadbackStep').hidden = false;
@@ -4689,7 +4690,7 @@ function startBrowserHeartbeat(){
   };
   try {
     // The browser-session stream authenticates by the GUI session cookie; the
-    // CSRF token is no longer placed in the URL. See design D3.4.
+    // CSRF token is no longer placed in the URL. See.
     const session = new EventSource('/api/browser-session');
     session.onopen = () => appendLog('Browser session monitor connected', 'SeaVault will stop after this browser page closes when exit-on-browser-close is enabled.', 'success');
     session.onerror = () => appendLog('Browser session monitor disconnected', 'SeaVault will stop shortly if no browser page reconnects.', 'warning');
@@ -4896,7 +4897,7 @@ async function exportVault(dryRun, allFiles){
 
 function davURL(p){
   // Always use the server-supplied WebDAV URL (which carries the distinct
-  // davToken), never a URL built from the CSRF token. See design D4.1.
+  // davToken), never a URL built from the CSRF token. See.
   const base = (lastStatus && lastStatus.webdav && lastStatus.webdav.url) ? lastStatus.webdav.url : '';
   const clean = String(p || '').replace(/^\/+/, '');
   return base + clean.split('/').filter(Boolean).map(encodeURIComponent).join('/') + (clean.endsWith('/') && clean ? '/' : '');
@@ -4936,7 +4937,7 @@ async function refreshDavFiles(){
     if(!(lastStatus && lastStatus.open)){ clearWebDAVUI('Open a vault to browse files.'); return; }
     const rows = await davPropfind(currentDavPath);
     // Cross-reference /api/files so the WebDAV table can badge conflict copies
-    // the PROPFIND payload does not itself label (friction Owner C4).
+    // the PROPFIND payload does not itself label (C4).
     const conflicts = await davConflictMap();
     rows.forEach(r => { const c = conflicts[r.path]; if(c) r.conflictOf = c; });
     renderDavBreadcrumb();
@@ -5022,7 +5023,7 @@ async function downloadSelectedDavZip(){
   if(!selectedDavPath || !selectedDavIsDir){ showError('Select a folder', 'Select a folder before downloading it as a ZIP.'); return; }
   try {
     // Mint a single-use ticket, then navigate to the download; the CSRF token
-    // never rides in the download URL. See design D4.2.
+    // never rides in the download URL. See.
     const res = await api('/api/export-zip/ticket', {method:'POST', headers:jsonHeaders, body:JSON.stringify({path: selectedDavPath})});
     if(!res || !res.ticket){ showError('ZIP download failed', 'The local SeaVault server did not return an export ticket.'); return; }
     window.location = '/api/export-zip?ticket=' + encodeURIComponent(res.ticket);
@@ -5267,7 +5268,7 @@ function formatCompactReport(result){
 }
 // compactVault is the relabelled "Tidy conflicts" action: it materialises
 // deferred conflict copies and prunes stale records but frees NO storage, so its
-// report says so in plain language (friction Owner C5). Byte reclamation is the
+// report says so in plain language (C5). Byte reclamation is the
 // Reclaim space (gc) action below.
 async function compactVault(){
   try {
@@ -5282,7 +5283,7 @@ async function compactVault(){
 }
 function hideGcPreview(){ const b=$('gcPreview'); if(b){ b.hidden=true; b.innerHTML=''; } }
 // reclaimSpacePreview runs the fenced gc as a dry run (confirm=false) and shows a
-// plain-language preview with a confirm button (friction II-1). It frees nothing;
+// plain-language preview with a confirm button. It frees nothing;
 // only the confirm button, which calls reclaimSpaceConfirm, queues/removes.
 async function reclaimSpacePreview(){
   try {
@@ -5310,7 +5311,7 @@ async function reclaimSpacePreview(){
 // reclaimSpaceConfirm runs the fenced gc for real (confirm=true): it compacts,
 // queues deletion intents, and removes only chunks whose fence has elapsed. The
 // toast names the concrete effect, including "nothing freed yet" when the
-// two-step fence has not elapsed (friction II-1).
+// two-step fence has not elapsed.
 async function reclaimSpaceConfirm(){
   try {
     const res = await api('/api/gc',{method:'POST',headers:jsonHeaders,body:JSON.stringify({confirm:true})});

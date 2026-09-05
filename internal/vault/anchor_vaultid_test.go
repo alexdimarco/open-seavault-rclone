@@ -10,17 +10,17 @@ import (
 )
 
 // TestStripSurvivesVaultIDMutation is the tombstone for finding
-// config-server/F3-anchor-keyed-by-mutable-vaultid.
+// .
 //
-// The has-tag freshness anchor that enforces the strip refusal (design D2.4,
-// Condition 6 — "once a device has verified a tag for a vault, that vault must
+// The has-tag freshness anchor that enforces the strip refusal (
+// the review — "once a device has verified a tag for a vault, that vault must
 // always present a valid tag to that device") was keyed by
-// anchorStorePath(v.ID()), and v.ID() returns the attacker-controlled plaintext
+// anchorStorePath(v.ID), and v.ID returns the attacker-controlled plaintext
 // Config.VaultID. A hostile config server could therefore STRIP the ConfigTag AND
 // swap/blank the VaultID together: the anchor lookup relocated to a nonexistent
 // id, existed=false, and the no-tag path fell through to TOFU and OPENED the
-// vault — laundering the strip and re-opening the T-A2-1 forgery surface (and,
-// via a replayed pre-rotation config, the T-A2-2 rotation-rollback surface) on an
+// vault — laundering the strip and re-opening the forgery surface (and,
+// via a replayed pre-rotation config, the rotation-rollback surface) on an
 // ALREADY-ANCHORED device. VaultID is MAC-covered only on the still-tagged path
 // the strip removes, so nothing else bound it.
 //
@@ -47,7 +47,7 @@ func TestStripSurvivesVaultIDMutation(t *testing.T) {
 			c.ConfigTag = ""
 			c.VaultID = "ffffffffffffffffffffffffffffffff"
 		}},
-		// BYPASS variant: strip the tag AND blank the VaultID (v.ID() then falls back
+		// BYPASS variant: strip the tag AND blank the VaultID (v.ID then falls back
 		// to legacyVaultID, still not the anchored id).
 		{"strip + blank vaultID", func(c *VaultConfig) {
 			c.ConfigTag = ""

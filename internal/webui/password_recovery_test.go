@@ -39,7 +39,7 @@ func openedVaultServer(t *testing.T, password string) (*Server, string) {
 
 // The GUI password-change endpoint is CSRF-gated (a state-changing POST without
 // the browser token is refused) and, with the token, rotates the vault: the new
-// password opens and the old one no longer does (design D3.4, §5 GUI panel).
+// password opens and the old one no longer does (GUI panel).
 func TestGUIPasswordChangeCSRFAndRotation(t *testing.T) {
 	s, vaultPath := openedVaultServer(t, "oldpw")
 
@@ -72,8 +72,8 @@ func TestGUIPasswordChangeCSRFAndRotation(t *testing.T) {
 }
 
 // The GUI recovery panel enforces the mandatory read-back before committing an
-// entry (Condition 12), and redeem consumes the entry and sets a new password
-// (Condition 1). Every mutation is CSRF-gated via serveAuthorized.
+// entry, and redeem consumes the entry and sets a new password
+// . Every mutation is CSRF-gated via serveAuthorized.
 func TestGUIRecoveryReadbackAndRedeem(t *testing.T) {
 	s, vaultPath := openedVaultServer(t, "oldpw")
 

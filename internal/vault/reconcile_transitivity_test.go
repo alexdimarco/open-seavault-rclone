@@ -22,12 +22,12 @@ func permute3(in [3]manifestCandidate) [][]manifestCandidate {
 }
 
 // TestReconcileDominancePlusConcurrencyConverges is the regression for
-// config-server/F2-candidatecompare-intransitive.
+// .
 //
 // Three live clocked copies of ONE path:
-//   - A clock {X:2, Y:1}  (STRICTLY dominates B)
-//   - B clock {X:1, Y:1}  (dominated by A)
-//   - C clock {Y:2}       (concurrent with BOTH A and B)
+//   - A clock {X:2, Y:1} (STRICTLY dominates B)
+//   - B clock {X:1, Y:1} (dominated by A)
+//   - C clock {Y:2} (concurrent with BOTH A and B)
 //
 // with content keys chosen so contentKey(A) < contentKey(C) < contentKey(B).
 //
@@ -37,12 +37,12 @@ func permute3(in [3]manifestCandidate) [][]manifestCandidate {
 // sort.SliceStable that yields no canonical order: the six input permutations
 // elected THREE different live winners, and in the two that won B the causally
 // DOMINATED record took the live slot while its dominator A was demoted to a
-// conflict copy — a T-A2-3 causal-order inversion, and a Condition 2 / R9
+// conflict copy — a causal-order inversion, and a the review /
 // convergence break (two honest fleet members reconcile the same path to
 // different canonical files because their sync clients renamed the copies into a
 // different WalkDir order).
 //
-// The fix reconciles in two separate phases (design D4.2): dominance pruning
+// The fix reconciles in two separate phases: dominance pruning
 // leaves the maximal antichain, and only that mutually-concurrent set is sorted
 // by the content key — a genuine total order. So every permutation must converge
 // on the SAME live winner, and a causally-dominated record must NEVER be live.
@@ -105,7 +105,7 @@ func TestReconcileDominancePlusConcurrencyConverges(t *testing.T) {
 		}
 		got := live.Chunks[0].ID
 
-		// Convergence (Condition 2 / R9): identical live winner regardless of the
+		// Convergence: identical live winner regardless of the
 		// input (WalkDir) order.
 		if firstWinner == "" {
 			firstWinner = got
@@ -113,7 +113,7 @@ func TestReconcileDominancePlusConcurrencyConverges(t *testing.T) {
 			t.Fatalf("perm %d: live winner is order-dependent (non-convergence): %s vs %s", i, short(got), short(firstWinner))
 		}
 
-		// Causal-order inversion (T-A2-3): a record that is strictly dominated by
+		// Causal-order inversion: a record that is strictly dominated by
 		// another in the set must never win the live slot.
 		if got == chunkB {
 			t.Fatalf("perm %d: causally-DOMINATED record B won the live slot — causal-order inversion", i)

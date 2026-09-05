@@ -10,7 +10,7 @@ import (
 )
 
 // TestDeviceIDStableAndPersistedUnderDataDir proves the vector-clock writer key
-// is stable across calls, persisted under DataDir (design D4.1, Condition 11),
+// is stable across calls, persisted under DataDir,
 // and well-formed. Stability is the property the vector clock depends on: a
 // churning device id would mint a fresh clock entry on every open.
 func TestDeviceIDStableAndPersistedUnderDataDir(t *testing.T) {
@@ -42,7 +42,7 @@ func TestDeviceIDStableAndPersistedUnderDataDir(t *testing.T) {
 		t.Fatalf("device id must be persisted at %s: %v", want, err)
 	}
 	// It is NOT stored in the app config file, so a config reset (which removes
-	// appconfig.json) cannot regenerate it (Condition 11).
+	// appconfig.json) cannot regenerate it.
 	cfgDir, err := ConfigDir()
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +54,7 @@ func TestDeviceIDStableAndPersistedUnderDataDir(t *testing.T) {
 
 // TestDeviceIDSurvivesConfigReset models a config reset — removing appconfig.json
 // (and the whole config dir) — and proves the device id is unchanged, because it
-// lives under the data dir the reset flows never touch (design D4.1, Condition 11).
+// lives under the data dir the reset flows never touch.
 func TestDeviceIDSurvivesConfigReset(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("SEAVAULT_APP_HOME", home)

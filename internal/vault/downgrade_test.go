@@ -35,7 +35,7 @@ func editConfig(t *testing.T, root string, mutate func(*VaultConfig)) {
 	}
 }
 
-// R5 (P0-3, D2.1): a vault.json downgraded to a legacy single-index / version-1
+// a vault.json downgraded to a legacy single-index / version-1
 // layout while encrypted manifests still exist is refused with
 // ErrConfigInconsistent rather than silently opened as an empty legacy vault.
 func TestOpenRefusesDowngradedConfig(t *testing.T) {
@@ -84,7 +84,7 @@ func TestOpenRefusesDowngradedConfig(t *testing.T) {
 	}
 }
 
-// R5: an intact, un-downgraded manifest vault still opens cleanly (control: the
+// an intact, un-downgraded manifest vault still opens cleanly (control: the
 // downgrade check does not fire on a legitimate v2 vault).
 func TestOpenIntactManifestVaultSucceeds(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
@@ -102,7 +102,7 @@ func TestOpenIntactManifestVaultSucceeds(t *testing.T) {
 	}
 }
 
-// R5 (P0-3, D2.2): GarbageCollect refuses on a wiped manifest store — no
+// GarbageCollect refuses on a wiped manifest store — no
 // manifests at all but chunk objects present — removing and writing nothing.
 func TestGCRefusesWipedManifestStore(t *testing.T) {
 	v, seenDir := openGCVault(t)
@@ -130,7 +130,7 @@ func TestGCRefusesWipedManifestStore(t *testing.T) {
 	}
 }
 
-// R5 (P0-3, D2.2), regression for server/F1-gc-refusal-dead-in-production: the
+// , regression for: the
 // wiped-manifest-store refusal must fire through the REAL open path. Every
 // CLI/GUI entry to GarbageCollect first runs vault.Open, which runs
 // EnsureContentLayout; if that re-creates the content-marker manifest on a wiped
@@ -191,7 +191,7 @@ func TestGCRefusesWipedManifestStoreAfterReopen(t *testing.T) {
 // writeMismatchedManifest seals a NON-tombstone manifest for recordPath but
 // stores it under a filename id that does not match manifestID(recordPath), so a
 // pure load decrypts it yet drops it on the id/path check — the "replaced index"
-// signature the D2.2 gate refuses. It is written directly with the vault's keys
+// signature the gate refuses. It is written directly with the vault's keys
 // because such a state is unreachable through the normal write path.
 func writeMismatchedManifest(t *testing.T, v *Vault, recordPath, filenamePath string) {
 	t.Helper()
@@ -214,7 +214,7 @@ func writeMismatchedManifest(t *testing.T, v *Vault, recordPath, filenamePath st
 	}
 }
 
-// R5 (D2.2): GarbageCollect refuses when the loaded index is empty while a
+// GarbageCollect refuses when the loaded index is empty while a
 // non-tombstone manifest still exists on disk (a wiped or replaced index).
 func TestGCRefusesEmptyIndexWithNonTombstoneManifest(t *testing.T) {
 	v, seenDir := openGCVault(t)
@@ -243,7 +243,7 @@ func TestGCRefusesEmptyIndexWithNonTombstoneManifest(t *testing.T) {
 	}
 }
 
-// R5 (D2.2): a vault whose files were all deleted (tombstones present, chunks
+// a vault whose files were all deleted (tombstones present, chunks
 // orphaned) is NOT refused — it stays collectable so the orphaned chunks can be
 // reclaimed. The protected content marker keeps the loaded index non-empty.
 func TestGCAllowsVaultWithDeletions(t *testing.T) {

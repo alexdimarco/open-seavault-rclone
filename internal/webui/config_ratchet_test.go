@@ -11,12 +11,12 @@ import (
 	"github.com/alexdimarco/open-seavault-rclone/internal/vault"
 )
 
-// TestGUIInitRatchetsConfigMAC is the tombstone for rotation-recovery/F1 on the
+// TestGUIInitRatchetsConfigMAC is the tombstone for on the
 // GUI init surface. /api/init creates a vault and installs it as the active,
 // write-capable GUI session (s.vault, which the browser then uploads to and
-// deletes from). Per design D2.4 the first write-capable open must ratchet the
-// ConfigMAC so T-A2-1 config forgery is detected on this device. Before the fix
-// handleInit opened via vault.Open() and never called EnsureConfigMAC, so the
+// deletes from). Per the design the first write-capable open must ratchet the
+// ConfigMAC so config forgery is detected on this device. Before the fix
+// handleInit opened via vault.Open and never called EnsureConfigMAC, so the
 // vault stayed untagged (no configTag, no freshness anchor) for the whole GUI
 // session and VaultID / ChunkParams / KDF / wrap edits were accepted silently.
 func TestGUIInitRatchetsConfigMAC(t *testing.T) {
@@ -41,20 +41,20 @@ func TestGUIInitRatchetsConfigMAC(t *testing.T) {
 		t.Fatalf("read config: %v", err)
 	}
 	if cfg.ConfigTag == "" {
-		t.Fatal("GUI /api/init left vault.json with no configTag: the ConfigMAC ratchet did not fire on the write-capable GUI session, so T-A2-1 config forgery is undetected (rotation-recovery/F1)")
+		t.Fatal("GUI /api/init left vault.json with no configTag: the ConfigMAC ratchet did not fire on the write-capable GUI session, so config forgery is undetected")
 	}
 	if cfg.FormatEpoch < 1 {
-		t.Fatalf("GUI /api/init did not bump FormatEpoch (got %d, want >= 1): the freshness-anchor rollback fence (T-A2-2) never engages", cfg.FormatEpoch)
+		t.Fatalf("GUI /api/init did not bump FormatEpoch (got %d, want >= 1): the freshness-anchor rollback fence never engages", cfg.FormatEpoch)
 	}
 }
 
-// TestGUIOpenRatchetsConfigMAC is the tombstone for rotation-recovery/F1 on the
+// TestGUIOpenRatchetsConfigMAC is the tombstone for on the
 // GUI open surface. A vault created outside the GUI starts untagged (Create
 // writes no ConfigTag — TOFU); opening it through /api/open installs it as the
 // active write-capable session, which must ratchet the tag exactly as the CLI
 // openVaultForWrite / `serve` do. Before the fix handleOpen never ratcheted, so a
 // GUI-only user's vault never acquired a tag until an explicit password rotation
-// — the entire P0-3 config-forgery/rollback defense stayed inert by default.
+// — the entire config-forgery/rollback defense stayed inert by default.
 func TestGUIOpenRatchetsConfigMAC(t *testing.T) {
 	s, err := New("")
 	if err != nil {
@@ -70,7 +70,7 @@ func TestGUIOpenRatchetsConfigMAC(t *testing.T) {
 	if pre, err := vault.ReadConfig(vaultPath); err != nil {
 		t.Fatalf("read config: %v", err)
 	} else if pre.ConfigTag != "" {
-		t.Fatalf("precondition: a Create()d vault must start untagged, got configTag %q", pre.ConfigTag)
+		t.Fatalf("precondition: a Created vault must start untagged, got configTag %q", pre.ConfigTag)
 	}
 	rr := postJSON(t, s, "/api/open", map[string]any{"vaultPath": vaultPath, "password": "passphrase"})
 	if rr.Code != http.StatusOK {
@@ -81,6 +81,6 @@ func TestGUIOpenRatchetsConfigMAC(t *testing.T) {
 		t.Fatalf("read config: %v", err)
 	}
 	if cfg.ConfigTag == "" {
-		t.Fatal("GUI /api/open left vault.json with no configTag: the ConfigMAC ratchet did not fire on the write-capable GUI session (rotation-recovery/F1)")
+		t.Fatal("GUI /api/open left vault.json with no configTag: the ConfigMAC ratchet did not fire on the write-capable GUI session")
 	}
 }

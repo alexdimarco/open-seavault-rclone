@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// TestNoPlaintextInVault (R1, closes P1-21) is the plaintext-leak walk: it puts
+// TestNoPlaintextInVault (, closes) is the plaintext-leak walk: it puts
 // a file whose body carries a unique high-entropy marker and whose virtual path
 // carries a distinctive token, then walks EVERY file under the metadata dir and
 // fails if the marker appears in any file body or the token in any file name.

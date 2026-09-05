@@ -17,7 +17,7 @@ import (
 // putReader, bypassing the ValidatePortableName gate that PutReader/putFile
 // apply. It simulates a file a 0.15 peer or a non-Windows client created under a
 // name that is illegal on Windows (e.g. content/a:b.txt), so the tests can prove
-// such a file still reads and exports (design D7.1/D7.2).
+// such a file still reads and exports.
 func injectRawFile(t *testing.T, v *Vault, vp string, data []byte) {
 	t.Helper()
 	idx, err := v.LoadIndex()
@@ -38,7 +38,7 @@ func injectRawFile(t *testing.T, v *Vault, vp string, data []byte) {
 	}
 }
 
-// TestPutReaderRefusesIllegalPortableName covers the create-time half of R13: a
+// TestPutReaderRefusesIllegalPortableName covers the create-time half of: a
 // new upload target whose leaf is not portable is refused, and the offending
 // character is named.
 func TestPutReaderRefusesIllegalPortableName(t *testing.T) {
@@ -62,7 +62,7 @@ func TestPutReaderRefusesIllegalPortableName(t *testing.T) {
 	}
 }
 
-// TestExportSanitisesIllegalName is the export half of R13: an existing
+// TestExportSanitisesIllegalName is the export half of: an existing
 // content/a:b.txt still reads, and export writes it as a_b.txt — no colon
 // reaches the OS path — reporting the (original, written) pair.
 func TestExportSanitisesIllegalName(t *testing.T) {
@@ -114,7 +114,7 @@ func TestExportSanitisesIllegalName(t *testing.T) {
 	}
 }
 
-// TestExportCaseFoldCollision is R14: two portable names that differ only in case
+// TestExportCaseFoldCollision is: two portable names that differ only in case
 // (Foo.txt, foo.txt) both export, the second disambiguated by the conflict
 // suffix, even under the replace overwrite policy, so neither clobbers the other
 // on a case-insensitive filesystem.

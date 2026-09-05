@@ -8,8 +8,9 @@ import (
 	"time"
 )
 
-// Durable rename with a Windows retry loop (design phase-a1-vault-core D5.1,
-// P1-9 atomicwrite-rename-no-retry-windows).
+// Durable rename with a Windows retry loop (design phase-a1-vault-core,
+//
+//	atomicwrite-rename-no-retry-windows).
 //
 // On Windows a concurrent reader — a sync client, an antivirus scanner, another
 // open handle — makes os.Rename fail transiently with ERROR_SHARING_VIOLATION,
@@ -58,7 +59,7 @@ func renameWithRetry(oldpath, newpath string) error {
 }
 
 // removeWithRetry deletes a file with the same Windows sharing-violation retry
-// as renameWithRetry (design D5.1/D4.4): Compact removes superseded manifests and
+// as renameWithRetry: Compact removes superseded manifests and
 // sweeps orphaned temp files, and on Windows a concurrent reader (sync client,
 // antivirus) can make os.Remove fail transiently with the same errno set. An
 // already-absent file is success, so Compact is idempotent and crash-safe. On

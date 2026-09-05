@@ -12,7 +12,7 @@ import (
 )
 
 // TestExportAndGetRejectDestinationInsideVault verifies the zero-knowledge
-// enforcement: decrypted output may never be written inside .seavault (which
+// enforcement: decrypted output may never be written inside.seavault (which
 // would sync the plaintext to the server), but writing outside the vault works.
 func TestExportAndGetRejectDestinationInsideVault(t *testing.T) {
 	root := t.TempDir() + "/vault"
@@ -30,13 +30,13 @@ func TestExportAndGetRejectDestinationInsideVault(t *testing.T) {
 	insideFile := filepath.Join(v.MetaRoot, "leak.txt")
 
 	if err := v.GetPath("a.txt", insideFile); err == nil {
-		t.Fatal("GetPath into .seavault must be rejected")
+		t.Fatal("GetPath into.seavault must be rejected")
 	}
 	if _, err := v.ExportPath(context.Background(), ".", insideDir, ExportOptions{}); err == nil {
-		t.Fatal("ExportPath into .seavault must be rejected")
+		t.Fatal("ExportPath into.seavault must be rejected")
 	}
 	if _, err := v.ExportPath(context.Background(), ".", insideDir, ExportOptions{Zip: true}); err == nil {
-		t.Fatal("zip ExportPath into .seavault must be rejected")
+		t.Fatal("zip ExportPath into.seavault must be rejected")
 	}
 
 	// Destinations outside the vault metadata directory must still work.

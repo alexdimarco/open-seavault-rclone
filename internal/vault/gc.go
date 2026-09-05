@@ -18,29 +18,29 @@ import (
 
 // GCIntentDirName is the synced directory under the metadata root holding one
 // <chunkID>.intent file per unreferenced chunk queued for deletion (design
-// D3.2). It sits beside manifests/ and objects/ so the manifest walker
+// ). It sits beside manifests/ and objects/ so the manifest walker
 // (manifests/ only) and the chunk walker (objects/chunks/ only) never see it,
-// and an old 0.15 reader ignores it too (invariant I1). The intent content is a
-// single RFC3339-UTC line and no device identifier (design D3.2, backlog B1).
+// and an old 0.15 reader ignores it too. The intent content is a
+// single RFC3339-UTC line and no device identifier.
 const GCIntentDirName = "gc-intents"
 
 const gcIntentSuffix = ".intent"
 
-// GCFenceMin is the smallest fence a confirm run accepts (design D3.1): a
+// GCFenceMin is the smallest fence a confirm run accepts: a
 // shorter window would collect a chunk another device may still be
 // deduplicating against.
 const GCFenceMin = time.Hour
 
 // ErrGCRefused is returned by GarbageCollect when the vault's on-disk state has
 // the signature of a wiped or replaced index under an intact vault.json (design
-// D2.2, P0-3): a manifest-store vault whose loaded index is empty while a
+// ): a manifest-store vault whose loaded index is empty while a
 // non-tombstone manifest still exists, or one with no manifests at all but chunk
 // objects present. Collecting in either state could mass-delete live data, so it
 // refuses without writing or removing anything. An all-tombstone vault (every
 // file legitimately deleted) is not refused and stays collectable.
 var ErrGCRefused = errors.New("refusing to garbage-collect: the vault index looks wiped or replaced under an intact vault.json")
 
-// GCOptions parameterises GarbageCollect (design §3). The zero value is a safe
+// GCOptions parameterises GarbageCollect. The zero value is a safe
 // dry run: Confirm false computes candidates and writes nothing anywhere.
 type GCOptions struct {
 	// Confirm switches from a dry run to the two-phase, fenced collection that
@@ -53,11 +53,11 @@ type GCOptions struct {
 	// Now injects the clock for deterministic tests; nil uses time.Now.
 	Now func() time.Time
 	// SeenStore overrides the directory holding this device's first-seen record
-	// <vaultID>.json (design D3.2b). Empty uses <appdir data>/gc-seen.
+	// <vaultID>.json (.2b). Empty uses <appdir data>/gc-seen.
 	SeenStore string
 }
 
-// PendingIntent describes one deletion intent still in flight, for verify (D3.6)
+// PendingIntent describes one deletion intent still in flight, for verify
 // and the gc report.
 type PendingIntent struct {
 	ChunkID    string `json:"chunkId"`
@@ -82,13 +82,13 @@ type GCReport struct {
 }
 
 // GarbageCollect reclaims unreferenced chunks under the two-phase, fenced,
-// synced-intent protocol of design §3 (P0-5). It is a DRY RUN by default: with
+// synced-intent protocol of. It is a DRY RUN by default: with
 // Confirm false it computes the candidate set and writes nothing anywhere. With
 // Confirm true it first Compacts (materialise conflicts, sweep temp orphans),
 // then runs phase 1 (write/cancel/reap intents, record first-seen) and phase 2
 // (remove a chunk only when its intent's recorded time, this device's first-seen
 // record, and the chunk file's mtime are ALL older than the fence, and the chunk
-// is still unreferenced). No device identifier is ever written (backlog B1).
+// is still unreferenced). No device identifier is ever written.
 func (v *Vault) GarbageCollect(opts GCOptions) (GCReport, error) {
 	now := time.Now
 	if opts.Now != nil {
@@ -102,7 +102,7 @@ func (v *Vault) GarbageCollect(opts GCOptions) (GCReport, error) {
 		fence = GCFenceMin
 	}
 	report := GCReport{Confirm: opts.Confirm, Fence: fence.String()}
-	// Downgrade/wipe safety gate (design D2.2, P0-3): reload so the check reasons
+	// Downgrade/wipe safety gate: reload so the check reasons
 	// about the current on-disk state, then refuse — writing and removing nothing —
 	// when the index looks wiped or replaced under an intact vault.json. The gate
 	// runs before Compact so a refused confirm mutates nothing.
@@ -118,13 +118,13 @@ func (v *Vault) GarbageCollect(opts GCOptions) (GCReport, error) {
 	return v.gcConfirm(report, now, fence, opts.SeenStore)
 }
 
-// gcRefusalGate implements the narrowed D2.2 refusal. It returns ErrGCRefused
+// gcRefusalGate implements the narrowed refusal. It returns ErrGCRefused
 // (wrapped with a specific reason) when either: the vault uses the manifest store
 // and its loaded index is empty while at least one non-tombstone manifest exists
 // on disk (a wiped or replaced index); or the vault uses the manifest store, no
 // manifest files exist at all, and chunk objects are present (a wiped manifest
 // store). A legacy single-index vault (usesManifestStore false) is never refused
-// here (design D2.3). An all-tombstone vault keeps at least the protected content
+// here. An all-tombstone vault keeps at least the protected content
 // marker in its index, so its loaded index is non-empty and it stays collectable.
 func (v *Vault) gcRefusalGate() error {
 	if !v.usesManifestStore() {
@@ -161,10 +161,10 @@ func (v *Vault) gcRefusalGate() error {
 }
 
 // gcDryRun computes the candidate set (unreferenced present chunks) and the
-// pending-intent and compaction plans without writing anything (design D3.1,
-// D4.4). A pure ReloadIndex reflects current disk state but performs no writes
-// (invariant I2). fence is the run's --fence: the compaction plan lists .tmp-*
-// orphans older than it (design D5.3), so the dry run reports what a confirm
+// pending-intent and compaction plans without writing anything (
+// ). A pure ReloadIndex reflects current disk state but performs no writes
+// . fence is the run's --fence: the compaction plan lists.tmp-*
+// orphans older than it, so the dry run reports what a confirm
 // with the same fence would sweep.
 func (v *Vault) gcDryRun(report GCReport, now time.Time, fence time.Duration) (GCReport, error) {
 	if err := v.ReloadIndex(); err != nil {
@@ -201,10 +201,10 @@ func (v *Vault) gcDryRun(report GCReport, now time.Time, fence time.Duration) (G
 	return report, nil
 }
 
-// gcConfirm runs the full two-phase collection (design D3.3, D3.4).
+// gcConfirm runs the full two-phase collection.
 func (v *Vault) gcConfirm(report GCReport, now func() time.Time, fence time.Duration, seenStore string) (GCReport, error) {
-	// --confirm first runs Compact (design D4.4): materialise conflicts, remove
-	// superseded manifests, sweep temp orphans older than the run's fence (D5.3)
+	// --confirm first runs Compact: materialise conflicts, remove
+	// superseded manifests, sweep temp orphans older than the run's fence
 	// — so phase 1 reasons about a settled index. Compact returns an error only
 	// after reporting every failure.
 	cr, err := v.compact(now(), true, fence)
@@ -307,7 +307,7 @@ func (v *Vault) gcConfirm(report GCReport, now func() time.Time, fence time.Dura
 	// Reload the index at most ONCE for the pass, and skip even that when the
 	// manifest fingerprint is unchanged since phase 1 — phase 1 wrote only
 	// loader-ignored intent files, so the live set is normally still valid
-	// (design D3.4, C14). Count reloads for R6.
+	// (C14). Count reloads for.
 	fpNow, err := v.indexFingerprint()
 	if err != nil {
 		return report, err
@@ -381,7 +381,7 @@ func (v *Vault) gcConfirm(report GCReport, now func() time.Time, fence time.Dura
 		// content-addressed, so re-adding identical content re-creates this id; a
 		// surviving entry would pre-satisfy the first-seen fence and let a forged
 		// ancient intent collect the re-created chunk in a single run
-		// (server/F2-firstseen-store-leak-defeats-fence).
+		// .
 		if _, ok := seen[id]; ok {
 			delete(seen, id)
 			seenDirty2 = true
@@ -404,7 +404,7 @@ func (v *Vault) gcConfirm(report GCReport, now func() time.Time, fence time.Dura
 
 // logicalIntent folds every intent file that shares a leading 64-hex chunk id —
 // two devices marking the same chunk, or a sync-conflict copy — into ONE logical
-// intent whose recorded time is the OLDEST of the set (design D3.2). cancel/reap/
+// intent whose recorded time is the OLDEST of the set. cancel/reap/
 // collect act on all of its files together.
 type logicalIntent struct {
 	chunkID  string
@@ -491,7 +491,7 @@ func totalSize(files []chunkFile) int64 {
 
 // newestMtime is the most recent mtime among an id's on-disk copies. Phase 2
 // requires it older than the fence so a re-uploaded chunk (a young copy) blocks
-// collection (design D3.4).
+// collection.
 func newestMtime(files []chunkFile) time.Time {
 	var newest time.Time
 	for _, f := range files {
@@ -552,7 +552,7 @@ func (v *Vault) walkChunkFiles() (map[string][]chunkFile, error) {
 }
 
 // liveChunkSet is the set of chunk ids referenced by any record in the index,
-// including conflict entries (whose chunks count as live for GC, design D4.1).
+// including conflict entries (whose chunks count as live for GC).
 func (v *Vault) liveChunkSet() (map[string]bool, error) {
 	idx, err := v.LoadIndex()
 	if err != nil {
@@ -582,7 +582,7 @@ func pendingList(intents map[string]*logicalIntent, now time.Time) []PendingInte
 }
 
 // seenStorePath is the device-local first-seen record for this vault (design
-// D3.2b): <seenStore or appdir-data/gc-seen>/<vaultID>.json.
+// b): <seenStore or appdir-data/gc-seen>/<vaultID>.json.
 func (v *Vault) seenStorePath(override string) (string, error) {
 	dir := strings.TrimSpace(override)
 	if dir == "" {

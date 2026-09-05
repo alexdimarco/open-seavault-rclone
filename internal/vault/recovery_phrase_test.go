@@ -9,7 +9,7 @@ import (
 )
 
 // The recovery phrase is a 256-bit secret rendered as grouped base32 (design
-// D3.3). This proves the canonical wrap secret round-trips, the read-back
+// ). This proves the canonical wrap secret round-trips, the read-back
 // tolerates regrouping/case, and a distinct or empty phrase never matches.
 func TestRecoveryPhraseEncoding(t *testing.T) {
 	secret, phrase, err := mintRecoverySecret()

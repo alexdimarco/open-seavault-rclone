@@ -13,8 +13,8 @@ import (
 	"github.com/alexdimarco/open-seavault-rclone/internal/appdir"
 )
 
-// ReaderRecord is one device's last-seen reader signal for a vault (design D1.4,
-// Condition 14). It is the unit of the device-local lastSeenReader inventory
+// ReaderRecord is one device's last-seen reader signal for a vault (
+// ). It is the unit of the device-local lastSeenReader inventory
 // seal-format prints before retiring older readers: which DeviceID opened this
 // vault, the highest format level that device can read (SupportedFormat), the
 // on-disk config Version it last saw, and when. It carries no secret.
@@ -34,7 +34,7 @@ type ReaderRecord struct {
 }
 
 // readerInventory is the on-disk shape of a vault's device-local reader signal
-// store (design D1.4, Condition 14): a map keyed by DeviceID. It is a struct
+// store: a map keyed by DeviceID. It is a struct
 // wrapper (not a bare map) so a future top-level field is an additive change,
 // mirroring the deviceIDStore/gc-seen conventions in this tree.
 type readerInventory struct {
@@ -42,13 +42,13 @@ type readerInventory struct {
 }
 
 // readerStorePath is the device-local lastSeenReader store for a vault (design
-// D1.4): <appdir data>/vault-readers/<vaultID>.json. Like the freshness anchor
+// ): <appdir data>/vault-readers/<vaultID>.json. Like the freshness anchor
 // and gc-seen stores it lives under appdir.DataDir, so it is NEVER part of the
-// synced vault store (invariant I2) and cannot leak a DeviceID off the wire — the
+// synced vault store and cannot leak a DeviceID off the wire — the
 // signal is honestly device-local, and thin: it records only devices that have
 // opened this vault through THIS app-data directory, and a 0.16 peer (which does
 // not write it at all) never appears. That weakness is why seal-format falls back
-// to an explicit no-inventory warning when the map is empty (Condition 14).
+// to an explicit no-inventory warning when the map is empty.
 func readerStorePath(vaultID string) (string, error) {
 	base, err := appdir.DataDir()
 	if err != nil {
@@ -81,7 +81,7 @@ func loadReaderInventory(path string) (readerInventory, error) {
 }
 
 // recordReaderSignal upserts THIS device's entry into the vault's device-local
-// reader inventory on Open (design D1.4, Condition 14). It is best-effort and
+// reader inventory on Open. It is best-effort and
 // never blocks Open: a vault with no resolvable DeviceID (degraded mode) or an
 // unwritable appdir simply leaves the inventory thinner. The write goes through
 // the A1 atomic path (atomicWriteFile + fsyncDir), plaintext at 0600, matching
@@ -109,8 +109,8 @@ func (v *Vault) recordReaderSignal() {
 }
 
 // ReaderInventory returns the device-local lastSeenReader records for this vault,
-// sorted by DeviceID (design D1.4, Condition 14). It reads only the device-local
-// store and writes nothing (invariant I2). An empty slice means this device has
+// sorted by DeviceID. It reads only the device-local
+// store and writes nothing. An empty slice means this device has
 // no inventory of any reader — the case seal-format turns into an explicit
 // no-inventory warning.
 func (v *Vault) ReaderInventory() []ReaderRecord {

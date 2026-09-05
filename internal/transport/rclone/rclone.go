@@ -239,7 +239,7 @@ func isTransferCommand(args []string) bool {
 }
 
 // localMeta resolves the local vault's metadata directory, accepting BOTH the
-// visible SeaVaultData and the legacy .seavault name (design D1.2).
+// visible SeaVaultData and the legacy.seavault name.
 func localMeta(root string) string {
 	abs, err := userpath.Abs(root)
 	if err == nil {
@@ -253,7 +253,7 @@ func localMeta(root string) string {
 }
 
 // remoteMeta mirrors the local metadata directory name onto the remote path so a
-// push/pull round-trips symmetrically for both layouts (design D1.2). localRoot
+// push/pull round-trips symmetrically for both layouts. localRoot
 // supplies the resolved name; a remote path already ending in either metadata
 // name is used as-is.
 func remoteMeta(remote, localRoot string) string {

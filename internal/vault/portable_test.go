@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// TestValidatePortableName exercises every rule of design D7.1: each illegal
+// TestValidatePortableName exercises every rule of the design: each illegal
 // row must be rejected and each legal row accepted. A table that asserted
 // nothing on some rows would pass vacuously, so every row is checked, and the
 // error of an illegal row must name the sanitised suggestion (the fix).
@@ -71,7 +71,7 @@ func TestValidatePortableName(t *testing.T) {
 	}
 }
 
-// TestSanitizePortableSegment pins the exact sanitisation of design D7.2: illegal
+// TestSanitizePortableSegment pins the exact sanitisation of the design: illegal
 // and control characters become '_', trailing dots/spaces are trimmed, reserved
 // stems gain a leading '_', and an all-illegal segment collapses to "_".
 func TestSanitizePortableSegment(t *testing.T) {

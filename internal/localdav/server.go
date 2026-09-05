@@ -28,20 +28,20 @@ import (
 // bodyInactivity is the per-request inactivity deadline applied to a streaming
 // GET body (each Write) and a PUT body (each Read). A client that neither reads
 // nor writes for this long has its connection closed; a slow-but-progressing
-// transfer is never cut. See design D6.2.
+// transfer is never cut. See.
 const bodyInactivity = 60 * time.Second
 
 // presenceTTL is how long a successful/pending OpenReaderAt presence sweep is
 // cached per (path, generation) so a scrubbing Range client pays the per-chunk
-// stat sweep at most once per window. See design D7.3 step 4.
+// stat sweep at most once per window. See the design step 4.
 const presenceTTL = 10 * time.Second
 
 // defaultChunkCacheBytes is the size of the lazily created shared chunk cache
-// when neither ChunkCache nor ChunkCacheBytes is set. See design D7.4.
+// when neither ChunkCache nor ChunkCacheBytes is set. See.
 const defaultChunkCacheBytes = 64 << 20
 
 // defaultMaxStreams bounds concurrent streaming GET bodies when MaxStreams is
-// unset. See design D6.3.
+// unset. See.
 const defaultMaxStreams = 8
 
 type Server struct {
@@ -50,13 +50,13 @@ type Server struct {
 	Prefix   string
 
 	// AllowedHosts are extra Host names (besides loopback addresses and
-	// "localhost") that ServeHTTP accepts. See design D1.3.
+	// "localhost") that ServeHTTP accepts. See.
 	AllowedHosts []string
 	// Credentials, when non-nil, require HTTP Basic authentication on every
-	// request (OPTIONS included). See design D2.1.
+	// request (OPTIONS included). See.
 	Credentials *BasicCredentials
 	// DropOSJunk, when true, makes the server silently no-op filesystem cruft
-	// (.DS_Store and friends) instead of storing it. See design D8.4.
+	// (.DS_Store and friends) instead of storing it. See.
 	DropOSJunk bool
 	// MaxStreams bounds concurrent streaming GET bodies (0 => defaultMaxStreams).
 	// Ignored when StreamSem is non-nil (the shared semaphore already carries a
@@ -66,7 +66,7 @@ type Server struct {
 	// instead of lazily minting a private one. A caller that constructs a fresh
 	// Server per request (the GUI's handleWebDAV) passes one shared semaphore so
 	// the MaxStreams cap stays GLOBAL across requests rather than resetting to a
-	// full budget on every request. See design D6.3 and finding OA-1.
+	// full budget on every request. See the design and.
 	StreamSem chan struct{}
 	// ChunkCache is the shared decrypted-chunk cache attached to every reader. If
 	// nil, the server lazily creates one of ChunkCacheBytes bytes.
@@ -76,16 +76,16 @@ type Server struct {
 	// Presence, when non-nil, is the shared (path, generation) presence-sweep
 	// cache this Server uses instead of lazily minting a private one. A caller
 	// that constructs a fresh Server per request (the GUI's handleWebDAV) passes
-	// one shared cache so the R15 "stat once per 10 s window" optimization stays
+	// one shared cache so the "stat once per 10 s window" optimization stays
 	// GLOBAL across requests: without it every throwaway Server starts with an
 	// empty presence map and re-runs the full per-chunk stat sweep on every Range
 	// GET. Scope it to one open vault (a caller swapping vaults must hand a fresh
-	// cache) since the key is not vault-qualified. See design D7.3 and finding
+	// cache) since the key is not vault-qualified. See the design and finding
 	// IC-1.
 	Presence *PresenceCache
 
 	// mu serialises the compound (snapshot-then-mutate) verbs DELETE/MKCOL/
-	// MOVE/COPY. GET/HEAD/PROPFIND/OPTIONS/PUT do NOT take it (design D6.3).
+	// MOVE/COPY. GET/HEAD/PROPFIND/OPTIONS/PUT do NOT take it.
 	mu sync.Mutex
 
 	presenceOnce sync.Once
@@ -102,9 +102,9 @@ type Server struct {
 // Range GETs pays the per-chunk stat sweep once. It is safe for concurrent use.
 // A Server lazily mints a private one; the GUI mount, which builds a fresh
 // Server per /dav request, holds one shared cache and injects it via
-// Server.Presence so the sweep result binds across requests (finding IC-1). The
+// Server.Presence so the sweep result binds across requests. The
 // key is (path, generation) and is NOT vault-qualified, so a shared cache must
-// be scoped to a single open vault. See design D7.3.
+// be scoped to a single open vault. See.
 type PresenceCache struct {
 	mu      sync.Mutex
 	entries map[presenceKey]presenceEntry
@@ -265,7 +265,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// hostForbiddenBody is the D1.5 403 body naming the remedy.
+// hostForbiddenBody is the 403 body naming the remedy.
 func hostForbiddenBody(rawHost string, extra []string) string {
 	allowed := "loopback addresses, localhost"
 	if len(extra) > 0 {
@@ -356,7 +356,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	// Step 4: open a decrypting reader, honouring the cached presence result.
 	// Scope the (re-)verification to the bytes this request will actually serve
 	// so a fresh "present" cache hit still catches a chunk removed since the
-	// sweep (IC-2) without re-statting the whole file on every Range GET (R15).
+	// sweep (IC-2) without re-statting the whole file on every Range GET.
 	off, length := servedByteRange(r, rec.Size)
 	fr, err := s.openFileReader(vp, rec, off, length)
 	if err != nil {
@@ -377,7 +377,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	// with the old generation's ETag. http.ServeContent uses the header ETag for
 	// If-Range/If-None-Match, so a stale validator that still matched a resuming
 	// client's If-Range would stitch new content onto previously fetched old bytes
-	// (finding IC-3). Binding the ETag to fr keeps validator and bytes in the same
+	// . Binding the ETag to fr keeps validator and bytes in the same
 	// generation; in the common no-overwrite case fr's record equals rec, so this
 	// is the identical value.
 	etag = etagForReader(vp, fr)
@@ -393,11 +393,11 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 
 // openFileReader opens a reader for vp, using a 10 s per-(path, generation)
 // cache of the presence-sweep result so repeated Range GETs skip the whole-file
-// stat sweep (R15). On a cache miss it performs the sweep (via openReaderAtFn).
+// stat sweep. On a cache miss it performs the sweep (via openReaderAtFn).
 // On a fresh "present" hit it opens without the sweep but re-verifies, on disk,
 // the chunks in [off, off+length) that the shared chunk cache cannot serve, so a
 // chunk removed since the sweep yields a clean ErrChunksPending (→ 409) instead
-// of a torn 200 (finding IC-2). off/length name the byte range the request will
+// of a torn 200. off/length name the byte range the request will
 // serve (0, rec.Size for a whole-file GET).
 func (s *Server) openFileReader(vp string, rec vault.FileRecord, off, length int64) (*vault.FileReader, error) {
 	key := presenceKey{path: vp, gen: rec.Generation}
@@ -476,7 +476,7 @@ func servedByteRange(r *http.Request, size int64) (off, length int64) {
 
 // presence resolves the presence-sweep cache: the shared one when the caller
 // injected Server.Presence (the GUI mount, so the sweep result binds across the
-// fresh-per-request Servers — finding IC-1), otherwise a per-Server lazy cache.
+// fresh-per-request Servers —), otherwise a per-Server lazy cache.
 func (s *Server) presence() *PresenceCache {
 	if s.Presence != nil {
 		return s.Presence
@@ -532,11 +532,11 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		return
 	}
-	// No s.mu (design D6.3): Vault.PutReader is safe for concurrent callers.
+	// No s.mu: Vault.PutReader is safe for concurrent callers.
 	_, existed, _ := s.Vault.FileInfo(vp)
 	// Creating a NEW reserved-segment path is refused at the boundary with a
-	// clean 400 (design D1.2); overwriting an EXISTING reserved path a peer or
-	// legacy client created still works (design D7.1, finding peer/F3).
+	// clean 400; overwriting an EXISTING reserved path a peer or
+	// legacy client created still works.
 	if !existed && vault.ReservedContentSegment(vp) {
 		http.Error(w, fmt.Sprintf("reserved virtual path %q is not allowed", vp), http.StatusBadRequest)
 		return
@@ -607,7 +607,7 @@ func (s *Server) handleMkcol(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "collection already exists", http.StatusMethodNotAllowed)
 		return
 	}
-	// A NEW reserved-segment collection cannot be created (design D1.2); an
+	// A NEW reserved-segment collection cannot be created; an
 	// existing one short-circuits at the "already exists" check above.
 	if vault.ReservedContentSegment(vp) {
 		http.Error(w, fmt.Sprintf("reserved virtual path %q is not allowed", vp), http.StatusBadRequest)
@@ -673,9 +673,9 @@ func (s *Server) handleCopyMove(w http.ResponseWriter, r *http.Request, move boo
 		return
 	}
 	// The destination is a create target: a reserved-segment name cannot be
-	// created (design D1.2). Moving or copying an EXISTING reserved source OUT to
+	// created. Moving or copying an EXISTING reserved source OUT to
 	// an ordinary name is still allowed, so this gates only the destination
-	// (design D7.1, finding peer/F3).
+	// .
 	if vault.ReservedContentSegment(dst) {
 		http.Error(w, fmt.Sprintf("reserved virtual path %q is not allowed", dst), http.StatusBadRequest)
 		return
@@ -743,7 +743,7 @@ func (s *Server) handleCopyMove(w http.ResponseWriter, r *http.Request, move boo
 	// Overwrite onto an existing destination: a plain file->file overwrite is
 	// the in-place atomic PutReader (no pre-delete); a type change or a
 	// collection->collection overwrite removes the destination first (RFC 4918
-	// §9.8.4).
+	// .4).
 	if dstExists {
 		typeChange := (srcIsFile && dstIsDir) || (srcIsDir && dstIsFile)
 		collToColl := srcIsDir && dstIsDir
@@ -878,7 +878,7 @@ func (s *Server) handlePropfind(w http.ResponseWriter, r *http.Request) {
 	if depth == "" {
 		depth = "1"
 	}
-	// No s.mu (design D6.3): AllEntries snapshots under the vault's own lock.
+	// No s.mu: AllEntries snapshots under the vault's own lock.
 	files, err := s.Vault.AllEntries()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -918,7 +918,7 @@ func etagMatches(inm, etag string) bool {
 }
 
 // isMountJunk reports whether base is filesystem cruft the client's OS creates
-// automatically (Finder/Explorer/Spotlight metadata). See design D8.4.
+// automatically (Finder/Explorer/Spotlight metadata). See.
 func isMountJunk(base string) bool {
 	if strings.HasPrefix(base, "._") {
 		return true
@@ -1158,7 +1158,7 @@ func etagForRecord(vp string, rec vault.FileRecord) string {
 // open reader's own snapshot, so the ETag encodes the exact generation and byte
 // length http.ServeContent will serve. It exists so handleGet can bind the GET
 // response validator to the bytes it actually streams instead of to an earlier,
-// independent index snapshot (finding IC-3).
+// independent index snapshot.
 func etagForReader(vp string, fr *vault.FileReader) string {
 	return fmt.Sprintf("\"%x-%x-%d\"", len(vp), fr.Generation(), fr.Size())
 }

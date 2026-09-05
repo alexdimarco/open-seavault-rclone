@@ -27,8 +27,8 @@ func makeLegacyVault(t *testing.T, root, pw string) {
 	}
 }
 
-// R4 (P0-4, D1.1): a new vault creates the visible SeaVaultData directory (never
-// the hidden .seavault), and ResolveMetaDir reports it.
+// a new vault creates the visible SeaVaultData directory (never
+// the hidden.seavault), and ResolveMetaDir reports it.
 func TestCreateWritesVisibleSeaVaultData(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
 	createTestVault(t, root, "password")
@@ -36,7 +36,7 @@ func TestCreateWritesVisibleSeaVaultData(t *testing.T) {
 		t.Fatal("a new vault must create SeaVaultData/vault.json")
 	}
 	if fileExists(filepath.Join(root, ".seavault", "vault.json")) {
-		t.Fatal("a new vault must not create the hidden .seavault directory")
+		t.Fatal("a new vault must not create the hidden.seavault directory")
 	}
 	name, exists, err := ResolveMetaDir(root)
 	if err != nil {
@@ -47,7 +47,7 @@ func TestCreateWritesVisibleSeaVaultData(t *testing.T) {
 	}
 }
 
-// R4 (D1.1): a legacy .seavault vault opens unchanged and resolves to the legacy
+// a legacy.seavault vault opens unchanged and resolves to the legacy
 // name.
 func TestOpenResolvesLegacySeavault(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
@@ -62,7 +62,7 @@ func TestOpenResolvesLegacySeavault(t *testing.T) {
 	}
 	v, err := Open(root, pw)
 	if err != nil {
-		t.Fatalf("a legacy .seavault vault must open: %v", err)
+		t.Fatalf("a legacy.seavault vault must open: %v", err)
 	}
 	if filepath.Base(v.MetaRoot) != ".seavault" {
 		t.Fatalf("MetaRoot must point at the legacy dir, got %q", v.MetaRoot)
@@ -72,7 +72,7 @@ func TestOpenResolvesLegacySeavault(t *testing.T) {
 	}
 }
 
-// R4 (D1.1): a root holding BOTH metadata names is ambiguous and refused, from
+// a root holding BOTH metadata names is ambiguous and refused, from
 // ResolveMetaDir and from Open, rather than silently picking one.
 func TestBothMetadataNamesAreAmbiguous(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
@@ -98,7 +98,7 @@ func TestBothMetadataNamesAreAmbiguous(t *testing.T) {
 	}
 }
 
-// R4 (D1.1): Create on a root that already holds a legacy .seavault vault returns
+// Create on a root that already holds a legacy.seavault vault returns
 // "vault already exists" and writes no SeaVaultData directory.
 func TestCreateOnLegacyRefusesAndWritesNoSeaVaultData(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
@@ -113,7 +113,7 @@ func TestCreateOnLegacyRefusesAndWritesNoSeaVaultData(t *testing.T) {
 	}
 }
 
-// R4 (D1.2): neither metadata name may be created as a virtual path segment, at
+// neither metadata name may be created as a virtual path segment, at
 // the top of a path or nested within one.
 func TestBothMetadataNamesRejectedAsVirtualSegments(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
@@ -130,7 +130,7 @@ func TestBothMetadataNamesRejectedAsVirtualSegments(t *testing.T) {
 	}
 }
 
-// R4 (D1.2): a put whose source is the vault root excludes exactly v.MetaRoot —
+// a put whose source is the vault root excludes exactly v.MetaRoot —
 // the vault's own encrypted metadata is never re-imported, while ordinary
 // sibling content is.
 func TestPutSourceRootSkipsExactlyMetaRoot(t *testing.T) {
@@ -169,7 +169,7 @@ func TestPutSourceRootSkipsExactlyMetaRoot(t *testing.T) {
 	}
 }
 
-// R4 (D1.2): a source tree containing a directory merely NAMED like a metadata
+// a source tree containing a directory merely NAMED like a metadata
 // dir (not this vault's own) is imported as plain content, with a warning.
 func TestForeignMetadataDirImportedWithWarning(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
@@ -215,7 +215,7 @@ func TestForeignMetadataDirImportedWithWarning(t *testing.T) {
 	}
 }
 
-// R4 / D1.3: SyncClientPreflightNote fires only for a root under a known
+// SyncClientPreflightNote fires only for a root under a known
 // sync-client folder, and states the SeaVaultData default and the 0.15 boundary.
 func TestSyncClientPreflightNote(t *testing.T) {
 	note := SyncClientPreflightNote(filepath.Join("/home", "alex", "Nextcloud", "seavault"))
@@ -230,7 +230,7 @@ func TestSyncClientPreflightNote(t *testing.T) {
 	}
 }
 
-// D1.3: opening a legacy .seavault vault under a sync-client folder surfaces the
+// opening a legacy.seavault vault under a sync-client folder surfaces the
 // preflight note; a new SeaVaultData vault or a vault outside a sync folder does
 // not.
 func TestOpenLegacyVaultUnderSyncFolderSetsNote(t *testing.T) {
@@ -246,7 +246,7 @@ func TestOpenLegacyVaultUnderSyncFolderSetsNote(t *testing.T) {
 	if note == "" {
 		t.Fatal("opening a legacy vault under Nextcloud must set the preflight note")
 	}
-	// Owner C2: the Open note is the SHORT hidden-file-sync guidance, distinct
+	// the Open note is the SHORT hidden-file-sync guidance, distinct
 	// from the create-time note. It must match LegacyOpenPreflightNote and must
 	// NOT carry the create-oriented SeaVaultData / 0.15-boundary text.
 	if note != LegacyOpenPreflightNote(legacyRoot) {

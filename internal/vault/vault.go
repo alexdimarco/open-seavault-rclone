@@ -29,68 +29,68 @@ const (
 )
 
 // SupportedFormat is the highest format-v3 reader level this build implements
-// (design D1.2, P1-20). It is the forward-compatibility ceiling: a vault whose
+// . It is the forward-compatibility ceiling: a vault whose
 // VaultConfig.MinReader exceeds it is refused before any unwrap with
 // ErrFormatTooNew. It is distinct from VaultConfig.Version (the on-the-wire
 // integer the shipped 0.16 client fences on): during the A2 grace release the
-// format grows while Version stays 2 (Condition 3), so this ceiling — not
+// format grows while Version stays 2, so this ceiling — not
 // Version — is what fences a too-new vault for A2-and-later clients.
 const SupportedFormat = 3
 
 // ErrFormatTooNew is returned by Open when vault.json declares a MinReader
 // greater than SupportedFormat: this build is too old to read the vault
-// (design D1.3, P1-20). Its message is deliberately HEDGED because MinReader is
+// . Its message is deliberately HEDGED because MinReader is
 // validated BEFORE the config MAC is verified (it must fence before doing any
 // unwrap work), so at this point a forged high MinReader is indistinguishable
 // from a genuine forward version — the operator is told the value may be
 // tampering, not just a stale client. After unwrap the same field is MAC-covered
-// and a forgery is additionally caught as config tampering (backlog B-4, §2).
+// and a forgery is additionally caught as config tampering.
 var ErrFormatTooNew = errors.New("this vault requires a newer version of SeaVault; if you did not expect a version change, vault.json may have been modified — restore it from a backup or another device")
 
 // ErrConfigInconsistent is returned by Open/loadIndexFromDisk when vault.json
 // describes a legacy single-index (or version 1) vault but encrypted manifests
 // exist on disk — the signature of a vault.json that was downgraded or replaced
-// under an intact manifest store (design D2.1, P0-3). Opening such a vault as a
+// under an intact manifest store. Opening such a vault as a
 // legacy single-index vault would ignore every manifest, so it is refused.
 var ErrConfigInconsistent = errors.New("vault.json describes a legacy single-index vault but encrypted manifests exist; refusing to open — vault.json may have been replaced; restore it from a backup or another device")
 
 // ErrConfigRolledBack is returned by Open when a NON-INTERACTIVE unlock
 // (keychain, SEAVAULT_PASSWORD, or a serve/sync auto-supplied password) meets a
 // config whose FormatEpoch is lower than this device's freshness high-water — a
-// replayed pre-rotation config (design D5.3, T-A2-2, Condition 9). An unattended
+// replayed pre-rotation config. An unattended
 // process cannot read a warning, so the rollback is a hard refusal; the operator
 // re-runs with --accept-rollback (and a re-supplied credential) to accept it.
 var ErrConfigRolledBack = errors.New("vault.json looks older than this device last saw, so SeaVault will not open it. If you deliberately restored this vault from an older backup, re-run with --accept-rollback to open it and re-establish freshness. If you did NOT expect this, the sync server may be replaying a retired configuration: do not enter a retired password, and restore vault.json from a good backup or another device")
 
 // ErrConfigDiverged is returned by Open when the on-disk FormatEpoch TIES this
-// device's recorded high-water but the ConfigTag differs (design D3.6, Condition
+// device's recorded high-water but the ConfigTag differs (Condition
 // 13): two devices mutated the vault configuration concurrently and the sync
 // client kept a copy this device did not write. Rather than silently accept it,
 // Open refuses so the operator resolves the divergence on the originating device.
 var ErrConfigDiverged = errors.New("another device changed the vault configuration at the same time; open on the device that made the change, let it sync, then retry")
 
-// OpenOptions carry the freshness-rollback disposition into Open (design D5.3,
-// Condition 9). The zero value hard-refuses a replayed config; --accept-rollback
+// OpenOptions carry the freshness-rollback disposition into Open (
+// ). The zero value hard-refuses a replayed config; --accept-rollback
 // sets AcceptRollback to open a deliberate restore and re-establish freshness.
 type OpenOptions struct {
 	// AcceptRollback is the operator's explicit acknowledgement that a config
 	// older than this device's high-water is expected (a restore from backup): it
 	// turns the ErrConfigRolledBack refusal into an open and CLEARS the device
-	// anchor so the restored config re-TOFUs (Condition 8). Without it, a rollback
+	// anchor so the restored config re-TOFUs. Without it, a rollback
 	// refuses regardless of whether the unlock was interactive (strict gate).
 	AcceptRollback bool
 }
 
 type VaultConfig struct {
 	Version int `json:"version"`
-	// MinReader is the forward-compatibility fence (design D1.2, P1-20): a client
+	// MinReader is the forward-compatibility fence: a client
 	// whose SupportedFormat is below MinReader refuses the vault with
 	// ErrFormatTooNew. Additive and omitempty so an absent field (every pre-A2
 	// vault, and every A2 vault during the grace release) reads as 0 and fences
-	// nothing. Raised to 3 only by seal-format (slice 6), never during grace.
+	// nothing. Raised to 3 only by seal-format, never during grace.
 	MinReader int `json:"minReader,omitempty"`
 	// FormatEpoch is a monotonic counter bumped by every config rewrite (design
-	// D3.5/D5.1): the device-local freshness anchor compares it to detect a
+	// ): the device-local freshness anchor compares it to detect a
 	// rolled-back config. Additive/omitempty; absent reads as 0.
 	FormatEpoch int64        `json:"formatEpoch,omitempty"`
 	VaultID     string       `json:"vaultId,omitempty"`
@@ -100,30 +100,30 @@ type VaultConfig struct {
 	Chunk       ChunkParams  `json:"chunk"`
 	WrappedKeys string       `json:"wrappedKeys"`
 	WrapNonce   string       `json:"wrapNonce"`
-	// WrapEntries is the format-v3 wrap-entry array (design D3.1, P1-7): password
+	// WrapEntries is the format-v3 wrap-entry array: password
 	// and recovery entries, each with its own KDF salt/cost, nonce and wrapped
 	// master||index bundle. Additive/omitempty: when empty, the legacy top-level
 	// WrappedKeys/WrapNonce are read as an implicit password entry (I1), so every
 	// pre-A2 vault opens unchanged. Populated by password change / recovery
-	// (slice 4); read by Open (slice 2). The legacy fields are kept current
-	// throughout the grace release (Condition 4).
+	// ; read by Open. The legacy fields are kept current
+	// throughout the grace release.
 	WrapEntries []WrapEntry `json:"wrapEntries,omitempty"`
 	// ConfigTag is base64 HMAC-SHA256 over the canonical config bytes (this whole
 	// struct with ConfigTag zeroed, in declaration order) under a master-derived
-	// key (design D2.2, P0-3). Additive/omitempty: absent on legacy/grace vaults
-	// (TOFU); written and verified starting slice 3. Declared LAST so the MAC
+	// key. Additive/omitempty: absent on legacy/grace vaults
+	// (TOFU); written and verified starting. Declared LAST so the MAC
 	// covers every other field in declaration order and the tag is trivially
 	// zeroed for the canonical form.
 	ConfigTag string `json:"configTag,omitempty"`
 }
 
-// WrapEntry is one entry in VaultConfig.WrapEntries (design D3.1, P1-7): a
+// WrapEntry is one entry in VaultConfig.WrapEntries: a
 // password or recovery credential that unwraps the same master||index bundle
 // under its own KDF salt/cost and AES-256-GCM nonce. ID is a stable random
 // 8-byte hex handle. AAD selects the wrap AAD: "" means the legacy bare AAD
 // (migrated wraps, protected by the config MAC covering Version); a non-empty
 // value binds the vault Version into the unwrap so a version downgrade also
-// breaks the unwrap independent of the MAC (design D2.5), used for newly created
+// breaks the unwrap independent of the MAC, used for newly created
 // vaults. The read/write paths land in slices 2 and 4.
 type WrapEntry struct {
 	ID    string    `json:"id"`                       // random 8-byte hex, stable per entry
@@ -134,8 +134,8 @@ type WrapEntry struct {
 	AAD   string    `json:"wrapAADVersion,omitempty"` // "" = legacy bare AAD; else versioned
 }
 
-// Wrap-entry type discriminators (design D3.1, P1-7). A password unlock filters
-// WrapEntries by WrapTypePassword; recovery redeem (slice 4) by WrapTypeRecovery.
+// Wrap-entry type discriminators. A password unlock filters
+// WrapEntries by WrapTypePassword; recovery redeem by WrapTypeRecovery.
 const (
 	WrapTypePassword = "password"
 	WrapTypeRecovery = "recovery"
@@ -162,7 +162,7 @@ type CryptoConfig struct {
 	StorageMode    string `json:"storageMode"`
 	ManifestMode   string `json:"manifestMode,omitempty"`
 	ManifestShards int    `json:"manifestShards,omitempty"`
-	// DirIDEpoch is the A3 directory-ID re-key generation (design D1.4): it is 0
+	// DirIDEpoch is the A3 directory-ID re-key generation: it is 0
 	// on every A2 vault and is bumped by A3's directory-ID indirection re-key when
 	// that phase lands. It is the marker seal-format's reversal (unseal-format)
 	// guards on: once a dir-ID re-key has run (DirIDEpoch > 0), the manifests are
@@ -202,21 +202,21 @@ type Vault struct {
 	maxGen int64
 	// lastFP/fpKnown track a cheap stat-based fingerprint of the on-disk
 	// manifests so ReloadIfChanged can detect when another process (e.g. the
-	// Nextcloud sync client) changed .seavault underneath a long-lived vault.
+	// Nextcloud sync client) changed.seavault underneath a long-lived vault.
 	lastFP  uint64
 	fpKnown bool
-	// openNote holds the D1.3 preflight note surfaced when a legacy .seavault
+	// openNote holds the preflight note surfaced when a legacy.seavault
 	// vault under a sync-client folder is opened. Set once by Open; read-only after.
 	openNote string
-	// anchorNote holds the one-time D5.4 note surfaced when the device-local
+	// anchorNote holds the one-time note surfaced when the device-local
 	// freshness anchor could not be resolved or written (an unwritable appdir):
 	// rollback protection is unavailable for this open, but Open is never blocked.
 	// Set by checkConfigIntegrity / the ratchet; read-only after.
 	anchorNote string
 	// deviceID is this installation's stable writer key for the per-record vector
-	// clock (design D4.1, P1-8): a random 16-byte hex loaded from appdir.DataDir
+	// clock: a random 16-byte hex loaded from appdir.DataDir
 	// at Open (finishOpen), NOT from appconfig.json, so a config reset keeps it
-	// (Condition 11). It is empty only when the data dir was unresolvable/unwritable
+	// . It is empty only when the data dir was unresolvable/unwritable
 	// at Open — a degraded mode in which local writes are clockless and reconcile
 	// by the Generation fallback, exactly like a 0.16 peer.
 	deviceID string
@@ -263,9 +263,9 @@ func CreateWithOptions(root string, password string, opts CreateOptions) error {
 	if err != nil {
 		return err
 	}
-	// Resolve the metadata directory FIRST (design D1.1, P0-4). If EITHER name
+	// Resolve the metadata directory FIRST. If EITHER name
 	// already holds a vault.json — one name, or both (the ambiguous layout) — this
-	// is a re-run init or a create racing an incoming .seavault sync: return the
+	// is a re-run init or a create racing an incoming.seavault sync: return the
 	// existing "vault already exists" error and write nothing. Only a root with no
 	// vault under either name proceeds, writing the preferred visible SeaVaultData.
 	name, exists, err := ResolveMetaDir(root)
@@ -358,7 +358,7 @@ func ReadConfig(root string) (VaultConfig, error) {
 	if err != nil {
 		return VaultConfig{}, err
 	}
-	// Resolve which metadata directory holds this vault (design D1.1). A root with
+	// Resolve which metadata directory holds this vault. A root with
 	// both names is ambiguous and refused; a root with neither resolves to the
 	// preferred name so the read surfaces a normal os.ErrNotExist callers handle.
 	name, _, err := ResolveMetaDir(root)
@@ -379,15 +379,15 @@ func ReadConfig(root string) (VaultConfig, error) {
 	return cfg, nil
 }
 
-// unlockWith is the format-v3 read leg (design D3.2, P1-7). It unwraps the
+// unlockWith is the format-v3 read leg. It unwraps the
 // master||index bundle from the first WrapEntries entry of type wantType that
 // the secret opens; when WrapEntries is empty it falls back to reading the
 // legacy top-level WrappedKeys/WrapNonce as the implicit {Type:"password",
-// legacy AAD} entry (design D3.1), so every pre-A2 vault opens unchanged (I1).
+// legacy AAD} entry, so every pre-A2 vault opens unchanged (I1).
 //
 // A wrong secret matches nothing and returns the single generic errWrongSecret:
 // per-entry failures are swallowed and the next entry tried, so the caller
-// cannot learn which entry (or how many) exist — no per-entry oracle (D3.2). A
+// cannot learn which entry (or how many) exist — no per-entry oracle. A
 // password unlock derives exactly one wrap key per candidate entry, and rotation
 // never appends a second password entry, so a legitimate password touches one.
 func (cfg VaultConfig) unlockWith(secret, wantType string) (Keys, error) {
@@ -411,11 +411,11 @@ func (cfg VaultConfig) unlockWith(secret, wantType string) (Keys, error) {
 		}
 	}
 	// Legacy top-level wrap as a fallback when WrapEntries is populated but has no
-	// matching PASSWORD entry (design D3.2 "then the legacy fields"): a legacy
+	// matching PASSWORD entry (the design "then the legacy fields"): a legacy
 	// vault that gained a recovery entry (via `recovery generate`) carries a
 	// recovery-only WrapEntries array yet must still open with its original
 	// password, which lives only in the legacy fields. Kept current by every
-	// rotation (Condition 4). Errors here are swallowed into the generic result —
+	// rotation. Errors here are swallowed into the generic result —
 	// no per-entry oracle — unlike the empty-WrapEntries branch above, which must
 	// preserve the exact pre-A2 messages for I1.
 	if wantType == WrapTypePassword && cfg.WrappedKeys != "" {
@@ -427,7 +427,7 @@ func (cfg VaultConfig) unlockWith(secret, wantType string) (Keys, error) {
 }
 
 // recoveryEntryFor unwraps the master||index bundle from the first recovery
-// WrapEntry the secret opens and returns that entry's ID (design D3.3): the
+// WrapEntry the secret opens and returns that entry's ID: the
 // redeem transaction needs the ID to remove exactly the entry that was used. A
 // secret matching no recovery entry returns the generic errWrongSecret with no
 // per-entry oracle. Recovery secrets are never in the legacy fields, so there is
@@ -445,7 +445,7 @@ func (cfg VaultConfig) recoveryEntryFor(secret string) (Keys, string, error) {
 }
 
 // Open unlocks a vault with a password. It is the historical entry point and is
-// treated as an INTERACTIVE unlock (design D5.3): a detected rotation rollback
+// treated as an INTERACTIVE unlock: a detected rotation rollback
 // warns and opens rather than hard-refusing, matching every existing caller
 // (the GUI login form, a CLI prompt) that has a human present. The strict
 // non-interactive disposition is opt-in through OpenWithOptions.
@@ -454,7 +454,7 @@ func Open(root string, password string) (*Vault, error) {
 }
 
 // OpenWithOptions unlocks a vault with a password under an explicit freshness
-// disposition (design D5.3, Condition 9): a non-interactive unlock (the zero
+// disposition: a non-interactive unlock (the zero
 // OpenOptions) hard-refuses a rolled-back config, an interactive one warns and
 // opens, and AcceptRollback accepts a restore and re-TOFUs.
 func OpenWithOptions(root string, password string, opts OpenOptions) (*Vault, error) {
@@ -462,7 +462,7 @@ func OpenWithOptions(root string, password string, opts OpenOptions) (*Vault, er
 	if err != nil {
 		return nil, err
 	}
-	// Read leg (design D3.2, P1-7): unlock with the password, trying each
+	// Read leg: unlock with the password, trying each
 	// WrapEntries "password" entry and falling back to the legacy top-level wrap.
 	// A recovery secret is redeemed through OpenWithRecovery, not here; a wrong
 	// password matches nothing and returns the generic errWrongSecret with no
@@ -474,10 +474,10 @@ func OpenWithOptions(root string, password string, opts OpenOptions) (*Vault, er
 	return finishOpen(root, metaName, metaExists, cfg, keys, opts)
 }
 
-// OpenWithRecovery unlocks a vault with a recovery phrase (design D3.3, P1-7): it
+// OpenWithRecovery unlocks a vault with a recovery phrase: it
 // canonicalises the phrase, opens the first recovery WrapEntry it matches, and
 // returns the opened vault plus that entry's ID so a redeem transaction can
-// remove exactly the entry that was used (Condition 1). It runs the same
+// remove exactly the entry that was used. It runs the same
 // post-unlock integrity/freshness gate as Open.
 func OpenWithRecovery(root string, phrase string, opts OpenOptions) (*Vault, string, error) {
 	root, cfg, metaName, metaExists, err := prepareOpen(root, phrase)
@@ -497,7 +497,7 @@ func OpenWithRecovery(root string, phrase string, opts OpenOptions) (*Vault, str
 
 // prepareOpen performs the pre-unlock work shared by every open path: resolve the
 // root, reject an empty secret, read and version-check the config, apply the
-// pre-MAC MinReader forward fence (design D1.2/D1.3), and resolve the metadata
+// pre-MAC MinReader forward fence, and resolve the metadata
 // directory name. It never unwraps, so the MinReader fence trips before any work
 // and before any wrong-secret error.
 func prepareOpen(root, secret string) (string, VaultConfig, string, bool, error) {
@@ -515,18 +515,18 @@ func prepareOpen(root, secret string) (string, VaultConfig, string, bool, error)
 	if cfg.Version != 1 && cfg.Version != 2 && cfg.Version != 3 {
 		return "", VaultConfig{}, "", false, fmt.Errorf("unsupported vault version %d", cfg.Version)
 	}
-	// Forward-compatibility fence (design D1.2/D1.3, P1-20): a vault whose
+	// Forward-compatibility fence: a vault whose
 	// MinReader exceeds what this build implements is refused BEFORE any unwrap.
 	// MinReader is pre-MAC here, so the wrapped ErrFormatTooNew message is hedged
-	// about tampering (D1.3); after unwrap the same field is MAC-covered, so a
+	// about tampering; after unwrap the same field is MAC-covered, so a
 	// forged value is additionally caught as config tampering. Absent MinReader
 	// reads as 0 and never fences.
 	if err := formatTooNew(cfg.MinReader, SupportedFormat); err != nil {
 		return "", VaultConfig{}, "", false, err
 	}
 	// Resolve the metadata directory name so MetaRoot points at the actual layout
-	// (SeaVaultData for new vaults, .seavault for legacy ones); ReadConfig already
-	// refused an ambiguous root, so this cannot report ambiguity here (design D1.1).
+	// (SeaVaultData for new vaults.seavault for legacy ones); ReadConfig already
+	// refused an ambiguous root, so this cannot report ambiguity here.
 	metaName, metaExists, err := ResolveMetaDir(abs)
 	if err != nil {
 		return "", VaultConfig{}, "", false, err
@@ -535,9 +535,9 @@ func prepareOpen(root, secret string) (string, VaultConfig, string, bool, error)
 }
 
 // finishOpen builds the *Vault from an unwrapped key bundle and runs the
-// post-unlock gates (design §2, §5): derive the chunk/index AEADs, verify the
+// post-unlock gates: derive the chunk/index AEADs, verify the
 // ConfigMAC and freshness anchor (a wrong secret already failed above, so there
-// is no MAC oracle), surface the D1.3 preflight note for a legacy .seavault vault
+// is no MAC oracle), surface the preflight note for a legacy.seavault vault
 // under a sync folder, and ensure the content layout. Shared by OpenWithOptions
 // and OpenWithRecovery so both unlock paths run an identical gate.
 func finishOpen(root, metaName string, metaExists bool, cfg VaultConfig, keys Keys, opts OpenOptions) (*Vault, error) {
@@ -556,7 +556,7 @@ func finishOpen(root, metaName string, metaExists bool, cfg VaultConfig, keys Ke
 	if err := v.checkConfigIntegrity(opts); err != nil {
 		return nil, err
 	}
-	// Record this device's reader signal (design D1.4, Condition 14): a
+	// Record this device's reader signal: a
 	// device-local, never-synced note that this DeviceID opened the vault at this
 	// SupportedFormat. seal-format prints this inventory before retiring older
 	// readers. Best-effort — a missing device id or unwritable appdir simply
@@ -572,12 +572,12 @@ func finishOpen(root, metaName string, metaExists bool, cfg VaultConfig, keys Ke
 }
 
 // PreflightNote returns the informational note produced when this vault was
-// opened (design D1.3), or "" when there is none. It is set only for a legacy
+// opened, or "" when there is none. It is set only for a legacy
 // .seavault vault under a sync-client folder and never causes a write.
 func (v *Vault) PreflightNote() string { return v.openNote }
 
 // FreshnessAnchorNote returns the one-time note produced when the device-local
-// freshness anchor could not be resolved or written during Open (design D5.4),
+// freshness anchor could not be resolved or written during Open,
 // or "" when the anchor was available. It signals that rollback protection is
 // not in effect for this open; Open itself is never blocked by an unwritable
 // appdir.
@@ -591,14 +591,14 @@ func (v *Vault) ID() string {
 }
 
 // DeviceID exposes this installation's stable vector-clock writer key (design
-// D4.1, P1-8), loaded from appdir.DataDir at Open. It is "" only in the degraded
+// ), loaded from appdir.DataDir at Open. It is "" only in the degraded
 // mode where the data dir was unavailable at Open, in which case local writes are
 // clockless. Chiefly a test and diagnostics seam; the write path reads v.deviceID
 // directly.
 func (v *Vault) DeviceID() string { return v.deviceID }
 
 // resolveDeviceID loads this installation's stable device id from appdir.DataDir
-// (design D4.1, Condition 11). It is best-effort like the freshness anchor: if
+// . It is best-effort like the freshness anchor: if
 // the data dir is unresolvable or unwritable, it returns "" and Open proceeds
 // with clockless local writes (Generation fallback) rather than blocking — the
 // vector clock is an additive improvement, never a gate on opening a vault.
@@ -641,7 +641,7 @@ func (v *Vault) LoadIndex() (Index, error) {
 // legacy single-index file). It performs the on-disk conflict reconciliation
 // and is intentionally only invoked once per cache lifetime.
 func (v *Vault) loadIndexFromDisk() (Index, error) {
-	// Downgrade detection (design D2.1, P0-3): a vault.json that claims a legacy
+	// Downgrade detection: a vault.json that claims a legacy
 	// single-index (or version 1) layout while encrypted manifests exist on disk
 	// has been downgraded or replaced. Opening it as a legacy vault would ignore
 	// every manifest, so refuse instead. Presence is checked without decryption so
@@ -721,7 +721,7 @@ func (v *Vault) SaveIndex(idx Index) error {
 }
 
 // PutReport is the outcome of a PutPathReport call: the per-file results plus any
-// advisory warnings raised during the walk (design D1.2). A warning never fails
+// advisory warnings raised during the walk. A warning never fails
 // the put; it records something the operator should know, such as a source
 // directory named like a SeaVault metadata dir that was imported as plain
 // content rather than skipped.
@@ -740,9 +740,9 @@ func (v *Vault) PutPath(sourcePath string, virtualPath string) ([]PutResult, err
 // directory — the directory whose absolute path equals v.MetaRoot — so a put
 // whose source is the vault root (or an ancestor) never re-imports the encrypted
 // metadata. A source directory that merely shares a metadata NAME but is not this
-// vault's own (a second vault's SeaVaultData, a legacy .seavault in a backup
+// vault's own (a second vault's SeaVaultData, a legacy.seavault in a backup
 // tree) is imported like ordinary content and recorded as a warning, never
-// silently skipped (design D1.2, P0-4).
+// silently skipped.
 func (v *Vault) PutPathReport(sourcePath string, virtualPath string) (PutReport, error) {
 	info, err := os.Stat(sourcePath)
 	if err != nil {
@@ -764,10 +764,10 @@ func (v *Vault) PutPathReport(sourcePath string, virtualPath string) (PutReport,
 		if err != nil {
 			return PutReport{}, err
 		}
-		// A single-file put names its virtual path directly, so the D1.2 create
+		// A single-file put names its virtual path directly, so the create
 		// gate applies (unlike the directory-tree branch below, where a foreign
 		// metadata-named subdir is imported as content with a warning). Overwriting
-		// an existing reserved-segment path still works (design D7.1, peer/F3).
+		// an existing reserved-segment path still works.
 		if _, exists := idx.Files[cleaned]; !exists {
 			if err := reservedNewPathError(cleaned); err != nil {
 				return PutReport{}, err
@@ -841,7 +841,7 @@ func (v *Vault) PutPathReport(sourcePath string, virtualPath string) (PutReport,
 }
 
 func (v *Vault) putFile(sourcePath string, virtualPath string, idx *Index) (PutResult, error) {
-	// Portable-name gate for a NEW path only (design D7.1, B6): importing a file
+	// Portable-name gate for a NEW path only (B6): importing a file
 	// under an illegal leaf that no Windows peer could recreate is refused, but
 	// overwriting an existing (peer/legacy) illegal name keeps working.
 	if _, exists := idx.Files[virtualPath]; !exists {
@@ -870,10 +870,10 @@ func (v *Vault) PutReader(r io.Reader, virtualPath string, size int64, mode uint
 	if err != nil {
 		return PutResult{}, err
 	}
-	// Create-time gates for a NEW upload target only (design D7.1/D1.2, B6):
+	// Create-time gates for a NEW upload target only (B6):
 	// neither metadata dir name may be CREATED as a virtual path segment, and the
 	// leaf must be portable. Overwriting an EXISTING path — reserved-segment or
-	// illegal leaf, peer/legacy-created — still works (finding peer/F3).
+	// illegal leaf, peer/legacy-created — still works.
 	if _, exists := idx.Files[vp]; !exists {
 		if err := reservedNewPathError(vp); err != nil {
 			return PutResult{}, err
@@ -923,7 +923,7 @@ func (v *Vault) putReader(r io.Reader, virtualPath string, size int64, mode uint
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	wallNano := unixNanoOrNow(now)
 	generation := v.nextGeneration(wallNano)
-	// Advance the per-record vector clock (design D4.1): carry forward the clock of
+	// Advance the per-record vector clock: carry forward the clock of
 	// the record this write supersedes and bump this device's own entry, so a local
 	// write causally supersedes everything the device has merged and reconciles
 	// cleanly (no spurious conflict) against its own earlier versions.
@@ -1069,7 +1069,7 @@ func (v *Vault) restoreFile(rec FileRecord, destPath string) error {
 	}
 	// The restored file is durably in place after the rename; a failed
 	// best-effort directory fsync must not report the restore as failed
-	// (design D5.2, integrity/F5).
+	// .
 	_ = fsyncDir(filepath.Dir(destPath))
 	return nil
 }
@@ -1286,14 +1286,14 @@ func (v *Vault) RemovePath(virtualPath string) (int, error) {
 		// per-target tombstones remain distinctly ordered.
 		generations[p] = v.nextGeneration(time.Now().UTC().UnixNano())
 		// Record the generation of the live record being deleted so the tombstone
-		// carries a deletedGeneration (design D4.2): a stale synced copy at or
+		// carries a deletedGeneration: a stale synced copy at or
 		// below it stays suppressed, a newer concurrent edit above it surfaces as
 		// a conflict instead of being lost.
 		superseded[p] = idx.Files[p].Generation
 		// Advance the tombstone's vector clock over the record being deleted
-		// (design D4.3): the delete must DOMINATE the edit it saw (a clean delete),
+		// : the delete must DOMINATE the edit it saw (a clean delete),
 		// while a concurrent edit from a device it never saw stays concurrent and
-		// survives as a conflict (R10). advanceClock joins the deleted record's
+		// survives as a conflict. advanceClock joins the deleted record's
 		// full clock and bumps this device — with NO aging, so the tombstone always
 		// strictly dominates the record (and any stale copy of it); aging an entry
 		// out here could leave the tombstone merely concurrent and resurrect the
@@ -1332,7 +1332,7 @@ type VerifyReport struct {
 	OtherErrors   int           `json:"otherErrors"`
 	Issues        []VerifyIssue `json:"issues,omitempty"`
 	// PendingIntents lists deletion intents in flight so an operator sees a GC
-	// delete queued but not yet fenced-out (design D3.6). Reads write nothing.
+	// delete queued but not yet fenced-out. Reads write nothing.
 	PendingIntents []PendingIntent `json:"pendingIntents,omitempty"`
 }
 
@@ -1395,8 +1395,8 @@ func (v *Vault) VerifyReport() (VerifyReport, error) {
 			}
 		}
 	}
-	// List any deletion intents in flight (design D3.6). This is a pure read of
-	// the gc-intents directory; it writes nothing (invariant I2).
+	// List any deletion intents in flight. This is a pure read of
+	// the gc-intents directory; it writes nothing.
 	if intents, ierr := v.walkIntents(); ierr == nil {
 		report.PendingIntents = pendingList(intents, time.Now())
 	}
@@ -1422,7 +1422,7 @@ func classifyVerifyIssue(err error) string {
 // names that do not begin with a 64-hex object id. The id is lower-cased so an
 // upper- or mixed-case chunk name (produced by a case-insensitive or
 // case-folding filesystem, or a peer) maps to the same live id as its canonical
-// lower-case object and GC keeps it (design D6.1, P3 hex-case-mismatch-gc).
+// lower-case object and GC keeps it (P3 hex-case-mismatch-gc).
 func chunkIDFromFileName(name string) string {
 	if len(name) >= 64 && isHex(name[:64]) {
 		return strings.ToLower(name[:64])
@@ -1502,10 +1502,10 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	}
 	ok = true
 	// The rename above has already durably published the file at `path`. The
-	// directory fsync is a best-effort crash-ordering nicety (design D5.2): on
+	// directory fsync is a best-effort crash-ordering nicety: on
 	// filesystems that do not support directory fsync (some FUSE/network mounts)
 	// it returns EINVAL/ENOTSUP. Do not turn an already-durable write into a
-	// reported failure over it (integrity/F5) — every caller (chunk, manifest,
+	// reported failure over it — every caller (chunk, manifest,
 	// index, intent, seen store) would otherwise see spurious errors while the
 	// data is on disk.
 	_ = fsyncDir(filepath.Dir(path))

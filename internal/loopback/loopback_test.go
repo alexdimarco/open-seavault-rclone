@@ -32,9 +32,9 @@ func TestHostAllowed(t *testing.T) {
 		{"extra-name-absent", "vault.lan", nil, false},
 		// An IPv4-mapped IPv6 address of a loopback IPv4 is loopback.
 		{"v4-mapped-loopback", "[::ffff:127.0.0.1]:1", nil, true},
-		// II-1 (friction Operator C4): a non-loopback IP literal is inert unless
+		//  (C4): a non-loopback IP literal is inert unless
 		// it is explicitly listed in extra. Before the fix HostAllowed returned
-		// ip.IsLoopback() for ANY IP literal and never consulted extra, so
+		// ip.IsLoopback for ANY IP literal and never consulted extra, so
 		// "--allow-host 192.168.1.5" was silently ignored.
 		{"extra-ip-allowed", "192.168.1.5:8765", []string{"192.168.1.5"}, true},
 		{"extra-ip-absent", "192.168.1.5:8765", nil, false},

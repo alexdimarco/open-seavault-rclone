@@ -70,7 +70,7 @@ func manifestPathFor(t *testing.T, v *Vault, virtualPath string) string {
 	return p
 }
 
-// TestTamperChunkFlippedByteFailsRead (R2, closes P1-22).
+// TestTamperChunkFlippedByteFailsRead (, closes).
 // Defence under test: AES-256-GCM AEAD Open (GCM tag verification) in
 // (*Vault).decodeChunk — flipping a ciphertext/tag byte makes authentication
 // fail, so the read surfaces an error rather than returning corrupted bytes.
@@ -96,7 +96,7 @@ func TestTamperChunkFlippedByteFailsRead(t *testing.T) {
 	}
 }
 
-// TestTamperChunkSubstitutionFailsRead (R2, closes P1-22).
+// TestTamperChunkSubstitutionFailsRead (, closes).
 // Defence under test: the per-chunk associated data (chunkAADPrefix+ref.ID)
 // bound into the AEAD in (*Vault).decodeChunk — B's ciphertext cannot
 // authenticate under A's chunk-id AAD, and the object-ID HMAC re-check backs it
@@ -139,7 +139,7 @@ func TestTamperChunkSubstitutionFailsRead(t *testing.T) {
 	}
 }
 
-// TestTamperManifestFlippedByteFailsLoad (R2, closes P1-22).
+// TestTamperManifestFlippedByteFailsLoad (, closes).
 // Defence under test: AES-256-GCM AEAD Open over the manifest
 // (manifestAADPrefix+id) in (*Vault).decryptManifest — a flipped byte fails
 // authentication and loadManifestIndex surfaces the error, so an index reload

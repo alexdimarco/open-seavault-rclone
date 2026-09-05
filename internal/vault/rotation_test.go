@@ -19,7 +19,7 @@ const (
 )
 
 // chunkFileSet returns the set of chunk object paths under a vault's metadata
-// dir, so a test can prove a config-only mutation rewrote NO chunk (design D3.4:
+// dir, so a test can prove a config-only mutation rewrote NO chunk (the design:
 // "no chunk or manifest is rewritten").
 func chunkFileSet(t *testing.T, root string) map[string]struct{} {
 	t.Helper()
@@ -43,12 +43,12 @@ func hasRecoveryEntry(cfg VaultConfig) bool {
 	return false
 }
 
-// R6 (design §3/§5, D3.4, P1-7, Cond 5): password change rewraps the same
+// password change rewraps the same
 // master||index under a new password — the OLD password stops opening on the A2
 // client AND on the legacy top-level wrap, the NEW password opens (including a
 // non-interactive/keychain-style unlock), a file put before the change still
 // decrypts with no chunk rewritten, and FormatEpoch is incremented. The legacy
-// wrap is kept current with the new password (Condition 4) so a 0.16 peer keeps
+// wrap is kept current with the new password so a 0.16 peer keeps
 // unlocking.
 func TestPasswordChange(t *testing.T) {
 	isolateAppHome(t)
@@ -81,7 +81,7 @@ func TestPasswordChange(t *testing.T) {
 
 	// The NEW password opens, including a NON-interactive (keychain-style) unlock —
 	// the path a keychain-backed re-open takes once the CLI refreshed the stored
-	// secret (Condition 5). A rolled-back or stale config would be refused here.
+	// secret. A rolled-back or stale config would be refused here.
 	vNew, err := OpenWithOptions(root, rotNewPassword, OpenOptions{})
 	if err != nil {
 		t.Fatalf("the new password must open the vault (keychain-style non-interactive unlock): %v", err)
@@ -117,11 +117,12 @@ func TestPasswordChange(t *testing.T) {
 	// The NEW password DOES open the legacy top-level wrap (a 0.16 peer keeps
 	// unlocking through the grace release).
 	if _, err := unwrapKeys(rotNewPassword, cfg.KDF, cfg.WrapNonce, cfg.WrappedKeys); err != nil {
-		t.Fatalf("the legacy top-level wrap must open with the new password (0.16 interop, Condition 4): %v", err)
+		t.Fatalf("the legacy top-level wrap must open with the new password (0.16 interop, ): %v", err)
 	}
 }
 
-// R7 (design §3, D3.3, P1-7, Cond 1/12): recovery generate/redeem/revoke.
+//	(,,, /12): recovery generate/redeem/revoke.
+//
 // Generate requires a matching read-back before it writes anything; redeem sets a
 // new password AND removes the redeemed entry (so the phrase alone no longer
 // opens); revoke removes one entry; and a crash mid-transaction leaves a
@@ -217,7 +218,7 @@ func TestRecoveryGenerateRedeemRevoke(t *testing.T) {
 			t.Fatalf("the old password must not open after a redeem, got %v", err)
 		}
 		// The redeemed phrase alone no longer opens (the entry was removed) — a
-		// leaked phrase cannot keep opening the vault (Condition 1).
+		// leaked phrase cannot keep opening the vault.
 		if _, _, err := OpenWithRecovery(root, phrase, OpenOptions{}); !errors.Is(err, errWrongSecret) {
 			t.Fatalf("the redeemed phrase must no longer open the vault, got %v", err)
 		}

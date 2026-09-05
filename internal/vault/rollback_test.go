@@ -37,14 +37,15 @@ func writeConfigStruct(t *testing.T, root string, cfg VaultConfig) {
 	writeConfigBytes(t, root, data)
 }
 
-// R8 (design §5, D5.3, P1-6, Cond 7/8/9): freshness-anchor rollback handling.
+//	(,,, /8/9): freshness-anchor rollback handling.
+//
 // After a password change, replaying the pre-change vault.json is a rollback:
-//   - ANY unlock hard-refuses with ErrConfigRolledBack (strict gate, Cond 9),
+//   - ANY unlock hard-refuses with ErrConfigRolledBack (strict gate),
 //     and the refusal message names --accept-rollback so a human can proceed;
 //   - --accept-rollback opens AND clears the anchor so the restored config
-//     re-TOFUs (Cond 8);
+//     re-TOFUs;
 //   - the rotator's OWN anchor was advanced by rewriteConfig, so the replay is
-//     caught on the very device that made the change (Cond 7);
+//     caught on the very device that made the change;
 //   - a FRESH device (no anchor) opens the same config without a warning and
 //     anchors it (TOFU).
 func TestFreshnessRollback(t *testing.T) {
@@ -55,7 +56,7 @@ func TestFreshnessRollback(t *testing.T) {
 	createTestVault(t, root, "pw0")
 
 	// Rotate once (epoch 1), snapshot that config, then rotate again (epoch 2). The
-	// rotator's anchor high-water is now 2 (advanced by rewriteConfig, Condition 7).
+	// rotator's anchor high-water is now 2 (advanced by rewriteConfig).
 	v, err := Open(root, "pw0")
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +86,7 @@ func TestFreshnessRollback(t *testing.T) {
 		t.Fatal("precondition: the replayed config must be at epoch 1")
 	}
 
-	// (Cond 9 / Cond 7) A non-interactive unlock on the rotator hard-refuses.
+	//  A non-interactive unlock on the rotator hard-refuses.
 	if _, err := OpenWithOptions(root, "pw1", OpenOptions{}); !errors.Is(err, ErrConfigRolledBack) {
 		t.Fatalf("a non-interactive open of a rolled-back config must be ErrConfigRolledBack, got %v", err)
 	}
@@ -103,7 +104,7 @@ func TestFreshnessRollback(t *testing.T) {
 		t.Fatalf("a rollback refusal must NOT lower the anchor high-water: got %d", anc.FormatEpoch)
 	}
 
-	// (Cond 8) --accept-rollback opens AND clears the anchor (re-TOFU at epoch 1).
+	//  --accept-rollback opens AND clears the anchor (re-TOFU at epoch 1).
 	_, err = OpenWithOptions(root, "pw1", OpenOptions{AcceptRollback: true})
 	if err != nil {
 		t.Fatalf("--accept-rollback must open the rolled-back config: %v", err)
@@ -116,7 +117,7 @@ func TestFreshnessRollback(t *testing.T) {
 		t.Fatalf("after --accept-rollback the restored config must open cleanly non-interactively: %v", err)
 	}
 
-	// (D5.4) A FRESH device (no anchor) TOFUs the same config: opens without a
+	//  A FRESH device (no anchor) TOFUs the same config: opens without a
 	// warning and anchors it, even under a strict non-interactive unlock.
 	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
 	_, err = OpenWithOptions(root, "pw1", OpenOptions{})
@@ -128,7 +129,7 @@ func TestFreshnessRollback(t *testing.T) {
 	}
 }
 
-// R12 (design §3.6, D3.6, Cond 13): a concurrent divergent config — two devices
+// a concurrent divergent config — two devices
 // mutating at once produce the SAME FormatEpoch with DIFFERENT ConfigTags. Open
 // on a device that recorded one tag at that epoch, then served the other, refuses
 // with ErrConfigDiverged rather than silently accepting whichever copy synced.
@@ -175,7 +176,7 @@ func TestConfigDivergence(t *testing.T) {
 	writeConfigStruct(t, root, cfgB)
 
 	// Device A opens the divergent copy: epoch tie (1 == 1), differing tag -> hard
-	// ErrConfigDiverged (Condition 13), not silent acceptance.
+	// ErrConfigDiverged, not silent acceptance.
 	if _, err := Open(root, "passB"); !errors.Is(err, ErrConfigDiverged) {
 		t.Fatalf("a concurrent divergent config at an equal FormatEpoch must be ErrConfigDiverged, got %v", err)
 	}

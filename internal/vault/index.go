@@ -19,14 +19,14 @@ type FileRecord struct {
 	Generation int64      `json:"generation,omitempty"`
 	Chunks     []ChunkRef `json:"chunks"`
 	ConflictOf string     `json:"conflictOf,omitempty"`
-	// Clock is the additive per-record vector clock (design D4.1, P1-8): a map
+	// Clock is the additive per-record vector clock: a map
 	// from writer DeviceID to a monotonic counter, carried inside the encrypted
 	// manifest body only. Additive/omitempty so a 0.16 writer (which never sets
 	// it) round-trips it as absent and reconciliation falls back to Generation.
 	// On each local write the device sets Clock[DeviceID] = max(existing, wallNano)
 	// + 1 and joins every other entry it has seen for the path (nextRecordClock).
 	Clock map[string]int64 `json:"clock,omitempty"`
-	// ClockAge is the aging bookkeeping for Clock (design D4.4, Condition 11): for
+	// ClockAge is the aging bookkeeping for Clock: for
 	// each FOREIGN device entry it counts consecutive local writes of this record
 	// that did NOT observe that device advance. When the count reaches
 	// clockAgeCompactions the entry is dropped from Clock on the next write — a

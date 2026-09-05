@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-// TestOpenMinReaderForwardFence is R1 (design D1.2/D1.3, P1-20). The forward
+// TestOpenMinReaderForwardFence is. The forward
 // fence must refuse a vault whose MinReader exceeds SupportedFormat BEFORE any
 // unwrap, with the typed hedged ErrFormatTooNew; a MinReader at or below
 // SupportedFormat opens; a Version this build newly tolerates (3) opens; and an
@@ -33,7 +33,7 @@ func TestOpenMinReaderForwardFence(t *testing.T) {
 		if !errors.Is(err, ErrFormatTooNew) {
 			t.Fatalf("Open with minReader=%d must return ErrFormatTooNew, got %v", SupportedFormat+1, err)
 		}
-		// The message is HEDGED (D1.3): it must name the tamper possibility, not
+		// The message is HEDGED: it must name the tamper possibility, not
 		// merely tell the operator to upgrade.
 		if !strings.Contains(err.Error(), "may have been modified") {
 			t.Fatalf("ErrFormatTooNew message must be hedged about tampering, got %q", err.Error())
@@ -56,7 +56,7 @@ func TestOpenMinReaderForwardFence(t *testing.T) {
 	t.Run("version 3 is tolerated on read", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "vault")
 		createTestVault(t, root, pw)
-		// ReadConfig/Open accept versions 1, 2 AND 3 (design D1.3). A hand-set
+		// ReadConfig/Open accept versions 1, 2 AND 3. A hand-set
 		// Version=3 with no MinReader must open, not hit "unsupported vault version".
 		editConfig(t, root, func(c *VaultConfig) { c.Version = 3 })
 		v, err := Open(root, pw)
@@ -109,10 +109,10 @@ type legacyVaultConfig struct {
 // TestConfigAdditiveFieldsRoundTrip proves the format-v3 additions are additive:
 // on a legacy-shaped config they omit entirely (byte-identical vault.json for a
 // 0.16 peer), and an A2 config that DOES set them survives a 0.16-style
-// Unmarshal with the known fields intact and no error (invariant I1).
+// Unmarshal with the known fields intact and no error.
 func TestConfigAdditiveFieldsRoundTrip(t *testing.T) {
 	// 1. A config with the new fields left zero must marshal WITHOUT their keys,
-	//    so a grace-release vault.json is byte-for-byte what 0.16 would write.
+	//  so a grace-release vault.json is byte-for-byte what 0.16 would write.
 	legacyShaped := VaultConfig{
 		Version:     2,
 		VaultID:     "abc123",
@@ -131,7 +131,7 @@ func TestConfigAdditiveFieldsRoundTrip(t *testing.T) {
 	}
 
 	// 2. An A2 config that SETS the new fields must still unmarshal into a
-	//    0.16-shaped struct with no error and the known fields intact.
+	//  0.16-shaped struct with no error and the known fields intact.
 	a2 := VaultConfig{
 		Version:     2,
 		MinReader:   3,

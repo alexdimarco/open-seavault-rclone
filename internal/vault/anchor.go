@@ -12,7 +12,7 @@ import (
 )
 
 // anchorUnavailableNote is the one-time note surfaced when the device-local
-// freshness anchor cannot be resolved or written (design D5.4, backlog B-3): the
+// freshness anchor cannot be resolved or written: the
 // app-data directory is unresolvable or read-only (a read-only mount, a backup
 // image). The anchor is best-effort — its absence means TOFU (fail open) — so
 // Open proceeds and never blocks; the note tells the operator that rollback
@@ -20,18 +20,18 @@ import (
 const anchorUnavailableNote = "freshness anchoring unavailable (app data directory not writable); rollback protection is disabled for this open"
 
 // freshnessAnchor is the device-local, never-synced record of what this device
-// has seen for a vault's configuration (design D5.2, P1-6 config half). It is
+// has seen for a vault's configuration (config half). It is
 // stored PLAINTEXT under 0600 perms — exactly like the A1 gc-seen store, and for
-// the same reason (Condition 10): a never-synced local file the in-model server
+// the same reason: a never-synced local file the in-model server
 // cannot reach gains nothing from an HMAC. FormatEpoch is the highest config
-// epoch this device has trusted (the rollback high-water, D5.1); HasTag records
+// epoch this device has trusted (the rollback high-water); HasTag records
 // whether this device has ever verified a valid ConfigTag for the vault — once
-// true, a subsequently-absent tag is a strip and Open hard-refuses (D2.4).
+// true, a subsequently-absent tag is a strip and Open hard-refuses.
 type freshnessAnchor struct {
 	FormatEpoch int64 `json:"formatEpoch"`
 	HasTag      bool  `json:"hasTag"`
 	// ConfigTag is the ConfigTag this device recorded at the FormatEpoch
-	// high-water (design D3.6, Condition 13): it lets Open detect a concurrent
+	// high-water: it lets Open detect a concurrent
 	// divergent config — a FormatEpoch TIE with a differing ConfigTag — and refuse
 	// with ErrConfigDiverged rather than silently accept whichever copy the sync
 	// client kept. Additive/omitempty so an anchor written before this field
@@ -41,11 +41,11 @@ type freshnessAnchor struct {
 }
 
 // anchorStorePath is the device-local freshness anchor for a vault (design
-// D5.2): <appdir data>/vault-anchors/<anchorID>.json. It mirrors the gc-seen
+// ): <appdir data>/vault-anchors/<anchorID>.json. It mirrors the gc-seen
 // store layout (gc.go seenStorePath) and, like it, lives under appdir.DataDir so
 // it is never part of the synced vault store (I2) and survives the config-reset
-// flows. The id segment is v.anchorID() (master-derived), NOT the plaintext
-// VaultID — see finding config-server/F3.
+// flows. The id segment is v.anchorID (master-derived), NOT the plaintext
+// VaultID — see.
 func anchorStorePath(anchorID string) (string, error) {
 	base, err := appdir.DataDir()
 	if err != nil {
@@ -59,18 +59,18 @@ func anchorStorePath(anchorID string) (string, error) {
 const anchorInfo = "seavault-anchor-id-v1"
 
 // anchorID is the STABLE identifier the device-local freshness anchor is keyed on
-// (design D5.2, finding config-server/F3). It is the hex HMAC-SHA256 of the fixed
+// . It is the hex HMAC-SHA256 of the fixed
 // anchorInfo label under the unwrapped MASTER KEY — NOT any plaintext vault.json
 // field.
 //
-// The has-tag strip refusal (design D2.4, Condition 6: "once a device has
+// The has-tag strip refusal ("once a device has
 // verified a tag for a vault, that vault must always present a valid tag to that
 // device") is only sound if "that vault" is identified by something a hostile
 // config server cannot relocate. VaultID is the wrong choice: it is
 // attacker-editable plaintext, MAC-covered ONLY on the still-tagged path, so a
 // server could strip the ConfigTag AND swap/blank the VaultID together, moving
 // the anchor lookup to a nonexistent id (existed=false), collapsing the check to
-// TOFU and laundering the strip (finding config-server/F3). The master key is the
+// TOFU and laundering the strip. The master key is the
 // right anchor: it is fixed by the wrap material the attacker must keep intact for
 // the unwrap to succeed at all, so an anchored device re-finds its own hasTag
 // anchor no matter what the plaintext VaultID says — and mutating the wrap to
@@ -87,7 +87,7 @@ func (v *Vault) anchorPath() (string, error) { return anchorStorePath(v.anchorID
 
 // loadAnchor reads a device's freshness anchor. A MISSING or UNPARSEABLE anchor
 // fails OPEN — it returns (zero, existed=false, nil) so Open re-TOFUs (design
-// D5.4): a corrupt or absent anchor must never brick a vault, and reinstalling
+// ): a corrupt or absent anchor must never brick a vault, and reinstalling
 // or resetting app data legitimately resets rollback protection to TOFU. Only a
 // genuine I/O error (e.g. a permission failure reaching an existing file) is
 // returned as an error, which the caller treats as "anchor unavailable" and
@@ -109,7 +109,7 @@ func loadAnchor(path string) (freshnessAnchor, bool, error) {
 }
 
 // saveAnchor writes a device's freshness anchor through the A1 atomic write path
-// (atomicWriteFile + fsyncDir), plaintext at 0600 (design D5.2, Condition 10) —
+// (atomicWriteFile + fsyncDir), plaintext at 0600 —
 // the same durability path the gc-seen store uses.
 func saveAnchor(path string, a freshnessAnchor) error {
 	data, err := json.MarshalIndent(a, "", "  ")
@@ -120,14 +120,14 @@ func saveAnchor(path string, a freshnessAnchor) error {
 }
 
 // recordAnchor advances this device's freshness anchor to reflect a config it
-// just trusted at Open or ratcheted (design D5.1/D5.4, D3.5): it raises the
+// just trusted at Open or ratcheted: it raises the
 // FormatEpoch high-water, records the ConfigTag seen AT that high-water (for the
-// divergence tie-break, D3.6), and latches HasTag true when a valid tag was seen.
+// divergence tie-break), and latches HasTag true when a valid tag was seen.
 // The high-water and HasTag are monotone — recordAnchor never lowers the epoch
 // nor clears HasTag — so a later untagged config cannot poison the anchor
-// (backlog B-1). It is BEST-EFFORT: a failure to resolve or write the anchor is
+// . It is BEST-EFFORT: a failure to resolve or write the anchor is
 // returned as a note and never propagated as an error, so Open (and the ratchet)
-// are never blocked by an unwritable appdir (D5.4). It writes only when the
+// are never blocked by an unwritable appdir. It writes only when the
 // stored anchor would actually change, so a read-only re-open of an unchanged
 // config touches nothing.
 func (v *Vault) recordAnchor(epoch int64, hasTag bool, tag string) string {
@@ -168,7 +168,7 @@ func (v *Vault) recordAnchor(epoch int64, hasTag bool, tag string) string {
 }
 
 // clearAnchor removes this device's freshness anchor for the vault so the next
-// Open re-TOFUs (design D5.3, Condition 8): the operator-authorised effect of
+// Open re-TOFUs: the operator-authorised effect of
 // --accept-rollback. A missing anchor is already cleared. A genuine remove error
 // (an unwritable appdir) is surfaced as the anchor-unavailable note, never as a
 // hard failure — Open must still proceed.

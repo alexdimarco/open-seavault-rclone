@@ -176,7 +176,7 @@ func ImportPath(ctx context.Context, v *vault.Vault, sourcePath string, opts Opt
 			if name == ".git" {
 				return filepath.SkipDir
 			}
-			// Exclude exactly THIS vault's own metadata directory (design D1.2). A
+			// Exclude exactly THIS vault's own metadata directory. A
 			// foreign metadata-named directory is still filtered by the reserved-path
 			// check below, keeping the bulk importer conservative.
 			if abs, aerr := filepath.Abs(p); aerr == nil && abs == metaRootAbs {

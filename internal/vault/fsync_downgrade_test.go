@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// F5 (integrity/F5-atomicwrite-reports-failure-after-successful-rename): a
+// F5: a
 // directory fsync that fails AFTER the publishing rename must NOT turn an
 // already-durable write into a reported failure. On filesystems where directory
 // fsync is unsupported (some FUSE/network mounts) fsyncDir returns

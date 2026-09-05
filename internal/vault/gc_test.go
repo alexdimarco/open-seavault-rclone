@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-// R6 — two-phase, fenced garbage collection (design §3, P0-5). Each row below is
-// one line of the R6 matrix; the GC mechanics are exercised against fabricated
+//  — two-phase, fenced garbage collection. Each row below is
+// one line of the matrix; the GC mechanics are exercised against fabricated
 // orphan chunks and hand-written intents so a single test controls the exact
 // (reference, recorded-time, first-seen, mtime) state a row needs, independent of
 // the chunker.
@@ -129,7 +129,7 @@ func openGCVault(t *testing.T) (*Vault, string) {
 	return v, filepath.Join(t.TempDir(), "gc-seen")
 }
 
-// R6: dry-run computes candidates and writes nothing anywhere.
+// dry-run computes candidates and writes nothing anywhere.
 func TestGCDryRunWritesNothing(t *testing.T) {
 	v, seenDir := openGCVault(t)
 	id := gcHexID(0x11)
@@ -159,7 +159,7 @@ func TestGCDryRunWritesNothing(t *testing.T) {
 	}
 }
 
-// R6: --confirm writes intents only on the first pass (removes nothing).
+// --confirm writes intents only on the first pass (removes nothing).
 func TestGCConfirmWritesIntentsOnly(t *testing.T) {
 	v, seenDir := openGCVault(t)
 	id := gcHexID(0x22)
@@ -183,7 +183,7 @@ func TestGCConfirmWritesIntentsOnly(t *testing.T) {
 	}
 }
 
-// R6: a second confirm run before the fence removes nothing.
+// a second confirm run before the fence removes nothing.
 func TestGCSecondRunBeforeFenceRemovesNothing(t *testing.T) {
 	v, seenDir := openGCVault(t)
 	id := gcHexID(0x33)
@@ -210,7 +210,7 @@ func TestGCSecondRunBeforeFenceRemovesNothing(t *testing.T) {
 	}
 }
 
-// R6: past both fences (recorded time AND first-seen) with an old chunk mtime,
+// past both fences (recorded time AND first-seen) with an old chunk mtime,
 // the chunk is removed and then its intent.
 func TestGCPastBothFencesRemovesChunkThenIntent(t *testing.T) {
 	v, seenDir := openGCVault(t)
@@ -238,9 +238,9 @@ func TestGCPastBothFencesRemovesChunkThenIntent(t *testing.T) {
 	}
 }
 
-// R6: an intent with an old recorded time but a young first-seen time does NOT
+// an intent with an old recorded time but a young first-seen time does NOT
 // collect — the first-seen record is what stops a skewed or just-synced intent
-// tripping the fence early (design D3.4).
+// tripping the fence early.
 func TestGCOldRecordedYoungFirstSeenDoesNotCollect(t *testing.T) {
 	v, seenDir := openGCVault(t)
 	id := gcHexID(0x55)
@@ -267,7 +267,7 @@ func TestGCOldRecordedYoungFirstSeenDoesNotCollect(t *testing.T) {
 	}
 }
 
-// R6: a reference appearing between runs cancels the intent (design D3.3(a)).
+// a reference appearing between runs cancels the intent (the design(a)).
 func TestGCReferenceBetweenRunsCancels(t *testing.T) {
 	v, seenDir := openGCVault(t)
 	id := gcHexID(0x66)
@@ -301,8 +301,8 @@ func TestGCReferenceBetweenRunsCancels(t *testing.T) {
 	}
 }
 
-// R6: a conflict-renamed duplicate intent folds to ONE logical intent with the
-// OLDEST recorded time, and is removed together with its twin (design D3.2). The
+// a conflict-renamed duplicate intent folds to ONE logical intent with the
+// OLDEST recorded time, and is removed together with its twin. The
 // canonical file carries a YOUNG time that would not clear the fence on its own,
 // so collection proves the fold used the older twin's time.
 func TestGCConflictRenamedDuplicateFoldsAndRemovesTwin(t *testing.T) {
@@ -330,8 +330,8 @@ func TestGCConflictRenamedDuplicateFoldsAndRemovesTwin(t *testing.T) {
 	}
 }
 
-// R6: an intent whose chunk file is gone is reaped by phase 1, including any
-// conflict-renamed twin (design D3.3(b)).
+// an intent whose chunk file is gone is reaped by phase 1, including any
+// conflict-renamed twin (the design(b)).
 func TestGCMissingChunkIntentReapedByPhase1(t *testing.T) {
 	v, seenDir := openGCVault(t)
 	id := gcHexID(0x88)
@@ -355,8 +355,8 @@ func TestGCMissingChunkIntentReapedByPhase1(t *testing.T) {
 	}
 }
 
-// R6: a crash between the chunk removal and the intent removal is cleaned up on
-// the next run — the orphaned intent is reaped (design D3.4).
+// a crash between the chunk removal and the intent removal is cleaned up on
+// the next run — the orphaned intent is reaped.
 func TestGCCrashBetweenChunkAndIntentCleanedNextRun(t *testing.T) {
 	v, seenDir := openGCVault(t)
 	id := gcHexID(0x99)
@@ -388,7 +388,7 @@ func TestGCCrashBetweenChunkAndIntentCleanedNextRun(t *testing.T) {
 	}
 }
 
-// R6: the manifest and chunk walkers ignore gc-intents.
+// the manifest and chunk walkers ignore gc-intents.
 func TestGCLoadersIgnoreIntentDir(t *testing.T) {
 	v, _ := openGCVault(t)
 	if _, err := v.PutReader(strings.NewReader("hello world content here"), "doc.txt", 24, 0o600, time.Now()); err != nil {
@@ -430,7 +430,7 @@ func TestGCLoadersIgnoreIntentDir(t *testing.T) {
 		t.Fatalf("indexFingerprint must ignore gc-intents (before=%d after=%d err=%v)", fpBefore, fpAfter, err)
 	}
 
-	// A real orphan is a candidate; the .chunk-named file under gc-intents is not.
+	// A real orphan is a candidate; the.chunk-named file under gc-intents is not.
 	orphan := gcHexID(0xdd)
 	writeOrphanChunk(t, v, orphan, "x", time.Time{})
 	report, err := v.GarbageCollect(GCOptions{Confirm: false})
@@ -441,11 +441,11 @@ func TestGCLoadersIgnoreIntentDir(t *testing.T) {
 		t.Fatalf("the chunk walker should find the real orphan; got %v", report.Candidates)
 	}
 	if gcContains(report.Candidates, gcHexID(0xcc)) {
-		t.Fatal("the chunk walker must ignore a .chunk-named file under gc-intents")
+		t.Fatal("the chunk walker must ignore a.chunk-named file under gc-intents")
 	}
 }
 
-// R6: phase 2 reloads the index at most once per pass, and skips the reload
+// phase 2 reloads the index at most once per pass, and skips the reload
 // entirely when phase 1 wrote only (loader-ignored) intents.
 func TestGCPhase2ReloadsAtMostOnce(t *testing.T) {
 	v, seenDir := openGCVault(t)
@@ -464,7 +464,7 @@ func TestGCPhase2ReloadsAtMostOnce(t *testing.T) {
 	}
 }
 
-// R6/D3.6: verify lists pending deletion intents (count and age) without writing.
+// verify lists pending deletion intents (count and age) without writing.
 func TestVerifyListsPendingIntents(t *testing.T) {
 	v, _ := openGCVault(t)
 	if _, err := v.PutReader(strings.NewReader("payload content xyz"), "doc.txt", 19, 0o600, time.Now()); err != nil {
@@ -487,19 +487,20 @@ func TestVerifyListsPendingIntents(t *testing.T) {
 	if report.PendingIntents[0].AgeSeconds < 3600 {
 		t.Fatalf("verify must report the intent age; got %ds", report.PendingIntents[0].AgeSeconds)
 	}
-	// Verify is a read: it must not touch the metadata fingerprint (invariant I2).
+	// Verify is a read: it must not touch the metadata fingerprint.
 	if fpAfter, err := v.indexFingerprint(); err != nil || fpAfter != fpBefore {
 		t.Fatalf("verify must not write metadata (before=%d after=%d err=%v)", fpBefore, fpAfter, err)
 	}
 }
 
-// R6 tombstone (server/F2-firstseen-store-leak-defeats-fence): collecting a
+//	tombstone: collecting a
+//
 // chunk in phase 2 must PRUNE this device's first-seen record for it. Chunk ids
 // are content-addressed (dedup id = HMAC(indexKey, plaintext)), so a surviving
 // entry would let a re-created chunk inherit an ancient first-seen time. This
 // drives the leak with NO hand-seeding of the final state: a legitimate
 // multi-run collection (the first-seen recorded naturally by phase 1) must leave
-// the store holding NO entry for the collected id (design D3.4, D3.2b).
+// the store holding NO entry for the collected id (b).
 func TestGCCollectionPrunesFirstSeenRecord(t *testing.T) {
 	v, seenDir := openGCVault(t)
 	id := gcHexID(0x5f)
@@ -540,12 +541,13 @@ func TestGCCollectionPrunesFirstSeenRecord(t *testing.T) {
 	}
 }
 
-// R6 tombstone (server/F2-firstseen-store-leak-defeats-fence), end-to-end: after
+//	tombstone, end-to-end: after
+//
 // a chunk is legitimately collected and later re-created with the SAME content-
 // addressed id, a hostile sync server that forges ONE ancient-recorded intent
-// must NOT collect the re-created chunk in a single confirm run. This is R6's
+// must NOT collect the re-created chunk in a single confirm run. This is 's
 // "old recorded time but young first-seen does NOT collect" invariant applied to
-// the re-created-chunk case (design line 344, D3.4) — with no hand-seeding.
+// the re-created-chunk case (design line 344) — with no hand-seeding.
 func TestGCRecreatedChunkResistsForgedAncientIntent(t *testing.T) {
 	v, seenDir := openGCVault(t)
 	id := gcHexID(0x6f)
@@ -590,9 +592,9 @@ func TestGCRecreatedChunkResistsForgedAncientIntent(t *testing.T) {
 	}
 }
 
-// Tombstone (conditions/F4): the temp-orphan sweep must honour the RUN's GC
-// fence (design D5.3: Compact "sweeps .tmp-* files older than the GC fence" and
-// "gc dry-run lists them"), not the hardcoded 72h GCFenceDefault. A .tmp-*
+// Tombstone: the temp-orphan sweep must honour the RUN's GC
+// fence (the design: Compact "sweeps.tmp-* files older than the GC fence" and
+// "gc dry-run lists them"), not the hardcoded 72h GCFenceDefault. A.tmp-*
 // orphan older than a custom --fence but younger than the 72h default must be
 // LISTED by `gc` dry-run and SWEPT by `gc --confirm`; one younger than that
 // fence must be kept. Before the fix sweepTmpOrphans compared against

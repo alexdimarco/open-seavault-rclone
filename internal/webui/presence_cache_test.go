@@ -39,10 +39,10 @@ func hideChunks(t *testing.T, s *Server) (restore func()) {
 //
 // handleWebDAV builds a fresh localdav.Server on every /dav request. The
 // (path, generation) presence-sweep cache that lets a scrubbing client "stat
-// once per 10 s window" (design D7.3/R15) is a field on that Server. If each
+// once per 10 s window" is a field on that Server. If each
 // throwaway Server mints its own presence cache, the sweep result binds
 // NOTHING across requests: every Range GET re-runs the full per-chunk stat
-// sweep and the R15 optimization is void for /dav.
+// sweep and the optimization is void for /dav.
 //
 // The test drives the presence result across two /dav requests. A first Range
 // GET on a torn file (chunks hidden) records a PENDING sweep result and returns
@@ -128,20 +128,20 @@ func TestWebDAVPresenceCacheResetOnVaultReopen(t *testing.T) {
 	}
 }
 
-// TestWebDAVRepeatedRangeGetsAmortizeStatSweep is the finding conditions/F1
+// TestWebDAVRepeatedRangeGetsAmortizeStatSweep is the
 // tombstone: the PRESENT-path half of the shared presence-sweep cache on the
 // GUI /dav leg (the pending-path half is TestWebDAVPresenceSweepBoundAcross-
 // Requests above).
 //
-// handleWebDAV builds a fresh localdav.Server per /dav request. Design D7.3
+// handleWebDAV builds a fresh localdav.Server per /dav request. the design
 // step 4 promises a scrubbing / media-preview client (the T5 workload) issuing
 // many Range GETs against a fully-synced file "pays the stat sweep once": the
 // first GET runs the whole-file per-chunk os.Stat sweep and records a PRESENT
 // verdict in the (path, generation) presence cache; a later GET within the 10 s
 // window skips that whole-file sweep and only re-verifies, for the bytes it is
 // about to serve, the chunks the shared chunk cache cannot already supply
-// (IC-2). If the presence cache were minted per request (finding F1) every
-// Range GET would re-run the full sweep and the D7.3 amortization would be void
+// (IC-2). If the presence cache were minted per request every
+// Range GET would re-run the full sweep and the amortization would be void
 // for /dav -- exactly the file-manager media-preview workload.
 //
 // The stat-counter seam lives in the localdav package and is out of reach from
@@ -183,7 +183,7 @@ func TestWebDAVRepeatedRangeGetsAmortizeStatSweep(t *testing.T) {
 
 	second := davRequest(t, s, http.MethodGet, "media/clip.bin", nil, map[string]string{"Range": "bytes=0-15"})
 	if second.Code != http.StatusPartialContent {
-		t.Fatalf("second Range GET within the presence window: code=%d want 206 (served without re-running the whole-file stat sweep). A 409 means the per-request localdav.Server minted its own presence cache, so every Range GET re-pays the full stat sweep and the D7.3 amortization is void for /dav (finding F1/IC-1)", second.Code)
+		t.Fatalf("second Range GET within the presence window: code=%d want 206 (served without re-running the whole-file stat sweep). A 409 means the per-request localdav.Server minted its own presence cache, so every Range GET re-pays the full stat sweep and the amortization is void for /dav", second.Code)
 	}
 	if got := second.Body.Len(); got != 16 {
 		t.Fatalf("second Range GET served %d bytes, want 16", got)

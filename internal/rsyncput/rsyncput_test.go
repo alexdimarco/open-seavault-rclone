@@ -95,12 +95,12 @@ func TestRejectMetadataSource(t *testing.T) {
 	}
 }
 
-// peer/F4: the D1.2 advisory warning for a foreign metadata-named source
+// the advisory warning for a foreign metadata-named source
 // directory must survive the rsyncput.PutPath wrapper, not be dropped between
 // vault.PutPathReport and the Result the CLI prints. The vault layer already
 // emits the warning (vault.TestForeignMetadataDirImportedWithWarning); this
 // tombstone pins the wrapper so `seavault put` never reports silent success for
-// an imported second-vault SeaVaultData / legacy .seavault backup tree. Uses the
+// an imported second-vault SeaVaultData / legacy.seavault backup tree. Uses the
 // native method so it does not depend on an rsync binary (CI images have none).
 func TestForeignMetadataWarningSurvivesPutWrapper(t *testing.T) {
 	v := newTestVault(t)
@@ -123,9 +123,9 @@ func TestForeignMetadataWarningSurvivesPutWrapper(t *testing.T) {
 		}
 	}
 	if !warned {
-		t.Fatalf("peer/F4: the D1.2 warning must reach the put Result, got Warnings=%#v", res.Warnings)
+		t.Fatalf("the warning must reach the put Result, got Warnings=%#v", res.Warnings)
 	}
-	// D1.2 also promises the file IS imported (never a silent skip): the warning
+	//  also promises the file IS imported (never a silent skip): the warning
 	// must accompany a real, reachable import, not a refusal.
 	paths, err := v.List()
 	if err != nil {
@@ -138,6 +138,6 @@ func TestForeignMetadataWarningSurvivesPutWrapper(t *testing.T) {
 		}
 	}
 	if !imported {
-		t.Fatalf("peer/F4: the foreign metadata dir's file must be imported as plain content; got %#v", paths)
+		t.Fatalf("the foreign metadata dir's file must be imported as plain content; got %#v", paths)
 	}
 }

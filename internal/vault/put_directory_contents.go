@@ -51,7 +51,7 @@ func (v *Vault) PutDirectoryContents(sourceDir string, virtualBase string) ([]Pu
 			if name == ".git" {
 				return filepath.SkipDir
 			}
-			// Exclude exactly this vault's own metadata directory (design D1.2); a
+			// Exclude exactly this vault's own metadata directory; a
 			// foreign directory that merely shares the name is imported as content.
 			if abs, aerr := filepath.Abs(p); aerr == nil && abs == metaRootAbs {
 				return filepath.SkipDir

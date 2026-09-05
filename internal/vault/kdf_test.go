@@ -186,7 +186,7 @@ func TestHKDFRFC5869Vectors(t *testing.T) {
 	}
 }
 
-// R12 (design D6.2): ValidateKDFStrength on NORMALISED configs. Below-floor rows
+// ValidateKDFStrength on NORMALISED configs. Below-floor rows
 // error naming the floor; defaults and algorithm-only requests pass. The check
 // must be run on a config already passed through NormalizeKDFConfig(cfg, true),
 // exactly as the creation entrypoints do.

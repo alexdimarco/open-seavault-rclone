@@ -143,7 +143,7 @@ func TestGCKeepsLiveChunkConflictCopy(t *testing.T) {
 	if len(rec.Chunks) == 0 {
 		t.Fatal("expected at least one chunk")
 	}
-	// Back-date the conflict copies (conditions/F2): the chunk-mtime fence must be
+	// Back-date the conflict copies: the chunk-mtime fence must be
 	// CLEARED at the final run so a GC that forgot the object is still live would
 	// actually delete it there, rather than being spared by a young mtime.
 	old := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC).Add(-500 * time.Hour)
@@ -159,7 +159,7 @@ func TestGCKeepsLiveChunkConflictCopy(t *testing.T) {
 	}
 	// A single --confirm run structurally removes NOTHING (phase 1 only writes
 	// intents), so asserting RemovedChunks==0 after one run is vacuous — it holds
-	// even if GC misclassified the live conflict copy as garbage (conditions/F2).
+	// even if GC misclassified the live conflict copy as garbage.
 	// Drive the whole two-phase fenced protocol PAST the fence with a controlled
 	// clock so the recorded time, this device's first-seen record, and the chunk
 	// mtime all age beyond it: only then could GC delete the copy. If GC failed to

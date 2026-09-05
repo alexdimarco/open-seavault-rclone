@@ -7,5 +7,5 @@ package vault
 // fsyncDir is a no-op on Windows: there is no portable primitive to flush a
 // directory handle the way FlushFileBuffers flushes a file, and NTFS metadata
 // durability is handled by the filesystem journal. It stays a package var so the
-// windows-tagged R10 test can wrap it (design D5.2).
+// windows-tagged test can wrap it.
 var fsyncDir = func(dir string) error { return nil }

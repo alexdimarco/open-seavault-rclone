@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// R3 (design §3, D3.1/D3.2, P1-7): the wrap-entry read leg. Open (and the
+// the wrap-entry read leg. Open (and the
 // underlying unlockWith) must try each WrapEntries entry filtered by type, and
 // fall back to the legacy top-level WrappedKeys/WrapNonce only when WrapEntries
 // is empty. A password opens via its entry, a recovery secret via its entry, a
@@ -35,7 +35,7 @@ func copyKeys(k Keys) Keys {
 }
 
 // fastKDFWithSalt is FastKDFConfigForTests with a fresh random salt, so each
-// hand-built wrap entry has its own salt like a real one (D3.1).
+// hand-built wrap entry has its own salt like a real one.
 func fastKDFWithSalt(t *testing.T) KDFConfig {
 	t.Helper()
 	salt, err := randomBytes(16)
@@ -59,7 +59,7 @@ func bareEntry(t *testing.T, secret string, keys Keys, id, typ string) WrapEntry
 	return WrapEntry{ID: id, Type: typ, KDF: kdf, Nonce: nonce, CT: ct}
 }
 
-// versionedEntry wraps keys under secret with a versioned AAD (D2.5): the AAD
+// versionedEntry wraps keys under secret with a versioned AAD: the AAD
 // scheme tag plus the bound config Version, computed through the SAME
 // wrapEntryAAD the reader uses (so the test cannot drift from the implementation).
 func versionedEntry(t *testing.T, secret string, keys Keys, id, typ, aadTag string, version int) WrapEntry {
@@ -195,7 +195,7 @@ func TestWrapEntryReadLeg(t *testing.T) {
 			t.Fatal(err)
 		}
 		keys := copyKeys(v0.keys)
-		// A password entry whose AAD binds Version 2 (D2.5).
+		// A password entry whose AAD binds Version 2.
 		ve := versionedEntry(t, r3Password, keys, "cccc0003", WrapTypePassword, "seavault-wrap-v3", 2)
 		editConfig(t, root, func(c *VaultConfig) {
 			c.Version = 2
@@ -214,7 +214,7 @@ func TestWrapEntryReadLeg(t *testing.T) {
 			t.Fatal("versioned-AAD unwrap returned the wrong master||index")
 		}
 		// A Version downgrade (or forward-forge) recomputes a different AAD and the
-		// unwrap fails independent of any config MAC (D2.5) — with the same generic
+		// unwrap fails independent of any config MAC — with the same generic
 		// error, no oracle.
 		cfg.Version = 3
 		if _, err := cfg.unlockWith(r3Password, WrapTypePassword); !errors.Is(err, errWrongSecret) {

@@ -25,7 +25,7 @@ import (
 //
 // Cache invariant: every code path that persists a manifest or tombstone for a
 // LIVE record also updates the cache (commitFileManifest / commitTombstone /
-// cacheReplace). loadManifestIndex is a pure read (design D4.1): it never writes,
+// cacheReplace). loadManifestIndex is a pure read: it never writes,
 // so there is nothing to reflect from a load. Compact, the one command that
 // materialises a load's deferred reconciliation, invalidates the cache instead
 // (v.cached = nil) so the next read rebuilds from the settled manifests.
@@ -116,7 +116,7 @@ func (v *Vault) nextGeneration(wallNano int64) int64 {
 	return g
 }
 
-// clockAgeCompactions is the aging horizon N (design D4.4): a foreign vector-clock
+// clockAgeCompactions is the aging horizon N: a foreign vector-clock
 // entry that has not advanced across this many consecutive local writes of a
 // record is dropped from that record's clock on the next write. A returning
 // device with the same id is a genuine new causal writer, so aging out a stale
@@ -125,7 +125,7 @@ func (v *Vault) nextGeneration(wallNano int64) int64 {
 const clockAgeCompactions = 8
 
 // nextRecordClock computes the vector clock (and its aging bookkeeping) for a
-// local write of virtualPath (design D4.1/D4.4). It carries forward (joins) the
+// local write of virtualPath. It carries forward (joins) the
 // clock of the record this write SUPERSEDES — the current live record for the
 // path, which already accumulated every device entry earlier writes merged —
 // then advances this device's own entry to max(seen, wallNano)+1, then ages the
@@ -146,7 +146,7 @@ const clockAgeCompactions = 8
 // this device's lineage. A peer that keeps syncing dominating edits therefore
 // stays fresh, while a decommissioned/reset device (whose edits never return)
 // ages out after clockAgeCompactions local re-writes. Dropping an entry cannot
-// lose data — a returning id is a genuine new causal writer (D4.4) — so an
+// lose data — a returning id is a genuine new causal writer — so an
 // over-eager drop costs at worst one spurious conflict copy, never a lost edit.
 //
 // It reads only from the supplied snapshot and returns fresh maps, so callers
@@ -192,7 +192,7 @@ func (v *Vault) nextRecordClock(idx *Index, virtualPath string, wallNano int64) 
 
 // advanceClock returns a fresh vector clock that strictly dominates prev by
 // joining prev and bumping this device's own entry to max(prev[dev], wallNano)+1
-// (design D4.1). It is the join-and-bump without the seen-conflict gather or the
+// . It is the join-and-bump without the seen-conflict gather or the
 // aging bookkeeping — used where the caller already holds the exact prior clock
 // to supersede (a layout-migration tombstone). A blank device id yields a nil
 // (clockless) result, so the write reconciles by the Generation fallback.
@@ -224,11 +224,11 @@ func cacheKey(virtualPath string) string {
 // cache. The disk write and the cache update BOTH happen under v.mu: the write
 // still precedes the cache update, so a failed write never leaves the cache
 // ahead of disk, but holding v.mu across the write also serializes it against
-// Compact (integrity/F3). Compact holds v.mu across plan+mutate and removes each
+// Compact. Compact holds v.mu across plan+mutate and removes each
 // conflict loser by its plan-time Source (compact.go); if the manifest write ran
 // outside v.mu, a commit landing after Compact planned the canonical file as a
 // loser but before Compact's os.Remove would be deleted without being
-// materialised — a silently lost concurrent edit (invariant I4). Under the lock
+// materialised — a silently lost concurrent edit. Under the lock
 // the two are mutually exclusive: the commit either lands wholly before Compact
 // plans (so Compact sees and reconciles it) or wholly after Compact's removes
 // (so the manifest survives).
@@ -249,10 +249,10 @@ func (v *Vault) commitFileManifest(virtualPath string, rec FileRecord) error {
 // commitTombstone persists a delete tombstone and removes the path from the
 // cache. Like commitFileManifest, the disk write and the cache update both run
 // under v.mu (the write first): this serializes the tombstone write against
-// Compact's out-of-band removes for the same reason (integrity/F3), so a delete
+// Compact's out-of-band removes for the same reason, so a delete
 // landing concurrently with a Compact is not dropped by a loser removal.
 // deletedGeneration is the generation of the live record being deleted (design
-// D4.2); it is threaded to saveTombstone so a later pure load can distinguish a
+// ); it is threaded to saveTombstone so a later pure load can distinguish a
 // stale copy the deleter superseded from a newer edit it never saw.
 func (v *Vault) commitTombstone(virtualPath string, generation, deletedGeneration int64, clock map[string]int64) error {
 	v.mu.Lock()
@@ -294,7 +294,7 @@ func (v *Vault) ReloadIndex() error {
 // vault.json. It uses stat only (no decryption), so it is far cheaper than a
 // full ReloadIndex and changes whenever a manifest is added, removed, or
 // rewritten — which is exactly when an external process (e.g. the Nextcloud
-// sync client) has changed .seavault underneath us. Walk order is deterministic
+// sync client) has changed.seavault underneath us. Walk order is deterministic
 // (lexical) so the same on-disk state always yields the same fingerprint.
 func (v *Vault) indexFingerprint() (uint64, error) {
 	h := fnv.New64a()
@@ -365,7 +365,7 @@ func (v *Vault) ReloadIfChanged() (bool, error) {
 		return false, err
 	}
 	// Re-fingerprint AFTER the reload to baseline on the state actually loaded.
-	// The load itself writes nothing now (design D4.1: reconciliation is pure and
+	// The load itself writes nothing now (the design: reconciliation is pure and
 	// its mutations are deferred to Compact), so this normally equals fp; it still
 	// absorbs any further external change that landed in the reload window, so a
 	// single delivery does not provoke a second reload on the next check.
