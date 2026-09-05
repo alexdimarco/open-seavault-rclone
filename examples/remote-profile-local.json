@@ -1,0 +1,24 @@
+{
+  "name": "local-backup",
+  "type": "local",
+  "vault": "~/SeaVault/research",
+  "remote": {
+    "remotePath": "~/Backups/SeaVault/research",
+    "backend": "local",
+    "transfers": 8,
+    "checkers": 16,
+    "fastList": false,
+    "checksum": "auto",
+    "dryRunDefault": true
+  },
+  "runtime": {
+    "channel": "stable"
+  },
+  "safety": {
+    "defaultOperation": "copy",
+    "allowDestructiveSync": false,
+    "requireDryRunBeforeSync": true,
+    "retainDeletedObjectsDays": 30,
+    "verifyAfterTransfer": true
+  }
+}

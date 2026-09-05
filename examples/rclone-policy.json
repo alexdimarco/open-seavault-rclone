@@ -1,0 +1,9 @@
+{
+  "allowUpdates": false,
+  "allowedChannels": ["stable"],
+  "pinnedVersion": "v1.74.0",
+  "allowedDownloadHosts": ["downloads.rclone.org", "rclone.org"],
+  "updateCheckIntervalHours": 168,
+  "requireManualApproval": true,
+  "signatureMode": "required"
+}

@@ -1,0 +1,30 @@
+# build output
+bin/
+dist/
+*.exe
+*.test
+coverage.out
+
+# local vaults and recovered files
+*.vault/
+.seavault/
+recovered/
+
+# editor files
+.DS_Store
+.idea/
+.vscode/
+
+# default go build output
+/seavault
+
+# patch / merge artifacts (these were how cruft got committed before)
+*.orig
+*.rej
+*.bak
+*.bak-*
+*~
+*.tmp
+
+# patch/binary delivery packages — ship via CI/releases, never commit
+/seavault-patch-package-download/

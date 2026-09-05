@@ -1,0 +1,31 @@
+{
+  "name": "research-b2-ca",
+  "type": "rclone",
+  "vault": "~/SeaVault/research",
+  "remote": {
+    "remoteName": "b2ca",
+    "remotePath": "b2ca:seavault/research/.seavault",
+    "backend": "b2",
+    "configMode": "managed",
+    "rcloneConfigPath": "~/.config/seavault/rclone/rclone.conf",
+    "transfers": 8,
+    "checkers": 16,
+    "fastList": true,
+    "checksum": "auto",
+    "bandwidthLimit": "",
+    "dryRunDefault": true
+  },
+  "runtime": {
+    "channel": "stable",
+    "pinnedVersion": "",
+    "autoCheckUpdates": true,
+    "autoInstallSecurityUpdates": false
+  },
+  "safety": {
+    "defaultOperation": "copy",
+    "allowDestructiveSync": false,
+    "requireDryRunBeforeSync": true,
+    "retainDeletedObjectsDays": 30,
+    "verifyAfterTransfer": true
+  }
+}
