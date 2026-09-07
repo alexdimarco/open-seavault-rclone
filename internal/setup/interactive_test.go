@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -42,12 +43,14 @@ type scriptPrompter struct {
 	// recording / capture
 	shown        []string
 	confirmCalls []confirmRecord
+	selectTitles []string
 	lastPhrase   string
 
 	si, ci, ti, ei int
 }
 
 func (s *scriptPrompter) Select(title string, options []Option, defaultIdx int) (int, error) {
+	s.selectTitles = append(s.selectTitles, title)
 	if s.si < len(s.selects) {
 		v := s.selects[s.si]
 		s.si++
@@ -107,6 +110,32 @@ func (s *scriptPrompter) Show(msg string) {
 func (s *scriptPrompter) shownContains(sub string) bool {
 	for _, m := range s.shown {
 		if strings.Contains(m, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// selectTitlePresented reports whether any Select was presented whose title
+// contains sub (case-insensitive). It lets a test assert that a particular
+// wizard step DID or did NOT ask (e.g. step 4's cloud question is skipped when
+// the location pre-answers a synced folder, C5).
+func (s *scriptPrompter) selectTitlePresented(sub string) bool {
+	sub = strings.ToLower(sub)
+	for _, t := range s.selectTitles {
+		if strings.Contains(strings.ToLower(t), sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// confirmPresented reports whether any Confirm was presented whose question
+// contains sub (case-insensitive).
+func (s *scriptPrompter) confirmPresented(sub string) bool {
+	sub = strings.ToLower(sub)
+	for _, c := range s.confirmCalls {
+		if strings.Contains(strings.ToLower(c.question), sub) {
 			return true
 		}
 	}
@@ -329,5 +358,224 @@ func TestRunInteractivePasswordMismatchBounded(t *testing.T) {
 	}
 	if vaultExists(vaultDir) {
 		t.Fatal("no vault dir may exist after a bounded password failure")
+	}
+}
+
+// TestRunInteractiveSyncedFolderNeverAssertsSynced proves design §3.3 step 4 /
+// §9 C2: the no-transport (synced-folder) outcome NEVER claims the vault is
+// "synced" as a statement of success, it DOES carry the "check that your sync
+// client shows it as uploaded" wording, and a confirmation prompt asking the
+// user to confirm the client is picking the folder up is presented. The flow
+// picks the detected provider (the default) so plan.Cloud is a SyncedFolder.
+func TestRunInteractiveSyncedFolderNeverAssertsSynced(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "Dropbox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	pr := &scriptPrompter{
+		t:       t,
+		secrets: []string{testPassword, testPassword},
+		// selects empty -> the single detected provider is chosen (SyncedFolder).
+		// Confirm order (NoKeychain, NoOpen): recovery-decision=defer,
+		// synced-upload-check=yes.
+		confirms: []bool{false, true},
+	}
+	res, err := RunInteractive(pr, testDeps(), RunOptions{
+		Home: home, GOOS: "linux", NoKeychain: true, NoOpen: true,
+	})
+	if err != nil {
+		t.Fatalf("the synced-folder flow must succeed; got %v", err)
+	}
+
+	// reached(): the outcome text must exist (never a vacuous pass on "").
+	if strings.TrimSpace(res.CloudNote) == "" {
+		t.Fatal("the synced-folder outcome must set a CloudNote")
+	}
+	// C2: the success WORDING must NOT assert the vault is "synced". Strip the
+	// vault path first: t.TempDir() embeds the test name (which itself contains
+	// "Synced") into the path, and that path is interpolated into the note — so
+	// the check must look at the prose, not the caller-controlled path.
+	if wording := stripVaultPath(res.CloudNote, res.VaultDir); strings.Contains(strings.ToLower(wording), "synced") {
+		t.Fatalf("the synced-folder CloudNote must never assert %q; got %q", "synced", res.CloudNote)
+	}
+	// C2: it must carry the honest "check that your sync client shows it as
+	// uploaded" wording instead.
+	for _, want := range []string{"check that your sync client", "uploaded"} {
+		if !strings.Contains(strings.ToLower(res.CloudNote), want) {
+			t.Fatalf("the synced-folder CloudNote must contain %q; got %q", want, res.CloudNote)
+		}
+	}
+	// C2: a confirmation prompt asking the user to confirm the client is picking
+	// the folder up was presented.
+	if !pr.confirmPresented("show the vault folder starting to upload") {
+		t.Fatalf("a synced-folder confirmation prompt must be presented; confirms=%+v", pr.confirmCalls)
+	}
+}
+
+// TestRunInteractiveCustomPathUnderProviderPreAnswersSynced proves design §3.3
+// step 4 / §9 C5: a CUSTOM vault path typed under a detected provider root
+// pre-answers step 4 as the no-transport SyncedFolder outcome — the cloud
+// question is never asked, and the CloudNote is the synced-folder wording.
+func TestRunInteractiveCustomPathUnderProviderPreAnswersSynced(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "Dropbox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A custom path that sits UNDER the detected Dropbox root.
+	custom := filepath.Join(home, "Dropbox", "nested", "MyOwnVault")
+
+	pr := &scriptPrompter{
+		t: t,
+		// One detected provider -> options are [provider, custom]; index 1 = custom.
+		selects: []int{1},
+		texts:   []string{custom},
+		secrets: []string{testPassword, testPassword},
+		// Confirm order (NoKeychain, NoOpen): recovery-decision=defer,
+		// synced-upload-check=yes.
+		confirms: []bool{false, true},
+	}
+	res, err := RunInteractive(pr, testDeps(), RunOptions{
+		Home: home, GOOS: "linux", NoKeychain: true, NoOpen: true,
+	})
+	if err != nil {
+		t.Fatalf("a custom path under a provider root must succeed; got %v", err)
+	}
+	if res.VaultDir != filepath.Clean(custom) {
+		t.Fatalf("the custom path must be used; VaultDir=%q want %q", res.VaultDir, custom)
+	}
+	// C5: step 4 was PRE-ANSWERED — the cloud question was never presented.
+	if pr.selectTitlePresented("how does the vault reach your cloud") {
+		t.Fatalf("step 4 must be pre-answered for a path under a provider root; select titles=%v", pr.selectTitles)
+	}
+	// C5: the outcome is the SyncedFolder (no-transport) note.
+	if strings.TrimSpace(res.CloudNote) == "" {
+		t.Fatal("the pre-answered synced outcome must set a CloudNote")
+	}
+	if !strings.Contains(strings.ToLower(res.CloudNote), "check that your sync client shows it as uploaded") {
+		t.Fatalf("a path under a provider root must reach the synced-folder outcome; CloudNote=%q", res.CloudNote)
+	}
+}
+
+// TestRunInteractiveManualSyncClientReachesSynced proves design §3.3 step 4 /
+// §9 C5: when no provider is detected and the user picks the manual "my own
+// sync client already watches this folder" option in step 4, the outcome is the
+// SAME no-transport SyncedFolder outcome (its CloudNote wording).
+func TestRunInteractiveManualSyncClientReachesSynced(t *testing.T) {
+	home := t.TempDir()
+	// No provider folders -> step 1 is a Text prompt and step 4 asks.
+	vaultDir := filepath.Join(home, "plain", "MyVault")
+
+	pr := &scriptPrompter{
+		t:       t,
+		texts:   []string{vaultDir},
+		selects: []int{0}, // step 4: "already watched by my own sync client"
+		secrets: []string{testPassword, testPassword},
+		// Confirm order (NoKeychain, NoOpen): recovery-decision=defer,
+		// synced-upload-check=yes.
+		confirms: []bool{false, true},
+	}
+	res, err := RunInteractive(pr, testDeps(), RunOptions{
+		Home: home, GOOS: "linux", NoKeychain: true, NoOpen: true,
+	})
+	if err != nil {
+		t.Fatalf("the manual sync-client flow must succeed; got %v", err)
+	}
+	// The cloud question WAS asked (no provider pre-answer) and the manual
+	// option was available.
+	if !pr.selectTitlePresented("how does the vault reach your cloud") {
+		t.Fatalf("step 4 must be asked when no provider is detected; select titles=%v", pr.selectTitles)
+	}
+	// C5: the manual choice reaches the SyncedFolder no-transport outcome.
+	if strings.TrimSpace(res.CloudNote) == "" {
+		t.Fatal("the manual synced outcome must set a CloudNote")
+	}
+	if !strings.Contains(strings.ToLower(res.CloudNote), "check that your sync client shows it as uploaded") {
+		t.Fatalf("the manual sync-client choice must reach the synced-folder outcome; CloudNote=%q", res.CloudNote)
+	}
+	if wording := stripVaultPath(res.CloudNote, res.VaultDir); strings.Contains(strings.ToLower(wording), "synced") {
+		t.Fatalf("even the manual synced outcome must never assert %q; got %q", "synced", res.CloudNote)
+	}
+}
+
+// stripVaultPath removes the interpolated vault path from a note so a WORDING
+// assertion is not fooled by the path — t.TempDir() embeds the test function
+// name into its path, and several of these test names deliberately contain
+// "Synced".
+func stripVaultPath(note, vaultDir string) string {
+	return strings.ReplaceAll(note, vaultDir, "<vault>")
+}
+
+// TestRunInteractiveRecoverySaveToFileBranch proves design §3.3 step 3 / §9 C6:
+// the "save the phrase to a file before the re-type gate" branch of the recovery
+// ceremony writes the phrase to disk OWNER-ONLY (0600), the file contains the
+// phrase, the re-type gate still runs afterwards (a recovery key is committed),
+// and the summary tells the user the saved file is SENSITIVE. A plaintext
+// recovery phrase on disk must be owner-only and labelled.
+func TestRunInteractiveRecoverySaveToFileBranch(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "Dropbox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	savePath := filepath.Join(t.TempDir(), "recovery-phrase.txt")
+
+	pr := &scriptPrompter{
+		t:       t,
+		secrets: []string{testPassword, testPassword},
+		// selects empty -> the detected provider is chosen (SyncedFolder).
+		// texts -> the recovery ceremony's "file to save the phrase to" prompt.
+		texts: []string{savePath},
+		// Confirm order (NoKeychain, NoOpen): recovery-decision=YES (run the
+		// ceremony), synced-upload-check=yes.
+		confirms: []bool{true, true},
+		// recoveryReType nil -> the re-type reflects the shown phrase (a match),
+		// so the gate runs to a committed key.
+	}
+	res, err := RunInteractive(pr, testDeps(), RunOptions{
+		Home: home, GOOS: "linux", NoKeychain: true, NoOpen: true,
+	})
+	if err != nil {
+		t.Fatalf("the recovery-save flow must succeed; got %v", err)
+	}
+
+	// The phrase the ceremony actually showed (captured by the prompter).
+	if strings.TrimSpace(pr.lastPhrase) == "" {
+		t.Fatal("the ceremony must have shown a recovery phrase")
+	}
+
+	// The file was written and holds the phrase.
+	data, rerr := os.ReadFile(savePath)
+	if rerr != nil {
+		t.Fatalf("the save-to-file branch must write the phrase file: %v", rerr)
+	}
+	if !strings.Contains(string(data), pr.lastPhrase) {
+		t.Fatalf("the saved file must contain the shown phrase; file=%q phrase=%q", string(data), pr.lastPhrase)
+	}
+
+	// C6: the plaintext phrase on disk must be owner-only (0600). Permission
+	// bits are not meaningful on Windows, so gate the exact-mode assertion.
+	if runtime.GOOS != "windows" {
+		info, serr := os.Stat(savePath)
+		if serr != nil {
+			t.Fatalf("stat saved phrase: %v", serr)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("the saved recovery phrase must be owner-only (0600); got %04o", perm)
+		}
+	}
+
+	// The re-type gate STILL ran after the save: a recovery key was committed.
+	if n := countRecoveryEntries(t, res.VaultDir); n != 1 {
+		t.Fatalf("the re-type gate must still run after saving; committed recovery entries=%d", n)
+	}
+	if !strings.Contains(res.RecoveryNote, "recovery key was created") {
+		t.Fatalf("RecoveryNote must confirm the committed key; got %q", res.RecoveryNote)
+	}
+
+	// C6: the summary must LABEL the saved file as sensitive, not merely mention
+	// it. A plaintext recovery phrase on disk that is not called out as sensitive
+	// is a foot-gun.
+	if !pr.shownContains("sensitive") {
+		t.Fatalf("the save confirmation must tell the user the file is sensitive; shown=%v", pr.shown)
 	}
 }

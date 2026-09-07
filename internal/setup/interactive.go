@@ -428,12 +428,15 @@ func runRecoveryCeremony(pr Prompter, vaultDir, password string) string {
 
 	// Let the user save the shown phrase before the re-type gate (C6). A blank
 	// answer skips saving; the re-type still verifies whatever they wrote down.
+	// The file is a plaintext recovery phrase, so it is written owner-only
+	// (0600) and the confirmation LABELS it as sensitive — anyone who can read
+	// it can unlock the vault (C6).
 	if path, terr := pr.Text("Optional: a file to save the phrase to now (leave blank to skip)", ""); terr == nil {
 		if path = strings.TrimSpace(path); path != "" {
 			if werr := os.WriteFile(path, []byte(phrase+"\n"), 0o600); werr != nil {
 				pr.Show(fmt.Sprintf("could not save the phrase to %s: %v", path, werr))
 			} else {
-				pr.Show(fmt.Sprintf("saved the recovery phrase to %s — keep that file safe.", path))
+				pr.Show(fmt.Sprintf("saved the recovery phrase to %s — this file is sensitive: it holds the plaintext recovery phrase, so anyone who can read it can unlock the vault. It is written owner-only; keep it that way, and delete it once the phrase is stored somewhere safe.", path))
 			}
 		}
 	}

@@ -4,9 +4,7 @@
 package webui
 
 import (
-	"bytes"
 	"encoding/json"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -123,11 +121,20 @@ func TestSetupStepperFirstRunAndAuth(t *testing.T) {
 }
 
 // TestSetupRunNeverLeaksPassword proves design §7 row T13 (I-S1, C13): the
-// password never appears in the SUCCESS body of /api/setup/run, the ERROR body
-// of /api/setup/run, or anything written to the standard logger during the run.
-// Both bodies are decoded and asserted to carry real content (a success result
-// with a vault path; an error message) so the check is not a vacuous pass, then
-// every sink is asserted free of the password substring.
+// password never appears in the SUCCESS body or the ERROR body of
+// /api/setup/run. Both bodies are decoded and asserted to carry real content (a
+// success result with a vault path; an error message) so the check is not a
+// vacuous pass, then both bodies are asserted free of the password substring.
+//
+// The RESPONSE BODIES are the proof here. An earlier revision also captured the
+// standard logger (log.Writer()) and asserted the password did not appear in
+// it, but that clause was INERT and has been removed: the webui package does not
+// import "log" and the whole /api/setup/run path (handleSetupRun -> setup.Execute
+// -> vault.Open, all of which report via writeJSON) writes nothing to the
+// standard logger, so the captured sink was always empty and the assertion could
+// only pass. It was verified empirically (the sink captured 0 bytes across a full
+// success+error run) before removal. If a std-logger write is ever added to this
+// path, restore a sink capture at that writer so the assertion can genuinely fail.
 func TestSetupRunNeverLeaksPassword(t *testing.T) {
 	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
 
@@ -135,17 +142,6 @@ func TestSetupRunNeverLeaksPassword(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Capture anything the run writes through the standard logger.
-	var logSink bytes.Buffer
-	prevOut := log.Writer()
-	prevFlags := log.Flags()
-	log.SetOutput(&logSink)
-	log.SetFlags(0)
-	defer func() {
-		log.SetOutput(prevOut)
-		log.SetFlags(prevFlags)
-	}()
 
 	const password = "s3cr3t-PASSWORD-never-log-7c1e9f2a"
 	vaultDir := filepath.Join(t.TempDir(), "myvault")
@@ -192,14 +188,14 @@ func TestSetupRunNeverLeaksPassword(t *testing.T) {
 		t.Fatalf("error body missing error message: %s", errorBody)
 	}
 
-	// Every sink must be free of the password. Assert on every row.
+	// Both response bodies must be free of the password. Assert on every row.
+	// These are the sinks the setup path actually writes to (I-S1, C13).
 	sinks := []struct {
 		name    string
 		content string
 	}{
 		{"success response body", successBody},
 		{"error response body", errorBody},
-		{"captured standard log", logSink.String()},
 	}
 	for _, sink := range sinks {
 		if strings.Contains(sink.content, password) {
