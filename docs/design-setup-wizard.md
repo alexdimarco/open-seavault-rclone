@@ -1,6 +1,6 @@
 # Design — Phase U1: the setup wizard (`seavault setup` + GUI first-run stepper)
 
-STATUS: pre-code design, awaiting the 10-lens review. Revision 1.
+STATUS: Revision 2 — the 14 conditions of the pre-code review (`docs/review-setup-wizard-predesign.md`, GO_WITH_CONDITIONS) are applied below and in §9. Ready to build.
 
 ## 1. Goal and scope
 
@@ -29,8 +29,11 @@ The vault is ciphertext in a plain folder that ANY sync client moves. So the eas
 most common setup needs **no transport, no rclone, no remote**: put the vault inside the
 folder Dropbox / OneDrive / iCloud Drive / Google Drive already syncs. The wizard detects
 those folders and offers "inside your <Provider> folder" as the first choice. Only if the
-user has no sync client, or wants an rclone-backed remote (S3, B2, SFTP, ...), does the
-cloud step ask anything.
+user has no sync client, or wants an rclone-backed remote, does the cloud step ask anything.
+In U1 the rclone branch is scoped to **an rclone remote that already exists** (configured in
+rclone, or imported with the existing `seavault remote config import`); driving `rclone config`
+per backend is a later phase (C1). The wizard never reports a remote as working unless
+`RemoteTest` passed.
 
 ## 3. Architecture
 
@@ -49,14 +52,28 @@ type Plan struct {
     Expert       *ExpertOptions // nil = defaults; KDF + params + chunk params, validated against the SAME floor cmdInit enforces
 }
 func (p Plan) Validate() error     // typed errors: ErrVaultDirNotEmpty, ErrKDFBelowFloor, ErrRemoteNameInvalid, ...
-type Result struct { VaultID string; VaultDir string; ProfileName string; KeychainSaved bool; KeychainNote string; RecoveryNote string; CloudNote string }
+type Result struct { VaultID string; VaultDir string; ProfileName string; KeychainSaved bool; KeychainNote string; RecoveryNote string; CloudNote string; PreflightNote string; FailedStep string }
 func Execute(p Plan, password string, deps Deps) (Result, error)
 ```
 
 `Deps` is the seam for the privilege boundaries and side effects (the ONLY things mocked
 in tests): `CreateVault` (wraps the existing vault.Create path used by cmdInit),
-`KeychainSet`, `ProfileAdd`, `RcloneEnsure` (existing runtime install+verify),
-`RemoteAdd`/`RemoteTest` (existing remote commands). Execute is sequential and reports
+`KeychainSet`, `ProfileAdd`, `RcloneEnsure` (NEW: install-if-missing + verify, see §3.5),
+`RemoteAdd`/`RemoteTest` (existing remote commands).
+
+Execute rules (C3, C4, C8, C9): the vault is built in a sibling temp directory and
+`os.Rename`d into place only on success, so an interrupted create leaves either a complete
+vault or nothing; "an existing vault" means `vault.json` is present, and a non-empty dir
+WITHOUT one is reported as leftovers from an interrupted setup with a remove-and-retry
+offer. Before `ProfileAdd`, an existing same-name profile pointing at a DIFFERENT path is a
+typed `ErrProfileNameInUse` (the CLI offers a suffixed name; nothing is repointed silently).
+When VaultDir sits under a detected provider folder, Execute populates `PreflightNote` from
+the existing `vault.SyncClientPreflightNote`, whose segment matcher is broadened to
+prefix-match the org-suffixed CloudStorage forms (OneDrive-*, GoogleDrive-*, Box-*).
+`FailedStep` names the step that failed so `CloudNote` carries the step-appropriate retry
+command: an `RcloneEnsure` failure prints `seavault rclone install` (with the
+`--offline-archive`/`--from-binary` options); only a `RemoteTest` failure on an installed
+runtime prints `seavault remote test NAME`. Execute is sequential and reports
 what exists after any failure (§6). Recovery generation is NOT inside Execute: it stays
 in the caller's interactive step so the read-back ceremony is untouched (§5, I-S3).
 
@@ -86,21 +103,33 @@ Steps, Enter accepts the default at each:
    inline when chosen (e.g. OneDrive Files On-Demand, iCloud "optimize storage").
 2. **Choose a password.** Secret + confirm; on mismatch re-ask (bounded, 3 tries).
    Then "Remember it in your OS keychain? [Y/n]" (I-S4).
-3. **Create a recovery key.** Runs the EXISTING generate → show-once → hide → re-type →
-   commit ceremony (the same code path as `recovery generate`). On mismatch nothing is
-   written and the wizard offers retry or skip-with-warning. Non-interactive runs SKIP this
-   step and print the remedy (I-S3).
+3. **Create a recovery key.** Offered as "Set it up now (recommended)" vs "Remind me after
+   my first file", with the consequence stated ("without it, a forgotten password means the
+   vault cannot be opened"); default = now. It runs the EXISTING generate → show-once →
+   hide → re-type → commit ceremony (the same code path as `recovery generate`), and the
+   user may download/print the shown phrase BEFORE the re-type gate so the re-type verifies a
+   stored copy rather than working memory; paste stays blocked in the GUI. On mismatch
+   nothing is written and the wizard offers retry or defer. Deferring sets a one-line
+   reminder in the summary and on the GUI banner. Non-interactive runs SKIP this step and
+   print the remedy (I-S3).
 4. **How does it reach your cloud?** Pre-answered "already synced" when step 1 chose a
-   provider folder. Otherwise: (a) rclone remote → `RcloneEnsure` (install+verify if
-   missing), then name + remote path, then `RemoteTest` with the result shown;
-   (b) local / external drive only.
+   provider folder OR when the chosen custom path sits under any detected provider root
+   (C5); a manual choice "my own sync client already watches this folder" reaches the same
+   outcome for providers the detector does not know. The synced-folder outcome is worded
+   "placed inside <folder> — check that your sync client shows it as uploaded" and the
+   wizard asks the user to confirm they see it syncing; it never asserts "synced" (C2).
+   Otherwise: (a) **existing rclone remote** → `RcloneEnsure` (install-if-missing + verify,
+   with an explicit consent prompt before any network download and the offline-archive /
+   from-binary options offered inline if refused, C11), then pick or import the remote,
+   then `RemoteTest` with the result shown; (b) local / external drive only.
 5. **Open the app now? [Y/n]** → `seavault gui <profile>`.
 
 Flags: `--expert` (adds KDF choice + params and chunk params in step 1, validated against
 the existing floor), `--preset synced-folder|rclone|local` + `--vault PATH` (+ `--remote
-NAME --remote-path P` for rclone) for a fully non-interactive run that reads the
-password from `SEAVAULT_PASSWORD` only (I-S1), `--no-keychain`, `--profile NAME`,
-`--no-open`. Output on success is a short plain-language summary (what was created, where,
+NAME` for an existing rclone remote) for a fully non-interactive run that reads the
+password from `SEAVAULT_PASSWORD` only (I-S1), `--allow-download` (required for a
+non-interactive rclone preset to fetch the runtime; without it the run fails with the
+offline options named, C11), `--no-keychain`, `--profile NAME`, `--no-open`. Output on success is a short plain-language summary (what was created, where,
 whether the keychain holds the password, whether a recovery key exists, next step).
 
 ### 3.4 GUI first-run stepper
@@ -110,7 +139,8 @@ whether the keychain holds the password, whether a recovery key exists, next ste
   and renders the full page. After a successful setup the full page renders (with the new
   vault open).
 - **Endpoints (all behind the existing authenticated session, I-S7):**
-  `GET /api/setup/detect` → DetectSyncFolders for the server's real home.
+  `GET /api/setup/detect` → DetectSyncFolders for the server's real home (the SAME detector
+  `userpath.SuggestedVaultPaths` delegates to, C10).
   `POST /api/setup/validate` → Plan.Validate (no side effects).
   `POST /api/setup/run` → Execute (init + keychain + profile [+ rclone/remote]); opens the
   vault into the session on success. Password arrives in the JSON body over the loopback
@@ -119,17 +149,32 @@ whether the keychain holds the password, whether a recovery key exists, next ste
   retype, paste blocked) — no new recovery surface.
 - The stepper is plain HTML/JS in the existing embedded page (no new assets).
 
+### 3.5 `RcloneEnsure` (new work, C11)
+
+No install-if-missing + verify function exists today (`rclonebin` has Install / Status /
+VerifyRuntime). `RcloneEnsure(consent func() bool) error` returns immediately when a verified
+runtime is present; otherwise it calls `consent` BEFORE any network access (the online path
+fetches version.txt, the archive and SHA256SUMS from downloads.rclone.org) and, if refused,
+returns a typed `ErrDownloadRefused` whose message names the `--offline-archive` and
+`--from-binary` alternatives. It has its own tests (present → no fetch; refused → no fetch,
+typed error; a fake-fetch success → verified). The non-interactive `--preset rclone` path
+supplies consent only when `--allow-download` was passed.
+
 ## 4. Sync-folder detection (§3.1, T1)
 
-Existence checks only, never writes. Per-OS well-known paths (all relative to home unless
+Existence checks only, never writes. `DetectSyncFolders` is the single OS-path detector:
+`userpath.SuggestedVaultPaths` delegates to it and a test asserts the two never diverge (C10). Per-OS well-known paths (all relative to home unless
 stated): Dropbox `Dropbox`; OneDrive `OneDrive`, Windows `%OneDrive%`, macOS
 `Library/CloudStorage/OneDrive-*`; iCloud Drive macOS `Library/Mobile Documents/
 com~apple~CloudDocs`, Windows `iCloudDrive`; Google Drive macOS
 `Library/CloudStorage/GoogleDrive-*/My Drive`, Windows `Google Drive` and `G:\My Drive`;
-Nextcloud `Nextcloud`; Box `Box` and macOS `Library/CloudStorage/Box-Box`; pCloud
-`pCloudDrive`; MEGA `MEGA`; Syncthing `Sync`. Globs are expanded; a hit requires an
+Nextcloud `Nextcloud`; Syncthing `Sync`. (Box, pCloud and MEGA are dropped from U1's
+Provider enum until they have a verified caveat, C7.) Globs are expanded; a hit requires an
 existing directory. Detection is advisory: it changes the default, never silently
-selects. Each provider carries the caveat text lifted from `docs/cloud-provider-notes.md`.
+selects. The caveat catalog is the ONE source of truth and lives in code, `internal/setup/providers.go`
+(a table of Provider → caveat), because `docs/cloud-provider-notes.md` contains no caveat
+text today (C7); that doc gains a section that points at the catalog. T1/T7 assert the
+catalog strings.
 
 ## 5. Security invariants (proven by the tests in §7 unless labeled)
 
@@ -141,7 +186,7 @@ selects. Each provider carries the caveat text lifted from `docs/cloud-provider-
 - **I-S3** The recovery read-back ceremony is unchanged (same code path; GUI hide-then-
   retype with paste blocked). A non-interactive run never generates a recovery key (a
   phrase nobody saw must never be committed); it prints the remedy instead.
-- **I-S4** Keychain storage is an explicit, visible choice (default yes) and follows the
+- **I-S4** (proven by T2's Confirm-call assertion, C14) Keychain storage is an explicit, visible choice (default yes) and follows the
   existing keychain rules (refresh on rotation; unavailable keychain is a warning naming
   the remedy, not a failure).
 - **I-S5** Footprint: the wizard writes only the chosen vault dir, the app-data profile
@@ -150,13 +195,15 @@ selects. Each provider carries the caveat text lifted from `docs/cloud-provider-
   exactly what exists.
 - **I-S6** Provider placement surfaces the provider caveat; the wizard never enables a
   transport, runtime, or remote the user did not pick.
-- **I-S7** `/api/setup/*` sit behind the same session auth as every `/api` route; no new
-  unauthenticated surface, no new listener.
+- **I-S7** `/api/setup/*` sit behind the same session auth as every `/api` route; a request
+  with NO session gets the existing `serveNoSession` **403** (server.go), and a session that
+  is present but not logged in gets the existing 401 path; no new unauthenticated surface,
+  no new listener (C12).
 - **Conditional (labeled):** sync-client conflict handling and provider eviction behaviour
   are the EXISTING product's properties (documented in cloud-provider-notes.md); the wizard
   only points the user at them.
 
-## 6. Failure and recovery
+## 6. Failure and recovery (C8, C9 applied in §3.1)
 
 Each step is idempotent from the user's view: a rerun on an existing non-empty vault dir
 refuses with `ErrVaultDirNotEmpty` and offers "open it instead". Password mismatch re-asks
@@ -175,14 +222,40 @@ was completed is reported; nothing is rolled back silently.
 | T3 | I-S1/I-S3 non-interactive | `--preset synced-folder` with `SEAVAULT_PASSWORD`; asserts vault created, NO recovery entry, remedy line printed, no phrase on stdout; without the env var → typed refusal, password never read from argv |
 | T4 | I-S2 expert floor | `--expert` KDF below floor → same error as `init`; at floor → accepted |
 | T5 | §6 failures | keychain seam fails → vault exists + remedy warning; recovery mismatch → no entry, wizard completes; rclone ensure fails → vault+profile exist + retry command shown |
-| T6 | §3.4 stepper | fresh server (no profiles) serves the stepper; after `/api/setup/run` the full page; every `/api/setup/*` returns 401 without a session |
+| T6 | §3.4 stepper | fresh server (no profiles) serves the stepper; after `/api/setup/run` the full page; every `/api/setup/*` returns **403** with no session (serveNoSession) and 401 when a session exists but is not logged in |
 | T7 | I-S6 caveat | detected OneDrive → the specific caveat string appears in Show() output / detect JSON |
 | T8 | real binary | `scripts/smoke-test.sh` gains a `setup --preset local` run followed by `put`/`get` round-trip against the built binary |
 | T9 | I-S5 footprint | after a default run, walk the temp home: only the vault dir, the profile file, and the fake keychain entry exist |
+| T10 | C10 one detector | `userpath.SuggestedVaultPaths` and `DetectSyncFolders` agree on every row of the T1 table |
+| T11 | C8 atomic create | kill/fail injected between mkdir and config write → the target dir does not exist (temp sibling cleaned); a non-empty dir without vault.json is reported as leftovers with the remove-and-retry offer |
+| T12 | C3 profile collision | same-name profile at a different path → `ErrProfileNameInUse`, the original is untouched |
+| T13 | C13 I-S1 response/log | decode the success AND error bodies of `/api/setup/run` and a captured log sink; fail if the password substring appears |
+| T14 | C11 RcloneEnsure | present → no fetch; refused consent → typed `ErrDownloadRefused` naming the offline options, no fetch; `--preset rclone` without `--allow-download` → refused |
+| T15 | C9 branched remedy | inject an ensure failure → CloudNote names `seavault rclone install`; inject a RemoteTest failure → CloudNote names `seavault remote test NAME` |
 
 ## 8. Honesty of claims
 
-Proven by tests: I-S1, I-S2, I-S3, I-S5, I-S7 (T3/T4/T6/T9). Conditional: provider
+This section is the single authoritative proven-list (C14). Proven by tests: I-S1 argv+stdout+summary clauses (T3) and the response/log clauses (T13); I-S2 (T4); I-S3 (T3); I-S4 (T2); I-S5 (T9, T11); I-S6 (T7); I-S7 (T6). Conditional: provider
 caveats are only as good as cloud-provider-notes.md; detection is heuristic (a user with
 a non-default sync folder gets the manual path, not a failure). Unproven / U2: whether the
 stepper alone is enough for a first-time user — that is what the U1 friction review walks.
+
+## 9. Revision 2 — how each review condition was applied
+
+| Cond | Applied as |
+|---|---|
+| C1 | §2/§3.3: U1 rclone branch = existing/imported remote only; never reports a remote working unless RemoteTest passed |
+| C2 | §3.3 step 4: synced-folder wording + user confirmation; never asserts "synced" |
+| C3 | §3.1 Execute rules: `ErrProfileNameInUse`, no silent repoint; T12 |
+| C4 | §3.1: `Result.PreflightNote` from `SyncClientPreflightNote`; matcher prefix-matches org-suffixed CloudStorage forms |
+| C5 | §3.3 step 4: custom path under a detected root, or manual "my sync client watches it", reaches the no-transport outcome |
+| C6 | §3.3 step 3: recovery deferrable (default now, consequence stated), print/download before the re-type gate, paste still blocked |
+| C7 | §4: caveat catalog lives in `internal/setup/providers.go`; Box/pCloud/MEGA dropped; docs point at the catalog; T1/T7 assert catalog strings |
+| C8 | §3.1: temp-sibling build + rename; "existing vault" = vault.json present; leftovers offer; T11 |
+| C9 | §3.1: `FailedStep` → step-appropriate retry command; T15 |
+| C10 | §3.4/§4: one detector, `SuggestedVaultPaths` delegates; T10 |
+| C11 | §3.5: `RcloneEnsure` is named new work with consent-before-download, `--allow-download` for presets, own tests; T14 |
+| C12 | I-S7 and T6 corrected to 403 (no session) / 401 (not logged in) |
+| C13 | T13: response bodies + captured log asserted free of the password |
+| C14 | §8 is the single proven-list; I-S4 proven by T2's Confirm assertion; I-S6 by T7 |
+
