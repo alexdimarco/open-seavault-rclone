@@ -20,6 +20,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ import (
 	"github.com/alexdimarco/open-seavault-rclone/internal/remotes"
 	"github.com/alexdimarco/open-seavault-rclone/internal/rsyncbin"
 	"github.com/alexdimarco/open-seavault-rclone/internal/rsyncput"
+	"github.com/alexdimarco/open-seavault-rclone/internal/setup"
 	"github.com/alexdimarco/open-seavault-rclone/internal/sshkeys"
 	"github.com/alexdimarco/open-seavault-rclone/internal/transport"
 	localtransport "github.com/alexdimarco/open-seavault-rclone/internal/transport/local"
@@ -53,6 +55,8 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
+	case "setup":
+		err = cmdSetup(os.Args[2:])
 	case "init":
 		err = cmdInit(os.Args[2:])
 	case "put":
@@ -133,6 +137,212 @@ type exitCodeError struct {
 }
 
 func (e *exitCodeError) Error() string { return e.msg }
+
+// setupSynopsis is the one-line description shown by `setup --help` and asserted
+// by TestSubcommandSynopses.
+func setupSynopsis() string {
+	return "setup is the guided first-run wizard: it picks a vault location (inside a detected cloud-sync folder when one is found), takes a password, offers a recovery key and OS-keychain storage, wires up cloud sync, then opens the app — every default chosen for you, every advanced knob one flag away. Use --preset synced-folder|rclone|local for a non-interactive run that reads the password from SEAVAULT_PASSWORD."
+}
+
+// cmdSetup is the first-run wizard (design §3.3). With no --preset it runs the
+// interactive flow over a stdlib prompter; with --preset it runs a fully
+// non-interactive setup that reads the password from SEAVAULT_PASSWORD only
+// (I-S1) and skips recovery (I-S3).
+func cmdSetup(args []string) error {
+	fs := flag.NewFlagSet("setup", flag.ExitOnError)
+	expert := fs.Bool("expert", false, "show the KDF and chunk-size knobs during setup (validated against the same floor as init)")
+	preset := fs.String("preset", "", "non-interactive run: synced-folder | rclone | local (reads the password from SEAVAULT_PASSWORD)")
+	vaultFlag := fs.String("vault", "", "vault directory (required with --preset)")
+	remoteFlag := fs.String("remote", "", "existing rclone remote name (with --preset rclone)")
+	allowDownload := fs.Bool("allow-download", false, "permit a --preset rclone run to download the rclone runtime if it is missing")
+	noKeychain := fs.Bool("no-keychain", false, "do not store the password in the OS keychain")
+	profileName := fs.String("profile", "", "profile name for the new vault (default: the vault folder's name)")
+	noOpen := fs.Bool("no-open", false, "do not open the app at the end")
+	fs.Usage = func() {
+		writeSubcommandUsage(fs,
+			"usage: seavault setup [--expert] [--no-keychain] [--profile NAME] [--no-open]\n"+
+				"       seavault setup --preset synced-folder|rclone|local --vault PATH [--remote NAME] [--allow-download] [--no-keychain] [--profile NAME] [--no-open]",
+			setupSynopsis())
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("setup takes no positional arguments (the vault path is --vault with --preset, or a wizard prompt otherwise)")
+	}
+
+	if strings.TrimSpace(*preset) != "" {
+		return runSetupPreset(setupPresetArgs{
+			preset:        strings.ToLower(strings.TrimSpace(*preset)),
+			vaultArg:      *vaultFlag,
+			remoteName:    *remoteFlag,
+			allowDownload: *allowDownload,
+			noKeychain:    *noKeychain,
+			profileName:   *profileName,
+		})
+	}
+
+	deps := setup.DefaultDeps()
+	pr := newStdinPrompter()
+	_, err := setup.RunInteractive(pr, deps, setup.RunOptions{
+		Expert:      *expert,
+		NoKeychain:  *noKeychain,
+		ProfileName: *profileName,
+		NoOpen:      *noOpen,
+		OpenApp:     func(profile string) error { return cmdGUI([]string{profile}) },
+	})
+	return err
+}
+
+type setupPresetArgs struct {
+	preset        string
+	vaultArg      string
+	remoteName    string
+	allowDownload bool
+	noKeychain    bool
+	profileName   string
+}
+
+// runSetupPreset performs a non-interactive setup (design §3.3). It reads the
+// password from SEAVAULT_PASSWORD ONLY — never argv, never a prompt (I-S1) — and
+// never generates a recovery key (a phrase nobody saw must not be committed,
+// I-S3); it prints the remedy instead. The preset-specific validation, including
+// the rclone download gate (C11), runs before the password is read so a refusal
+// is deterministic.
+func runSetupPreset(a setupPresetArgs) error {
+	if strings.TrimSpace(a.vaultArg) == "" {
+		return fmt.Errorf("--preset requires --vault PATH")
+	}
+	vaultPath, err := userpath.Abs(a.vaultArg)
+	if err != nil {
+		return err
+	}
+
+	deps := setup.DefaultDeps()
+	var cloud setup.CloudChoice
+	switch a.preset {
+	case "synced-folder":
+		cloud = setup.SyncedFolder{}
+	case "local":
+		cloud = setup.LocalOnly{}
+	case "rclone":
+		if strings.TrimSpace(a.remoteName) == "" {
+			return fmt.Errorf("--preset rclone requires --remote NAME (an existing rclone remote configured in rclone or imported with `seavault remote config import`)")
+		}
+		if !a.allowDownload {
+			return fmt.Errorf("`setup --preset rclone` will not download the rclone runtime without --allow-download; pass --allow-download, or install it offline first with `seavault rclone install --offline-archive <zip>` or `seavault rclone install --from-binary <path>`, then re-run")
+		}
+		deps.RcloneEnsure = func() error { return setup.RcloneEnsure(func() bool { return true }) }
+		name := strings.TrimSpace(a.remoteName)
+		cloud = setup.RcloneRemote{Name: name, RemotePath: name + ":"}
+	default:
+		return fmt.Errorf("unknown --preset %q; want synced-folder, rclone, or local", a.preset)
+	}
+
+	// Password from SEAVAULT_PASSWORD ONLY (I-S1): never read from argv, never
+	// prompted in a non-interactive run.
+	password := os.Getenv("SEAVAULT_PASSWORD")
+	if strings.TrimSpace(password) == "" {
+		return fmt.Errorf("a non-interactive `setup --preset` run reads the password from SEAVAULT_PASSWORD only; set that environment variable and re-run (the password is never taken from the command line)")
+	}
+
+	plan := setup.Plan{
+		VaultDir:     vaultPath,
+		ProfileName:  a.profileName,
+		SaveKeychain: !a.noKeychain,
+		Cloud:        cloud,
+	}
+	res, err := setup.Execute(plan, password, deps)
+	if err != nil {
+		if res.CloudNote != "" {
+			fmt.Fprintln(os.Stderr, res.CloudNote)
+		}
+		return err
+	}
+
+	// I-S3: recovery is skipped in a non-interactive run; print the remedy.
+	res.RecoveryNote = fmt.Sprintf("skipped in a non-interactive run (a recovery key nobody has seen is never created); create one with `seavault recovery generate %s`.", res.ProfileName)
+	for _, line := range setup.SummaryLines(res, false) {
+		fmt.Println(line)
+	}
+	return nil
+}
+
+// stdinPrompter is the CLI implementation of setup.Prompter (design §3.2):
+// numbered options, a line read for text/choices with Enter accepting the
+// default, and passphrase.Read for secrets so a password is never echoed.
+type stdinPrompter struct {
+	in *bufio.Reader
+}
+
+func newStdinPrompter() *stdinPrompter { return &stdinPrompter{in: bufio.NewReader(os.Stdin)} }
+
+func (p *stdinPrompter) readLine() string {
+	line, err := p.in.ReadString('\n')
+	if err != nil && line == "" {
+		return "" // EOF with nothing typed: accept the default
+	}
+	return strings.TrimRight(line, "\r\n")
+}
+
+func (p *stdinPrompter) Select(title string, options []setup.Option, defaultIdx int) (int, error) {
+	fmt.Println(title)
+	for i, o := range options {
+		marker := " "
+		if i == defaultIdx {
+			marker = "*"
+		}
+		fmt.Printf("  %s %d) %s\n", marker, i+1, o.Label)
+		if o.Note != "" {
+			fmt.Printf("      note: %s\n", o.Note)
+		}
+	}
+	fmt.Printf("Choose [1-%d] (default %d): ", len(options), defaultIdx+1)
+	line := strings.TrimSpace(p.readLine())
+	if line == "" {
+		return defaultIdx, nil
+	}
+	n, err := strconv.Atoi(line)
+	if err != nil || n < 1 || n > len(options) {
+		return defaultIdx, nil
+	}
+	return n - 1, nil
+}
+
+func (p *stdinPrompter) Confirm(question string, defaultYes bool) (bool, error) {
+	hint := "Y/n"
+	if !defaultYes {
+		hint = "y/N"
+	}
+	fmt.Printf("%s [%s]: ", question, hint)
+	switch strings.ToLower(strings.TrimSpace(p.readLine())) {
+	case "y", "yes":
+		return true, nil
+	case "n", "no":
+		return false, nil
+	default:
+		return defaultYes, nil
+	}
+}
+
+func (p *stdinPrompter) Text(label, def string) (string, error) {
+	if def != "" {
+		fmt.Printf("%s [%s]: ", label, def)
+	} else {
+		fmt.Printf("%s: ", label)
+	}
+	line := strings.TrimSpace(p.readLine())
+	if line == "" {
+		return def, nil
+	}
+	return line, nil
+}
+
+func (p *stdinPrompter) Secret(label string) (string, error) {
+	return passphrase.Read(label + ": ")
+}
+
+func (p *stdinPrompter) Show(msg string) { fmt.Println(msg) }
 
 func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
@@ -2372,6 +2582,8 @@ func usageText() string {
 Cloud-folder client-side encrypted storage.
 
 Usage:
+  seavault setup [--expert] [--no-keychain] [--profile NAME] [--no-open]
+  seavault setup --preset synced-folder|rclone|local --vault PATH [--remote NAME] [--allow-download] [flags]
   seavault init [flags] VAULT_DIR
   seavault put [--method auto|native|managed-rsync|system-rsync|rsync] [flags] VAULT_DIR_OR_PROFILE SOURCE_PATH [VIRTUAL_PATH]
   seavault get [flags] VAULT_DIR_OR_PROFILE VIRTUAL_PATH DEST_PATH

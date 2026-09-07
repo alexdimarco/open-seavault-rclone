@@ -1274,3 +1274,148 @@ func forgeConfigMinSizeForTest(t *testing.T, cfgPath string, minSize int) {
 		t.Fatal(err)
 	}
 }
+
+// canonBase32Len counts the base32 (A-Z, 2-7) characters in s, ignoring dashes
+// and spaces. A minted recovery phrase canonicalises to exactly 52; prose does
+// not, so this recognises a leaked phrase anywhere in captured output.
+func canonBase32Len(s string) int {
+	n := 0
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= '2' && r <= '7':
+			n++
+		}
+	}
+	return n
+}
+
+// outputHasRecoveryPhrase reports whether any single line of out canonicalises to
+// the 52-character recovery-phrase length using only base32 characters, dashes
+// and spaces — i.e. a recovery phrase was printed.
+func outputHasRecoveryPhrase(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		only := true
+		for _, r := range line {
+			switch {
+			case r >= 'A' && r <= 'Z', r >= '2' && r <= '7', r == '-', r == ' ':
+			default:
+				only = false
+			}
+		}
+		if only && canonBase32Len(line) == 52 {
+			return true
+		}
+	}
+	return false
+}
+
+func countRecoveryEntriesCLI(t *testing.T, vaultDir string) int {
+	t.Helper()
+	cfg, err := vault.ReadConfig(vaultDir)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	n := 0
+	for _, e := range cfg.WrapEntries {
+		if e.Type == vault.WrapTypeRecovery {
+			n++
+		}
+	}
+	return n
+}
+
+// T3 (I-S1/I-S3): a non-interactive `setup --preset synced-folder` reads the
+// password from SEAVAULT_PASSWORD only, creates the vault, writes NO recovery
+// entry, prints the remedy, and never prints a recovery phrase. With no
+// SEAVAULT_PASSWORD it refuses (typed), reading nothing from argv.
+func TestCmdSetupNonInteractiveSyncedFolder(t *testing.T) {
+	const pw = "correct horse battery staple"
+
+	t.Run("with SEAVAULT_PASSWORD", func(t *testing.T) {
+		t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
+		t.Setenv("SEAVAULT_PASSWORD", pw)
+		vaultDir := filepath.Join(t.TempDir(), "MyVault")
+
+		out, err := captureStdout(t, func() error {
+			return cmdSetup([]string{"--preset", "synced-folder", "--vault", vaultDir, "--no-keychain"})
+		})
+		if err != nil {
+			t.Fatalf("preset synced-folder must succeed: %v", err)
+		}
+		if _, oerr := vault.Open(vaultDir, pw); oerr != nil {
+			t.Fatalf("the vault must be created and open with the SEAVAULT_PASSWORD value: %v", oerr)
+		}
+		if n := countRecoveryEntriesCLI(t, vaultDir); n != 0 {
+			t.Fatalf("a non-interactive run must write NO recovery entry (I-S3); got %d", n)
+		}
+		if !strings.Contains(out, "recovery generate") {
+			t.Fatalf("the summary must print the recovery remedy; got:\n%s", out)
+		}
+		if outputHasRecoveryPhrase(out) {
+			t.Fatalf("a non-interactive run must never print a recovery phrase; got:\n%s", out)
+		}
+		if strings.Contains(out, pw) {
+			t.Fatalf("the summary must not carry the password; got:\n%s", out)
+		}
+	})
+
+	t.Run("without SEAVAULT_PASSWORD refuses", func(t *testing.T) {
+		t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
+		os.Unsetenv("SEAVAULT_PASSWORD")
+		vaultDir := filepath.Join(t.TempDir(), "MyVault")
+
+		err := cmdSetup([]string{"--preset", "synced-folder", "--vault", vaultDir, "--no-keychain"})
+		if err == nil {
+			t.Fatal("a non-interactive run with no SEAVAULT_PASSWORD must refuse")
+		}
+		if !strings.Contains(err.Error(), "SEAVAULT_PASSWORD") {
+			t.Fatalf("the refusal must name SEAVAULT_PASSWORD; got %v", err)
+		}
+		if _, statErr := os.Stat(vaultDir); !os.IsNotExist(statErr) {
+			t.Fatalf("no vault may be created when the password is absent; stat err=%v", statErr)
+		}
+	})
+}
+
+// T14 CLI half (C11): `setup --preset rclone` without --allow-download is refused
+// with the offline install options named, before any password is read (so a
+// password is never taken from argv) and with nothing created.
+func TestCmdSetupRclonePresetRequiresAllowDownload(t *testing.T) {
+	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
+	os.Unsetenv("SEAVAULT_PASSWORD") // the refusal must not depend on a password
+	vaultDir := filepath.Join(t.TempDir(), "MyVault")
+
+	err := cmdSetup([]string{"--preset", "rclone", "--vault", vaultDir, "--remote", "myremote"})
+	if err == nil {
+		t.Fatal("`setup --preset rclone` without --allow-download must be refused")
+	}
+	for _, want := range []string{"--allow-download", "--offline-archive", "--from-binary"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal must name the offline option %q; got %v", want, err)
+		}
+	}
+	if _, statErr := os.Stat(vaultDir); !os.IsNotExist(statErr) {
+		t.Fatalf("nothing may be created when the rclone preset is refused; stat err=%v", statErr)
+	}
+}
+
+// TestSetupSynopsis asserts the `setup --help` synopsis exists, names the wizard
+// and the non-interactive SEAVAULT_PASSWORD path, and renders through the shared
+// usage writer (so the --help wiring is exercised).
+func TestSetupSynopsis(t *testing.T) {
+	s := setupSynopsis()
+	if s == "" || !strings.Contains(s, "wizard") || !strings.Contains(s, "SEAVAULT_PASSWORD") {
+		t.Fatalf("setupSynopsis must describe the wizard and the SEAVAULT_PASSWORD preset path, got %q", s)
+	}
+	var buf bytes.Buffer
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	fs.SetOutput(&buf)
+	fs.Bool("expert", false, "x")
+	writeSubcommandUsage(fs, "usage: seavault setup [--expert]", s)
+	out := buf.String()
+	for _, want := range []string{"usage: seavault setup", s, "-expert"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("rendered setup usage missing %q:\n%s", want, out)
+		}
+	}
+}

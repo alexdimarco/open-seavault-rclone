@@ -36,4 +36,18 @@ set -e
 "$BIN" compact "$VAULT" >/dev/null
 "$BIN" gc --confirm "$VAULT" >/dev/null
 
+# T8 (design section 7): the non-interactive first-run wizard, end to end against
+# the real binary. `setup --preset local` reads the password from SEAVAULT_PASSWORD,
+# creates a vault and registers a profile; a put/get round-trip through that
+# profile proves the wizard's output is a working vault. A private app-home keeps
+# the profile out of the developer's real store.
+export SEAVAULT_APP_HOME="$WORK/app-home"
+SETUP_VAULT="$WORK/setup-vault/MyVault"
+SETUP_OUT="$WORK/setup-out.txt"
+"$BIN" setup --preset local --vault "$SETUP_VAULT" --no-keychain --profile smokeprofile >/dev/null
+"$BIN" put smokeprofile "$SRC" docs/source.txt >/dev/null
+"$BIN" list smokeprofile | grep -q '^content/docs/source.txt$'
+"$BIN" get smokeprofile docs/source.txt "$SETUP_OUT" >/dev/null
+cmp "$SRC" "$SETUP_OUT"
+
 echo 'smoke test passed'
