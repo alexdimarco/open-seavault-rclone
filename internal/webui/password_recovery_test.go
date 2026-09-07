@@ -43,7 +43,7 @@ func openedVaultServer(t *testing.T, password string) (*Server, string) {
 func TestGUIPasswordChangeCSRFAndRotation(t *testing.T) {
 	s, vaultPath := openedVaultServer(t, "oldpw")
 
-	// CSRF: a POST WITHOUT the X-SeaVault-Token header is forbidden, and must not
+	// CSRF: a POST WITHOUT the X-open-seavault-rclone-Token header is forbidden, and must not
 	// rotate anything.
 	req := httptest.NewRequest(http.MethodPost, "/api/password-change", strings.NewReader(`{"newPassword":"newpw"}`))
 	req.Host = "127.0.0.1"

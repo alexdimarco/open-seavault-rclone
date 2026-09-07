@@ -70,7 +70,7 @@ func postJSON(t *testing.T, s *Server, path string, payload any) *httptest.Respo
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
 	req.Host = "127.0.0.1"
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-SeaVault-Token", s.token)
+	req.Header.Set("X-open-seavault-rclone-Token", s.token)
 	req.AddCookie(newTestSession(s, true))
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
@@ -126,7 +126,7 @@ func TestIndexUsesResponsiveCrossBrowserLayout(t *testing.T) {
 		`Import local path`,
 		`Browser-selected folders cannot fill this field`,
 		`value="`,
-		`The browser could not reach the local SeaVault GUI service`,
+		`The browser could not reach the local open-seavault-rclone GUI service`,
 	}
 	for _, want := range checks {
 		if !strings.Contains(html, want) {
@@ -324,7 +324,7 @@ func TestBrowserFolderUploadPreservesRelativePaths(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/upload", &body)
 	req.Host = "127.0.0.1"
 	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("X-SeaVault-Token", s.token)
+	req.Header.Set("X-open-seavault-rclone-Token", s.token)
 	req.AddCookie(newTestSession(s, true))
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
@@ -443,7 +443,7 @@ func TestExportAPIPlansAndExportsFolder(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/upload", &body)
 	req.Host = "127.0.0.1"
 	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("X-SeaVault-Token", s.token)
+	req.Header.Set("X-open-seavault-rclone-Token", s.token)
 	req.AddCookie(newTestSession(s, true))
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
@@ -728,7 +728,7 @@ func TestGuiAuthShowsLoginLandingAndProtectsAPI(t *testing.T) {
 	if noSessRR.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for / without a session, got %d", noSessRR.Code)
 	}
-	if strings.Contains(noSessRR.Body.String(), "SeaVault login") {
+	if strings.Contains(noSessRR.Body.String(), "open-seavault-rclone login") {
 		t.Fatalf("no-session page must not be the login form: %q", noSessRR.Body.String())
 	}
 
@@ -742,7 +742,7 @@ func TestGuiAuthShowsLoginLandingAndProtectsAPI(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("login landing failed: %d", rr.Code)
 	}
-	if !strings.Contains(rr.Body.String(), "SeaVault login") {
+	if !strings.Contains(rr.Body.String(), "open-seavault-rclone login") {
 		t.Fatalf("expected login landing page, got %q", rr.Body.String())
 	}
 
@@ -805,7 +805,7 @@ func TestHelpPageAccessibleWithAuthEnabled(t *testing.T) {
 		t.Fatalf("help page failed: %d", rr.Code)
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "SeaVault help") || !strings.Contains(body, "Settings page") || !strings.Contains(body, "Reset password/config") {
+	if !strings.Contains(body, "open-seavault-rclone help") || !strings.Contains(body, "Settings page") || !strings.Contains(body, "Reset password/config") {
 		t.Fatalf("help page missing expected content: %q", body)
 	}
 }
@@ -1125,7 +1125,7 @@ func TestLogSaveRejectedByForeignHost(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/log/save", bytes.NewReader(payload))
 	req.Host = "evil.example"
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-SeaVault-Token", s.token)
+	req.Header.Set("X-open-seavault-rclone-Token", s.token)
 	req.AddCookie(newTestSession(s, true))
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
@@ -1377,7 +1377,7 @@ func TestNoSessionPageStatesPlainRecovery(t *testing.T) {
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("/ without session = %d, want 403", rr.Code)
 	}
-	if !strings.Contains(rr.Body.String(), "Close this tab and start SeaVault again; it will open the app for you.") {
+	if !strings.Contains(rr.Body.String(), "Close this tab and start open-seavault-rclone again; it will open the app for you.") {
 		t.Fatalf("no-session page missing the plain-language recovery line: %s", rr.Body.String())
 	}
 }
@@ -1408,8 +1408,8 @@ func TestResetConfigSuccessLinksBackToApp(t *testing.T) {
 	if strings.Contains(initRR.Body.String(), s.launchSecret) {
 		t.Fatalf("the initial reset page leaked the launch secret")
 	}
-	if strings.Contains(initRR.Body.String(), "Back to SeaVault") {
-		t.Fatalf("the initial reset page should offer Back to login, not Back to SeaVault")
+	if strings.Contains(initRR.Body.String(), "Back to open-seavault-rclone") {
+		t.Fatalf("the initial reset page should offer Back to login, not Back to open-seavault-rclone")
 	}
 
 	nonce := getResetNonce(t, s, cookie)
@@ -1427,8 +1427,8 @@ func TestResetConfigSuccessLinksBackToApp(t *testing.T) {
 	if !strings.Contains(body, "/?launch="+s.launchSecret) {
 		t.Fatalf("reset success page did not link through the launch URL: %s", body)
 	}
-	if !strings.Contains(body, "Back to SeaVault") {
-		t.Fatalf("reset success page missing the Back to SeaVault label")
+	if !strings.Contains(body, "Back to open-seavault-rclone") {
+		t.Fatalf("reset success page missing the Back to open-seavault-rclone label")
 	}
 }
 
@@ -1684,7 +1684,7 @@ func TestApiGCRequiresSessionAndPostMethod(t *testing.T) {
 	noSess := httptest.NewRequest(http.MethodPost, "/api/gc", strings.NewReader(`{"confirm":false}`))
 	noSess.Host = "127.0.0.1"
 	noSess.Header.Set("Content-Type", "application/json")
-	noSess.Header.Set("X-SeaVault-Token", s.token)
+	noSess.Header.Set("X-open-seavault-rclone-Token", s.token)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, noSess)
 	if rr.Code != http.StatusForbidden {

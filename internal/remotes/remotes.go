@@ -320,7 +320,7 @@ func EnsureManagedConfig() (string, error) {
 		return "", err
 	}
 	if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
-		if err := os.WriteFile(p, []byte("# SeaVault managed rclone configuration\n"), 0o600); err != nil {
+		if err := os.WriteFile(p, []byte("# open-seavault-rclone managed rclone configuration\n"), 0o600); err != nil {
 			return "", err
 		}
 	} else if err != nil {

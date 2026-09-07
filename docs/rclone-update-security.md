@@ -1,6 +1,6 @@
 # Rclone update security
 
-SeaVault's managed-rclone update process is designed to be auditable and reversible.
+open-seavault-rclone's managed-rclone update process is designed to be auditable and reversible.
 
 ## Online update path
 

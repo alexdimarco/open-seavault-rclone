@@ -51,7 +51,7 @@ var ErrUnsealAfterReKey = errors.New("cannot unseal: a directory-ID re-key has r
 // SupportedFormat constant. prepareOpen calls it with the live SupportedFormat.
 func formatTooNew(minReader, supported int) error {
 	if minReader > supported {
-		return fmt.Errorf("this vault needs SeaVault format %d or newer (this build supports %d): %w", minReader, supported, ErrFormatTooNew)
+		return fmt.Errorf("this vault needs open-seavault-rclone format %d or newer (this build supports %d): %w", minReader, supported, ErrFormatTooNew)
 	}
 	return nil
 }

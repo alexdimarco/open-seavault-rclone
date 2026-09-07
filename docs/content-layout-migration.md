@@ -1,6 +1,6 @@
 # Content workspace and legacy vault migration
 
-SeaVault v0.14 adds a protected virtual workspace named `content/`.
+open-seavault-rclone v0.14 adds a protected virtual workspace named `content/`.
 
 ## Behaviour
 
@@ -22,9 +22,9 @@ Stored virtual path: content/reports/q1.pdf
 
 ## Automatic migration
 
-When a vault is opened, SeaVault checks the decrypted manifest/index for paths outside `content/`.
+When a vault is opened, open-seavault-rclone checks the decrypted manifest/index for paths outside `content/`.
 
-If legacy root-level paths are present, SeaVault:
+If legacy root-level paths are present, open-seavault-rclone:
 
 1. Creates the protected `content/.seavault-dir` marker if needed.
 2. Saves new encrypted manifests under `content/<old-path>`.

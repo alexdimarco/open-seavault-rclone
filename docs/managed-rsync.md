@@ -1,6 +1,6 @@
 # Managed rsync runtime
 
-SeaVault can manage its own rsync runtime for local path ingest, similar to the managed rclone runtime. This is optional. The application must still work without rsync by using native Go ingest.
+open-seavault-rclone can manage its own rsync runtime for local path ingest, similar to the managed rclone runtime. This is optional. The application must still work without rsync by using native Go ingest.
 
 ## Intended use
 
@@ -9,7 +9,7 @@ Managed rsync is a local ingest helper only:
 ```text
 local source file or folder
   -> optional managed/system rsync staging
-  -> native SeaVault chunking and encryption
+  -> native open-seavault-rclone chunking and encryption
   -> encrypted .seavault repository
   -> rclone/local transport
 ```
@@ -43,23 +43,23 @@ seavault rsync path
 | OS | Directory |
 |---|---|
 | Linux | `~/.local/share/seavault/rsync` |
-| macOS | `~/Library/Application Support/SeaVault/rsync` |
-| Windows | `%LOCALAPPDATA%\SeaVault\rsync` |
+| macOS | `~/Library/Application Support/open-seavault-rclone/rsync` |
+| Windows | `%LOCALAPPDATA%\open-seavault-rclone\rsync` |
 
 ## Source provenance
 
-Official rsync distribution is source-first. A practical cross-platform managed runtime should be built by the SeaVault project or by an enterprise administrator:
+Official rsync distribution is source-first. A practical cross-platform managed runtime should be built by the open-seavault-rclone project or by an enterprise administrator:
 
 ```text
 official rsync source tarball
   -> verify upstream signature outside or inside release pipeline
   -> build per OS/architecture
-  -> publish SeaVault runtime ZIP + SHA256SUMS + signature
-  -> SeaVault app installs verified runtime
+  -> publish open-seavault-rclone runtime ZIP + SHA256SUMS + signature
+  -> open-seavault-rclone app installs verified runtime
 ```
 
 The app records the upstream source URL, source version, runtime hash, install time, and previous version for rollback.
 
 ## Windows note
 
-Windows rsync runtimes often require support DLLs. Offline runtime ZIP archives should include `rsync.exe` plus any required DLLs in the same archive. SeaVault extracts and retains the full archive contents.
+Windows rsync runtimes often require support DLLs. Offline runtime ZIP archives should include `rsync.exe` plus any required DLLs in the same archive. open-seavault-rclone extracts and retains the full archive contents.

@@ -85,7 +85,7 @@ func hasSyncClientSegment(root string) bool {
 // otherwise. It is used by `init` and the GUI create path. The note states that
 // new vaults use the visible SeaVaultData directory, how to sync a legacy hidden
 // .seavault vault, and the one-way I1 boundary: a vault this version creates is
-// not located by SeaVault 0.15.0 or older on another device. The quoted 0.15
+// not located by open-seavault-rclone 0.15.0 or older on another device. The quoted 0.15
 // failure is its real errno wording (verified against the ab64d05 fixture), not
 // a paraphrase, so an operator recognises the message they will actually see.
 func SyncClientPreflightNote(root string) string {
@@ -94,7 +94,7 @@ func SyncClientPreflightNote(root string) string {
 	}
 	return "note: new vaults keep their encrypted data in the visible SeaVaultData directory. " +
 		"If you open an older vault stored as .seavault, enable hidden-file sync in your client. " +
-		"A vault created by this version is not found by SeaVault 0.15.0 or older on another device " +
+		"A vault created by this version is not found by open-seavault-rclone 0.15.0 or older on another device " +
 		"(it reports a \"no such file\" error on .seavault/vault.json); upgrade every device before creating new vaults in a shared folder."
 }
 

@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// TerminateExistingSeaVaultProcesses stops already-running SeaVault GUI/process
+// TerminateExistingSeaVaultProcesses stops already-running open-seavault-rclone GUI/process
 // instances before a new GUI instance starts. It never terminates the current
 // process.
 func TerminateExistingSeaVaultProcesses() error {
@@ -36,7 +36,7 @@ func TerminateExistingSeaVaultProcesses() error {
 		}
 	}
 	if len(failures) > 0 {
-		return fmt.Errorf("failed to terminate existing SeaVault process(es): %s", strings.Join(failures, "; "))
+		return fmt.Errorf("failed to terminate existing open-seavault-rclone process(es): %s", strings.Join(failures, "; "))
 	}
 	return nil
 }

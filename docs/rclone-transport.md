@@ -1,6 +1,6 @@
 # Rclone transport
 
-SeaVault Fast treats rclone as a transport runtime, not as the encryption layer. The app encrypts data first, stores encrypted chunks and manifests under the vault metadata directory (`.seavault` for a legacy v0.15 vault, or `SeaVaultData` for a v0.16 vault — the transport resolves whichever name the vault uses), and then asks rclone to copy that encrypted repository to a remote target.
+open-seavault-rclone treats rclone as a transport runtime, not as the encryption layer. The app encrypts data first, stores encrypted chunks and manifests under the vault metadata directory (`.seavault` for a legacy v0.15 vault, or `SeaVaultData` for a v0.16 vault — the transport resolves whichever name the vault uses), and then asks rclone to copy that encrypted repository to a remote target.
 
 ## Transport boundary
 
@@ -49,10 +49,10 @@ seavault rclone install --from-binary /usr/local/bin/rclone --signature skip
 seavault rclone status --check-update
 
 # Add a direct rclone remote profile.
-seavault remote add --backend b2 research-b2 ~/SeaVault/research b2ca:seavault/research
+seavault remote add --backend b2 research-b2 ~/open-seavault-rclone/research b2ca:seavault/research
 
 # Add a local folder target using the same remote abstraction.
-seavault remote add --type local --backend local research-local ~/SeaVault/research ~/Backup/SeaVault/research
+seavault remote add --type local --backend local research-local ~/open-seavault-rclone/research ~/Backup/open-seavault-rclone/research
 
 # Run safe transport operations.
 seavault remote test research-b2

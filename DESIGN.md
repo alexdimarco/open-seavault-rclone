@@ -1,15 +1,15 @@
-# SeaVault Fast design
+# open-seavault-rclone design
 
 ## Baseline
 
-SeaVault stores encrypted data inside a normal local directory. A separate sync client moves that encrypted directory to and from the cloud. SeaVault does not need a cloud-provider API, and the provider never receives plaintext from this application.
+open-seavault-rclone stores encrypted data inside a normal local directory. A separate sync client moves that encrypted directory to and from the cloud. open-seavault-rclone does not need a cloud-provider API, and the provider never receives plaintext from this application.
 
 ## Encrypted local location
 
 The configured vault directory is the encrypted storage location. A local profile is only a pointer to that directory.
 
 ```text
-profile name -> local path watched by sync client -> encrypted SeaVault data -> cloud server
+profile name -> local path watched by sync client -> encrypted open-seavault-rclone data -> cloud server
 ```
 
 The source files and restored files are separate from the vault. Users can keep plaintext in their normal workspace, then put selected files into the encrypted vault, or use the browser GUI/WebDAV endpoint to interact with vault contents.

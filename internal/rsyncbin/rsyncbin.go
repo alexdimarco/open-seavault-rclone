@@ -191,7 +191,7 @@ func (i *Installer) Status(ctx context.Context, checkLatest bool) Status {
 	st := Status{RuntimeDir: root, ManifestPath: mp, Candidates: CandidateBinaryPaths(), DefaultHint: DefaultBinaryHint()}
 	m, err := LoadManifest()
 	if errors.Is(err, os.ErrNotExist) {
-		st.RuntimeMessage = "managed rsync is not installed; SeaVault will use native import unless system rsync is selected"
+		st.RuntimeMessage = "managed rsync is not installed; open-seavault-rclone will use native import unless system rsync is selected"
 	} else if err != nil {
 		st.RuntimeMessage = err.Error()
 	} else {

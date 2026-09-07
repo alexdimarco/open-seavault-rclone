@@ -292,7 +292,7 @@ func ensureConfigFile(path string) error {
 		return err
 	}
 	if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
-		return os.WriteFile(p, []byte("# SeaVault managed rclone configuration\n"), 0o600)
+		return os.WriteFile(p, []byte("# open-seavault-rclone managed rclone configuration\n"), 0o600)
 	} else {
 		return err
 	}

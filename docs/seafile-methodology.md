@@ -1,8 +1,8 @@
 # Seafile-inspired methodology used here
 
-SeaVault borrows Seafile's performance-oriented idea of chunked storage: split files into reusable blocks, store blocks as independent objects, and update references when a file changes. This improves speed and sync efficiency because modified large files do not require rewriting one monolithic encrypted blob.
+open-seavault-rclone borrows Seafile's performance-oriented idea of chunked storage: split files into reusable blocks, store blocks as independent objects, and update references when a file changes. This improves speed and sync efficiency because modified large files do not require rewriting one monolithic encrypted blob.
 
-SeaVault intentionally does not copy Seafile's older encrypted-library CBC construction. Instead, it uses modern AEAD encryption for chunks and manifests.
+open-seavault-rclone intentionally does not copy Seafile's older encrypted-library CBC construction. Instead, it uses modern AEAD encryption for chunks and manifests.
 
 ## Adopted ideas
 
@@ -14,7 +14,7 @@ SeaVault intentionally does not copy Seafile's older encrypted-library CBC const
 
 ## Changed security design
 
-| Area | Seafile-style baseline | SeaVault choice |
+| Area | Seafile-style baseline | open-seavault-rclone choice |
 | --- | --- | --- |
 | File data encryption | Library key model with AES-CBC in documented versions | AES-256-GCM per chunk |
 | Integrity | Historically limited for encrypted libraries | AEAD tags plus keyed object-ID verification |

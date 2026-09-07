@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-const appName = "SeaVault"
+const appName = "open-seavault-rclone"
 
 func ConfigDir() (string, error) {
 	if root := strings.TrimSpace(os.Getenv("SEAVAULT_APP_HOME")); root != "" {

@@ -1,14 +1,14 @@
 # SFTP SSH key management
 
-SeaVault Fast includes basic SSH key management for rclone SFTP profiles. SSH keys are stored in app configuration, never inside the encrypted vault.
+open-seavault-rclone includes basic SSH key management for rclone SFTP profiles. SSH keys are stored in app configuration, never inside the encrypted vault.
 
 ## Managed key location
 
 | OS | Key directory |
 |---|---|
 | Linux | `~/.config/seavault/ssh` |
-| macOS | `~/Library/Application Support/SeaVault/ssh` |
-| Windows | `%APPDATA%\SeaVault\ssh` |
+| macOS | `~/Library/Application Support/open-seavault-rclone/ssh` |
+| Windows | `%APPDATA%\open-seavault-rclone\ssh` |
 
 ## CLI
 

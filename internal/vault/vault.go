@@ -45,7 +45,7 @@ const SupportedFormat = 3
 // from a genuine forward version — the operator is told the value may be
 // tampering, not just a stale client. After unwrap the same field is MAC-covered
 // and a forgery is additionally caught as config tampering.
-var ErrFormatTooNew = errors.New("this vault requires a newer version of SeaVault; if you did not expect a version change, vault.json may have been modified — restore it from a backup or another device")
+var ErrFormatTooNew = errors.New("this vault requires a newer version of open-seavault-rclone; if you did not expect a version change, vault.json may have been modified — restore it from a backup or another device")
 
 // ErrConfigInconsistent is returned by Open/loadIndexFromDisk when vault.json
 // describes a legacy single-index (or version 1) vault but encrypted manifests
@@ -60,7 +60,7 @@ var ErrConfigInconsistent = errors.New("vault.json describes a legacy single-ind
 // replayed pre-rotation config. An unattended
 // process cannot read a warning, so the rollback is a hard refusal; the operator
 // re-runs with --accept-rollback (and a re-supplied credential) to accept it.
-var ErrConfigRolledBack = errors.New("vault.json looks older than this device last saw, so SeaVault will not open it. If you deliberately restored this vault from an older backup, re-run with --accept-rollback to open it and re-establish freshness. If you did NOT expect this, the sync server may be replaying a retired configuration: do not enter a retired password, and restore vault.json from a good backup or another device")
+var ErrConfigRolledBack = errors.New("vault.json looks older than this device last saw, so open-seavault-rclone will not open it. If you deliberately restored this vault from an older backup, re-run with --accept-rollback to open it and re-establish freshness. If you did NOT expect this, the sync server may be replaying a retired configuration: do not enter a retired password, and restore vault.json from a good backup or another device")
 
 // ErrConfigDiverged is returned by Open when the on-disk FormatEpoch TIES this
 // device's recorded high-water but the ConfigTag differs (Condition
@@ -723,7 +723,7 @@ func (v *Vault) SaveIndex(idx Index) error {
 // PutReport is the outcome of a PutPathReport call: the per-file results plus any
 // advisory warnings raised during the walk. A warning never fails
 // the put; it records something the operator should know, such as a source
-// directory named like a SeaVault metadata dir that was imported as plain
+// directory named like a open-seavault-rclone metadata dir that was imported as plain
 // content rather than skipped.
 type PutReport struct {
 	Results  []PutResult
@@ -805,7 +805,7 @@ func (v *Vault) PutPathReport(sourcePath string, virtualPath string) (PutReport,
 				if isMetadataDirName(name) {
 					// A foreign directory that merely shares a metadata name: import
 					// its contents as plain content and warn, do not skip.
-					warnings = append(warnings, fmt.Sprintf("source contains a directory named like a SeaVault metadata dir (%s); it was imported as plain content", p))
+					warnings = append(warnings, fmt.Sprintf("source contains a directory named like a open-seavault-rclone metadata dir (%s); it was imported as plain content", p))
 				}
 				return nil
 			}

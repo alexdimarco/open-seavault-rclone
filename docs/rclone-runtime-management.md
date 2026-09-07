@@ -1,6 +1,6 @@
 # App-managed rclone runtime
 
-SeaVault Fast manages its own rclone executable so users do not have to install rclone separately and so the GUI can report the active runtime version, hash, source, and rollback state.
+open-seavault-rclone manages its own rclone executable so users do not have to install rclone separately and so the GUI can report the active runtime version, hash, source, and rollback state.
 
 ## Runtime locations
 
@@ -9,8 +9,8 @@ The runtime is stored outside the vault:
 | OS | Runtime root |
 |---|---|
 | Linux | `~/.local/share/seavault/rclone` |
-| macOS | `~/Library/Application Support/SeaVault/rclone` |
-| Windows | `%LOCALAPPDATA%\SeaVault\rclone` |
+| macOS | `~/Library/Application Support/open-seavault-rclone/rclone` |
+| Windows | `%LOCALAPPDATA%\open-seavault-rclone\rclone` |
 
 For tests and portable deployments, set:
 

@@ -1,6 +1,6 @@
-# SeaVault Fast
+# open-seavault-rclone
 
-SeaVault Fast is a cross-platform prototype for client-side encrypted storage. It stores plaintext only on the local client, splits files into Seafile-style content-defined chunks, encrypts chunks and sharded manifests, and transports only the encrypted `.seavault` repository.
+open-seavault-rclone is a cross-platform prototype for client-side encrypted storage. It stores plaintext only on the local client, splits files into Seafile-style content-defined chunks, encrypts chunks and sharded manifests, and transports only the encrypted `.seavault` repository.
 
 This repository is a working MVP, not an audited production replacement for Cryptomator.
 
@@ -12,7 +12,7 @@ open-seavault-rclone is free software, licensed under the **GNU General Public L
 
 This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details. You are free to use, study, modify, and redistribute it under the terms of the GPL.
 
-Vendored and bundled third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The GPL does not grant trademark rights: the **SeaVault** and **Crescendum** names, logos, icons, favicons, wordmarks, and visual identity remain reserved &mdash; see [TRADEMARKS.md](TRADEMARKS.md).
+Vendored and bundled third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The GPL does not grant trademark rights: the **open-seavault-rclone** and **Crescendum** names, logos, icons, favicons, wordmarks, and visual identity remain reserved &mdash; see [TRADEMARKS.md](TRADEMARKS.md).
 
 ## What changed in v0.17 (Phase A2 config-and-key layer)
 
@@ -22,14 +22,14 @@ Phase A2 adds a config-and-key layer to the vault format without re-keying any m
 - **Recovery key.** `seavault recovery generate VAULT` mints a one-time recovery phrase (shown once, never stored) with a mandatory read-back before it is committed; `seavault recovery redeem VAULT` unlocks with the phrase and, in one transaction, sets a new password **and** consumes the redeemed entry so a leaked phrase cannot keep opening the vault; `seavault recovery revoke`/`list` manage entries.
 - **Config integrity + freshness.** `vault.json` now carries a `configTag` (an HMAC over the config under a master-derived key) so a server that edits the VaultID, chunk parameters, KDF cost, or the wrapped-key set is caught as tampering once the vault is unlocked. A device-local, never-synced freshness anchor additionally catches a **rolled-back** config (an old `vault.json` replayed after a password change): any unlock refuses and prints how to proceed &mdash; re-run with `--accept-rollback` if you deliberately restored from an older backup, otherwise treat it as a possible attack and do not enter a retired password. See [SECURITY.md](SECURITY.md) for the exact guarantees and residuals.
 - **Causal reconciliation.** File and manifest records carry an additive per-device vector clock. Two devices that edit concurrently now both survive (one canonical, the rest as `*.conflict-*`), a delete that causally dominates an edit deletes cleanly, and a delete concurrent with an edit keeps both — a strict improvement over the v0.16 generation-only rule, which A2 keeps as the fallback for records a v0.16 peer wrote (they carry no clock).
-- **`seavault vault seal-format VAULT`.** The operator's explicit end of the grace release: it bumps `Version` to 3 and raises `minReader` to 3 in one signed rewrite, after an interactive confirmation (or `--yes`). Once sealed, SeaVault 0.16 and older can **no longer open the vault** (they refuse on their own version fence) and A2 clients below format 3 are fenced with a typed error. Before sealing, the command prints whatever device inventory it has (a device-local, never-synced list of readers it has seen) or, when it has none, an explicit warning that it cannot see your other devices — so confirm every device is upgraded first. `seavault vault unseal-format VAULT` reverses it (restoring `Version` 2 / `minReader` 2) as long as no later phase has re-keyed the manifests.
+- **`seavault vault seal-format VAULT`.** The operator's explicit end of the grace release: it bumps `Version` to 3 and raises `minReader` to 3 in one signed rewrite, after an interactive confirmation (or `--yes`). Once sealed, open-seavault-rclone 0.16 and older can **no longer open the vault** (they refuse on their own version fence) and A2 clients below format 3 are fenced with a typed error. Before sealing, the command prints whatever device inventory it has (a device-local, never-synced list of readers it has seen) or, when it has none, an explicit warning that it cannot see your other devices — so confirm every device is upgraded first. `seavault vault unseal-format VAULT` reverses it (restoring `Version` 2 / `minReader` 2) as long as no later phase has re-keyed the manifests.
 - **Grace-release guidance.** Roll A2 out by upgrading **every** device before sealing. During the grace release you can still downgrade a device to v0.16 (the legacy wrap stays populated and current, so it keeps unlocking), which makes backing out a bad release possible; sealing is the one-way step. Take a full-vault backup before migrating. While the fleet is mixed, config-tamper protection holds only on A2 devices, and a v0.16 peer's garbage collection can still delete a chunk an A2 device keeps live via a causal conflict copy — both stated in [SECURITY.md](SECURITY.md). Complete the upgrade and `seal-format` before relying on A2's causal conflict preservation.
 
 ## What changed in v0.16 (Phase A1 vault-core hardening)
 
 Phase A1 hardens the vault core without changing the on-disk format: a vault a v0.15 client created opens unchanged, and everything this version writes into it stays readable by v0.15. The one deliberate boundary is the new metadata directory name for vaults this version **creates**.
 
-- **New vaults use a visible `SeaVaultData` directory.** Older vaults keep their hidden `.seavault` directory and open transparently; both names are recognised. A vault this version creates is **not** located by SeaVault 0.15.0 or older on another device (that client fails to find a vault — a `no such file` error on `.seavault/vault.json` — rather than corrupting anything), so upgrade every device before creating new vaults in a shared folder. See [docs/local-sync-location.md](docs/local-sync-location.md).
+- **New vaults use a visible `SeaVaultData` directory.** Older vaults keep their hidden `.seavault` directory and open transparently; both names are recognised. A vault this version creates is **not** located by open-seavault-rclone 0.15.0 or older on another device (that client fails to find a vault — a `no such file` error on `.seavault/vault.json` — rather than corrupting anything), so upgrade every device before creating new vaults in a shared folder. See [docs/local-sync-location.md](docs/local-sync-location.md).
 - **`seavault gc` is a dry run by default.** `seavault gc VAULT` prints the candidate chunks and bytes and writes nothing (and exits 3 when it would reclaim something, so scripted callers notice the missing `--confirm`); `seavault gc --confirm VAULT` runs the two-phase, time-fenced deletion (synced intent, then removal once the fence — default `72h`, `--fence` to change — has elapsed by the deleting device's clock and its device-local first-seen record). `verify` lists pending intents so a delete in flight is visible. Pending intents are informational; a delete completes on a later `gc --confirm` once the fence elapses; to stop one, put the content back or run `gc --confirm` on a device that references it. See [SECURITY.md](SECURITY.md) (Garbage-collection fence) for the accepted residuals.
 - **`seavault compact`.** A new command (and the GUI's **Reclaim space** button, `POST /api/compact`) materialises deferred sync-conflict copies, removes superseded manifests, and sweeps `.tmp-*` orphans. Reads and reloads write nothing to the metadata directory.
 - **A concurrent edit is never lost to a concurrent delete.** Delete tombstones now record the generation they superseded (`deletedGeneration`): a live copy above that generation — an edit the deleter never saw — survives as a `*.conflict-*` copy instead of being suppressed.
@@ -82,12 +82,12 @@ See [docs/webdav-file-manager.md](docs/webdav-file-manager.md), [docs/gui-launch
 
 ## What changed in v0.11
 
-- Added optional app-managed rsync runtime support. SeaVault now has managed tool controls for both rclone and rsync.
+- Added optional app-managed rsync runtime support. open-seavault-rclone now has managed tool controls for both rclone and rsync.
 - Kept native Go ingest as the default dependency-free local import path.
 - Added put methods: `native`, `managed-rsync`, `system-rsync`, `rsync`, and `auto`.
 - `auto` now tries managed rsync first, then system rsync, then native import.
 - Added CLI commands for managed rsync status, install/register, source update check, update, rollback, verification, and path discovery.
-- Added GUI controls to register an existing rsync binary, install an offline SeaVault rsync runtime archive, check latest upstream source release, update, and rollback.
+- Added GUI controls to register an existing rsync binary, install an offline open-seavault-rclone rsync runtime archive, check latest upstream source release, update, and rollback.
 - Added runtime manifest tracking for managed rsync: version, source version, source URL, binary path, SHA256, install time, previous runtime, and runtime verification status.
 - Added documentation for managed rsync, source/provenance handling, and native-vs-rsync ingest choices.
 
@@ -106,7 +106,7 @@ See [docs/webdav-file-manager.md](docs/webdav-file-manager.md), [docs/gui-launch
 - Added a right-side saved-vault status list with per-vault status bars, active-vault highlighting, keychain availability, and missing/error indicators.
 - Added GUI support to save a vault location and optionally store its password in the OS keychain.
 - Added CLI `seavault profile save --save-password NAME VAULT_DIR` and `seavault profile list --status`.
-- Moved profile storage onto the shared SeaVault app configuration directory so tests and enterprise deployments can isolate app state with `SEAVAULT_APP_HOME`.
+- Moved profile storage onto the shared open-seavault-rclone app configuration directory so tests and enterprise deployments can isolate app state with `SEAVAULT_APP_HOME`.
 
 ## What changed in v0.7
 
@@ -218,20 +218,20 @@ The encrypted vault storage remains unchanged. The cloud provider still sees onl
 
 ## Move vault location
 
-A vault can be moved to a new local folder without changing the vault ID or re-encrypting data. This is useful when moving the encrypted vault from one sync-client folder to another, for example from `~/SeaVault/research` to `~/Nextcloud/research-seavault`.
+A vault can be moved to a new local folder without changing the vault ID or re-encrypting data. This is useful when moving the encrypted vault from one sync-client folder to another, for example from `~/open-seavault-rclone/research` to `~/Nextcloud/research-seavault`.
 
 ```bash
 # Move a saved vault profile and update matching remote profiles
 seavault profile move work-cloud ~/Nextcloud/seavault-work
 
 # Move any vault path or profile, and update a named saved location
-seavault move --profile work-cloud ~/SeaVault/work ~/Nextcloud/seavault-work
+seavault move --profile work-cloud ~/open-seavault-rclone/work ~/Nextcloud/seavault-work
 
 # Replace an existing empty or disposable destination
 seavault profile move --replace work-cloud ~/Nextcloud/seavault-work
 ```
 
-The move operation moves the entire encrypted vault folder, including `.seavault`. It rejects destinations inside the source vault to avoid recursive moves. If the move crosses filesystems, SeaVault falls back to a copy-then-remove workflow.
+The move operation moves the entire encrypted vault folder, including `.seavault`. It rejects destinations inside the source vault to avoid recursive moves. If the move crosses filesystems, open-seavault-rclone falls back to a copy-then-remove workflow.
 
 Keychain entries do not need to be rewritten because they are stored by vault ID. If the GUI moves the active open vault and a keychain password is available, it attempts to reopen the vault automatically at the new location. Otherwise, the vault is safely closed and can be reopened from the new location.
 
@@ -263,10 +263,10 @@ Managed rsync is optional. The app works without rsync because native Go ingest 
 # Show managed/system rsync status and recommended ingest mode
 seavault rsync status --check-update
 
-# Register an existing verified rsync binary into SeaVault's managed runtime
+# Register an existing verified rsync binary into open-seavault-rclone's managed runtime
 seavault rsync install --from-binary /usr/bin/rsync
 
-# Install an enterprise-built SeaVault rsync runtime archive
+# Install an enterprise-built open-seavault-rclone rsync runtime archive
 seavault rsync install --offline-archive ./seavault-rsync-3.4.2-linux-amd64.zip
 
 # Update, rollback, verify, and show active path
@@ -282,10 +282,10 @@ Runtime locations:
 | OS | Location |
 |---|---|
 | Linux | `~/.local/share/seavault/rsync` |
-| macOS | `~/Library/Application Support/SeaVault/rsync` |
-| Windows | `%LOCALAPPDATA%\SeaVault\rsync` |
+| macOS | `~/Library/Application Support/open-seavault-rclone/rsync` |
+| Windows | `%LOCALAPPDATA%\open-seavault-rclone\rsync` |
 
-Rsync upstream is source-first. SeaVault therefore supports a source-direct provenance model: track the upstream rsync source release, verify or register an enterprise-built runtime artifact, record the binary hash, and retain the previous version for rollback. A direct binary update channel should be operated by the project or an enterprise administrator, not by downloading arbitrary third-party rsync binaries.
+Rsync upstream is source-first. open-seavault-rclone therefore supports a source-direct provenance model: track the upstream rsync source release, verify or register an enterprise-built runtime artifact, record the binary hash, and retain the previous version for rollback. A direct binary update channel should be operated by the project or an enterprise administrator, not by downloading arbitrary third-party rsync binaries.
 
 ## Rclone transport model
 
@@ -324,8 +324,8 @@ Runtime locations:
 | OS | Location |
 |---|---|
 | Linux | `~/.local/share/seavault/rclone` |
-| macOS | `~/Library/Application Support/SeaVault/rclone` |
-| Windows | `%LOCALAPPDATA%\SeaVault\rclone` |
+| macOS | `~/Library/Application Support/open-seavault-rclone/rclone` |
+| Windows | `%LOCALAPPDATA%\open-seavault-rclone\rclone` |
 
 Online installs download official rclone artifacts, verify SHA256SUMS, extract only the executable, run `rclone version`, and record the binary hash. GPG signature verification is supported when `gpg` is available; use `--signature required` where signature verification must be mandatory.
 
@@ -333,10 +333,10 @@ Online installs download official rclone artifacts, verify SHA256SUMS, extract o
 
 ```bash
 # Local folder target
-seavault remote add --type local --backend local local-backup ~/SeaVault/research ~/Backup/SeaVault/research
+seavault remote add --type local --backend local local-backup ~/open-seavault-rclone/research ~/Backup/open-seavault-rclone/research
 
 # Rclone target
-seavault remote add --backend b2 research-b2 ~/SeaVault/research b2ca:seavault/research
+seavault remote add --backend b2 research-b2 ~/open-seavault-rclone/research b2ca:seavault/research
 
 # Operations
 seavault remote list
@@ -442,4 +442,4 @@ GOOS=windows GOARCH=amd64 go build -o dist/seavault-windows-amd64.exe ./cmd/seav
 
 ## Security boundary
 
-SeaVault protects file contents and virtual paths before the vault is synchronized. It does not hide total vault size, approximate object count, object churn, sync timing, or the existence of the vault from the cloud provider.
+open-seavault-rclone protects file contents and virtual paths before the vault is synchronized. It does not hide total vault size, approximate object count, object churn, sync timing, or the existence of the vault from the cloud provider.

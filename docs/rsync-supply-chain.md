@@ -1,6 +1,6 @@
 # Rsync supply chain model
 
-SeaVault does not assume that official upstream rsync publishes a complete, ready-to-use binary matrix for every target platform. The managed runtime path supports controlled registration and offline runtime archives.
+open-seavault-rclone does not assume that official upstream rsync publishes a complete, ready-to-use binary matrix for every target platform. The managed runtime path supports controlled registration and offline runtime archives.
 
 ## Recommended production channel
 
@@ -8,7 +8,7 @@ SeaVault does not assume that official upstream rsync publishes a complete, read
 2. Verify upstream source signatures in CI or release engineering.
 3. Build per-platform runtime archives.
 4. Sign and publish archives and checksums.
-5. Configure SeaVault clients to use the approved runtime base URL or distribute offline archives.
+5. Configure open-seavault-rclone clients to use the approved runtime base URL or distribute offline archives.
 6. Retain previous runtimes for rollback.
 
 ## Runtime manifest

@@ -1,6 +1,6 @@
 # GUI responsive layout validation
 
-SeaVault Fast uses a browser-based local GUI. The result and progress panel stays on the right side of the screen on desktop-sized layouts and automatically moves above the main forms on narrower screens where a right-hand panel would cause horizontal scrolling.
+open-seavault-rclone uses a browser-based local GUI. The result and progress panel stays on the right side of the screen on desktop-sized layouts and automatically moves above the main forms on narrower screens where a right-hand panel would cause horizontal scrolling.
 
 ## Layout rules
 

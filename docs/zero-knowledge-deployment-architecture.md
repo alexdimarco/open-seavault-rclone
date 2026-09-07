@@ -1,12 +1,12 @@
-# SeaVault Zero-Knowledge Deployment: Reference Architecture, Threat Model & Roadmap
+# open-seavault-rclone Zero-Knowledge Deployment: Reference Architecture, Threat Model & Roadmap
 
-*Audience: SeaVault engineering team + future security auditor. Status: pre-ship review. All claims grounded in `/home/alex/gitprojects/seavault-fast-rclone`.*
+*Audience: open-seavault-rclone engineering team + future security auditor. Status: pre-ship review. All claims grounded in `/home/alex/gitprojects/seavault-fast-rclone`.*
 
 ---
 
 ## 1. Overview & the Zero-Knowledge Property
 
-SeaVault is a **client-side** encryption application. It runs exclusively on the **end user's own computer** (home or work machine) — never on a server. It chunks and encrypts a user's files locally into a `.seavault` directory. That directory contains **only ciphertext and non-sensitive crypto metadata**, and is synced up to a **Crescendum-managed, customer-owned Nextcloud server** via the Nextcloud desktop sync client or via rclone to Nextcloud WebDAV.
+open-seavault-rclone is a **client-side** encryption application. It runs exclusively on the **end user's own computer** (home or work machine) — never on a server. It chunks and encrypts a user's files locally into a `.seavault` directory. That directory contains **only ciphertext and non-sensitive crypto metadata**, and is synced up to a **Crescendum-managed, customer-owned Nextcloud server** via the Nextcloud desktop sync client or via rclone to Nextcloud WebDAV.
 
 ### What zero-knowledge guarantees, and for whom
 
@@ -33,7 +33,7 @@ The cryptographic foundation, verified in code:
         =============== USER'S OWN MACHINE (TRUSTED) ===============
         ‖                                                          ‖
   user's  ‖   ┌──────────────────────────────────────────────┐    ‖
-  plaintext ─►│  SeaVault CLIENT                               │    ‖
+  plaintext ─►│  open-seavault-rclone CLIENT                               │    ‖
   files   ‖   │  • chunk + AES-256-GCM seal (vault.go:485)     │    ‖
         ‖     │  • encrypt manifest body (manifest.go:298-307) │    ‖
         ‖     │  • wrap keys w/ password-KDF (crypto.go:185)   │    ‖
@@ -57,7 +57,7 @@ The cryptographic foundation, verified in code:
         ┌──────────────────────────────────────────────────────────┐
         │  CRESCENDUM-MANAGED NEXTCLOUD SERVER  (UNTRUSTED for      │
         │  confidentiality; honest-but-curious)                     │
-        │  Stores ONLY .seavault ciphertext. Runs no SeaVault code. │
+        │  Stores ONLY .seavault ciphertext. Runs no open-seavault-rclone code. │
         │  Cannot decrypt anything without the user password.       │
         └──────────────────────────────┬───────────────────────────┘
                                         │ sync down (ciphertext)
@@ -68,7 +68,7 @@ The cryptographic foundation, verified in code:
         ‖              │ .seavault/ (ciphertext)          │          ‖
         ‖              └────────────────┬────────────────┘          ‖
         ‖   ┌───────────────────────────▼──────────────────────┐   ‖
-        ‖   │  SeaVault CLIENT                                   │   ‖
+        ‖   │  open-seavault-rclone CLIENT                                   │   ‖
   user ◄─── │  • unlock w/ password ► unwrap keys (crypto.go)    │   ‖
   plaintext ‖ │  • AEAD-Open chunks (loadChunk vault.go:600-621) │   ‖
         ‖   │  • decrypt manifest, restore to chosen destination│   ‖
@@ -91,7 +91,7 @@ Chunks AEAD-sealed (`vault.go:485-486`), manifests/tombstones AEAD-sealed (`mani
 *Breaks if:* any code path writes plaintext file content inside `.seavault` (today reachable via LR-1).
 
 **INV-2 — Decryption happens only on the user's client machine.**
-`Open`/`unwrapKeys`, `loadChunk`, `restoreFile`, `WriteFileTo`, `ExportPath` all run client-side; the server runs no SeaVault code.
+`Open`/`unwrapKeys`, `loadChunk`, `restoreFile`, `WriteFileTo`, `ExportPath` all run client-side; the server runs no open-seavault-rclone code.
 *Enforce:* never ship a server-side build that links the vault/decrypt packages; the managed Docker template must not run the GUI/WebDAV (see W4).
 *Breaks if:* a future server-side or WASM build (W6) moves decryption off the trusted device — the explicit reason W6 is weaker.
 
@@ -170,7 +170,7 @@ No transport path ever references plaintext source files, OS temp staging dirs, 
 | **Managed provider / curious or compromised Nextcloud admin** | All ciphertext at rest: `vault.json` (KDF algo/params, base64 salt, random vaultID, createdAt, wrapped bundle + nonce — `vault.go:149-167`), every `.chunk` and `.manifest`, tombstones. Derives: vault existence, total size, object/chunk count, file count (1 manifest/file), per-chunk plaintext length (no padding), intra-vault dedupe equality (`vault.go:469-472`), churn/timing | Any plaintext, paths, filenames (encrypted in manifest body `manifest.go:298-307`; on-disk names are keyed HMAC `manifest.go:327`). Password, masterKey, indexKey | Delete/reorder/roll back/withhold/replay ciphertext objects (DoS, point-in-time rollback). Run **offline brute-force** on the password using cleartext salt + wrapped bundle. Cross-customer metadata analysis | Forge/tamper undetectably (AEAD + AAD + post-decrypt keyed objectID recheck `vault.go:609-619`). Inject readable plaintext, learn a key, decrypt, or mix objects across vaults (keys are per-vault) |
 | **Server compromise / storage exfiltration (offline `.seavault` copy)** | Same ciphertext + metadata, frozen at exfil time | Plaintext, paths, filenames, keys — identical boundary | **Unlimited offline guessing** of the password against the stolen `vault.json` (salt `vault.go:144`, bundle `vault.go:165-166`). Harvest-now/decrypt-later if password is weak | Decrypt with a strong password; recover keys without the password; tamper undetectably. No server-side secret helps |
 | **Network attacker (MITM on WebDAV/Nextcloud/rclone)** | TLS metadata: that a `.seavault` tree is syncing, object sizes/counts/timing, source IP, account identity. If TLS stripped / rogue CA: same ciphertext as the server | Plaintext, paths, filenames, keys (payload is encrypted before transport — `DESIGN.md:5`, `SECURITY.md:49-50`) | Block/delay/drop transfers; replay/roll back if able to write; fingerprint by size/timing; attempt TLS downgrade | Read/forge plaintext, derive keys, tamper undetectably (AEAD fails on client). Transport confidentiality still depends on external TLS config |
-| **Client-device attacker (malware / same-user process / unlocked session)** | **Everything once unlocked:** plaintext, decrypted restores, masterKey/indexKey in RAM, password as typed, OS-keychain password keyed by vaultID (`SECURITY.md:29-31`, `server.go:890`). Loopback GUI/WebDAV reachable by any same-user process | Little that matters; before unlock, on-disk data is still ciphertext | Read/exfiltrate all plaintext, capture keys/password, impersonate user to server. **Full compromise** for that user. Out of scope (`SECURITY.md:22-23`) | Nothing meaningful is withheld; SeaVault provides no in-product defense — mitigation is OS-level (account isolation, FDE, EDR, keychain ACLs) |
+| **Client-device attacker (malware / same-user process / unlocked session)** | **Everything once unlocked:** plaintext, decrypted restores, masterKey/indexKey in RAM, password as typed, OS-keychain password keyed by vaultID (`SECURITY.md:29-31`, `server.go:890`). Loopback GUI/WebDAV reachable by any same-user process | Little that matters; before unlock, on-disk data is still ciphertext | Read/exfiltrate all plaintext, capture keys/password, impersonate user to server. **Full compromise** for that user. Out of scope (`SECURITY.md:22-23`) | Nothing meaningful is withheld; open-seavault-rclone provides no in-product defense — mitigation is OS-level (account isolation, FDE, EDR, keychain ACLs) |
 | **Another tenant on shared Nextcloud (no admin)** | Only what Nextcloud ACLs expose. If mis-shared: same ciphertext + metadata as provider view | Plaintext/paths/filenames/keys of another vault under any circumstance | At most metadata observation; if mis-shared write, same DoS as a malicious server | Decrypt/tamper, **cross-vault dedupe correlation** (object IDs keyed per vault — `DESIGN.md:54,66`), or obtain another tenant's keys |
 
 ### Metadata the provider still learns (residual leakage)
@@ -192,19 +192,19 @@ No transport path ever references plaintext source files, OS temp staging dirs, 
 - **OS keychain broadens local attack surface** (password keyed by vaultID).
 - **AES-GCM with random 96-bit nonces** (`vault.go:480`, `crypto.go:135`) — safe at expected volumes; no nonce-misuse-resistant mode and no documented rekey threshold.
 - **No recovery / rotation / revocation flow yet** — lost password = permanent loss; planned IAM-tied recovery introduces a new escrow/trust party (see W2).
-- **Supply-chain / runtime integrity** — rclone hash/GPG verification exists (`SECURITY.md:51-52`), but a signed SeaVault release pipeline is still outstanding (`SECURITY.md:42`). Future WASM unlock expands the trusted delivery surface.
-- **Transport metadata confidentiality depends on external TLS config**, not on SeaVault.
+- **Supply-chain / runtime integrity** — rclone hash/GPG verification exists (`SECURITY.md:51-52`), but a signed open-seavault-rclone release pipeline is still outstanding (`SECURITY.md:42`). Future WASM unlock expands the trusted delivery surface.
+- **Transport metadata confidentiality depends on external TLS config**, not on open-seavault-rclone.
 
 ### Trust assumptions
 1. The client device is trusted/uncompromised at unlock and use.
 2. The unlock password is high-entropy and secret — the entire guarantee rests on its resistance to offline KDF attack.
-3. The server is **honest-but-curious for confidentiality**; SeaVault relies on AEAD for tamper detection but does **not** defend rollback/withholding.
+3. The server is **honest-but-curious for confidentiality**; open-seavault-rclone relies on AEAD for tamper detection but does **not** defend rollback/withholding.
 4. `crypto/rand` is a sound CSPRNG; AES-256-GCM, Argon2id, HMAC-SHA256, HKDF-SHA256 are correctly implemented (incl. bundled `xcrypto`).
 5. Only `.seavault` syncs; transport credentials/SSH keys stay in app config (`SECURITY.md:54-58`); the sync client is a transport that never sees plaintext.
 6. The transport uses correctly configured TLS.
 7. Each vault has independent keys → no cross-vault/tenant dedupe correlation (`DESIGN.md:54,66`); multi-tenant raw-access isolation is delegated to Nextcloud.
 8. The provider's operational governance (region, subprocessors, support-access, retention, breach notification) is validated separately.
-9. The SeaVault binary and bundled rclone/rsync are authentic (signed releases pending).
+9. The open-seavault-rclone binary and bundled rclone/rsync are authentic (signed releases pending).
 10. Users accept the documented residual metadata leakage as inherent to a cloud-folder zero-knowledge design.
 
 ---

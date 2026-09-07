@@ -114,7 +114,7 @@ func validateSource(source string) error {
 		return fmt.Errorf("source vault path %s is not a directory", source)
 	}
 	if _, err := vault.ReadConfig(source); err != nil {
-		return fmt.Errorf("source does not look like a SeaVault vault: %w", err)
+		return fmt.Errorf("source does not look like a open-seavault-rclone vault: %w", err)
 	}
 	return nil
 }

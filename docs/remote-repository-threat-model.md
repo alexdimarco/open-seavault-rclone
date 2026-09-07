@@ -2,7 +2,7 @@
 
 ## Assets protected
 
-SeaVault protects:
+open-seavault-rclone protects:
 
 - file contents
 - virtual paths and encrypted manifests

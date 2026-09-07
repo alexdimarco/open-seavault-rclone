@@ -218,7 +218,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 
 	if s.Credentials != nil && !s.credentialsMatch(r) {
-		w.Header().Set("WWW-Authenticate", `Basic realm="SeaVault", charset="UTF-8"`)
+		w.Header().Set("WWW-Authenticate", `Basic realm="open-seavault-rclone", charset="UTF-8"`)
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return
 	}
@@ -1135,7 +1135,7 @@ func writeDirectoryHTML(w io.Writer, s *Server, files map[string]vault.FileRecor
 	if !ok {
 		return fmt.Errorf("directory not found")
 	}
-	_, _ = io.WriteString(w, "<!doctype html><meta charset=\"utf-8\"><title>SeaVault WebDAV</title><h1>SeaVault WebDAV</h1><ul>")
+	_, _ = io.WriteString(w, "<!doctype html><meta charset=\"utf-8\"><title>open-seavault-rclone WebDAV</title><h1>open-seavault-rclone WebDAV</h1><ul>")
 	for _, item := range items {
 		if item.Href == href(s.basePrefix(), vp, true) {
 			continue

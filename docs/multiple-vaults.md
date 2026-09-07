@@ -1,6 +1,6 @@
 # Multiple vaults and saved vault locations
 
-SeaVault can keep a local list of saved vault locations. A saved vault location is an app profile with a name and a vault path. The password is never written to the profile file. When requested, the password is stored separately in the operating-system keychain under the vault ID from `.seavault/vault.json`.
+open-seavault-rclone can keep a local list of saved vault locations. A saved vault location is an app profile with a name and a vault path. The password is never written to the profile file. When requested, the password is stored separately in the operating-system keychain under the vault ID from `.seavault/vault.json`.
 
 ## GUI workflow
 
@@ -48,4 +48,4 @@ seavault export work-nextcloud . ~/Desktop/seavault-export
 
 ## Storage locations
 
-Profiles are stored in the SeaVault app configuration directory. Passwords are stored in the operating-system keychain. Neither profiles nor keychain credentials are stored inside the encrypted vault folder.
+Profiles are stored in the open-seavault-rclone app configuration directory. Passwords are stored in the operating-system keychain. Neither profiles nor keychain credentials are stored inside the encrypted vault folder.

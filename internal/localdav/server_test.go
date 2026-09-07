@@ -84,7 +84,7 @@ func TestBasicAuthRequiredAndEnforced(t *testing.T) {
 		if rr.Code != http.StatusUnauthorized {
 			t.Fatalf("%s unauthenticated: code=%d want 401", tc.name, rr.Code)
 		}
-		if got := rr.Header().Get("WWW-Authenticate"); got != `Basic realm="SeaVault", charset="UTF-8"` {
+		if got := rr.Header().Get("WWW-Authenticate"); got != `Basic realm="open-seavault-rclone", charset="UTF-8"` {
 			t.Fatalf("%s WWW-Authenticate=%q", tc.name, got)
 		}
 	}

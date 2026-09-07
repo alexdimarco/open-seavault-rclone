@@ -1,6 +1,6 @@
 # Move vault location
 
-SeaVault can move an encrypted vault folder to a new local location and update saved vault profiles after the move.
+open-seavault-rclone can move an encrypted vault folder to a new local location and update saved vault profiles after the move.
 
 ## What moves
 
@@ -22,7 +22,7 @@ Plaintext is not decrypted or rewritten during a move.
 seavault profile move work-cloud ~/Nextcloud/seavault-work
 
 # Move a path or profile and update a saved vault name
-seavault move --profile work-cloud ~/SeaVault/work ~/Nextcloud/seavault-work
+seavault move --profile work-cloud ~/open-seavault-rclone/work ~/Nextcloud/seavault-work
 
 # Update matching remote profiles after the move, default true
 seavault profile move --update-remotes=true work-cloud ~/Nextcloud/seavault-work

@@ -312,7 +312,7 @@ func cmdPut(args []string) error {
 	for _, r := range res.Results {
 		fmt.Printf("put %-50s %10d bytes %4d chunks %4d new\n", r.Path, r.Size, r.ChunkCount, r.NewChunkCount)
 	}
-	// Surface the advisory lines (a source directory named like a SeaVault
+	// Surface the advisory lines (a source directory named like a open-seavault-rclone
 	// metadata dir imported as plain content, never silently skipped). Dropping
 	// these was.
 	for _, warning := range res.Warnings {
@@ -951,7 +951,7 @@ func listenErrorHint(addr string, err error) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("could not listen on %s: %w. If another SeaVault GUI or serve is already running, open its link instead, or choose a different --addr", addr, err)
+	return fmt.Errorf("could not listen on %s: %w. If another open-seavault-rclone GUI or serve is already running, open its link instead, or choose a different --addr", addr, err)
 }
 
 // printLaunchGuidance opens launchURL in the browser when openInBrowser is set
@@ -1081,7 +1081,7 @@ func resetLocalAppConfiguration(resetAll bool) error {
 			return err
 		}
 		_ = keychain.Delete(guiAuthAccount)
-		fmt.Printf("reset SeaVault local app configuration at %s\n", p)
+		fmt.Printf("reset open-seavault-rclone local app configuration at %s\n", p)
 		fmt.Println("vault data, saved vault locations, vault passwords, SSH keys, and remotes were not deleted")
 		return nil
 	}
@@ -1097,8 +1097,8 @@ func resetLocalAppConfiguration(resetAll bool) error {
 	}
 	_ = keychain.Delete(guiAuthAccount)
 	p, _ := appconfig.Path()
-	fmt.Printf("reset SeaVault GUI login in %s\n", p)
-	fmt.Println("restart SeaVault or reload the GUI; browser sessions are invalidated when the server restarts")
+	fmt.Printf("reset open-seavault-rclone GUI login in %s\n", p)
+	fmt.Println("restart open-seavault-rclone or reload the GUI; browser sessions are invalidated when the server restarts")
 	return nil
 }
 
@@ -1575,7 +1575,7 @@ func cmdRecoveryList(args []string) error {
 
 // cmdVault implements `seavault vault seal-format|unseal-format VAULT` (design
 // ): the operator's explicit end of the grace release and its
-// reversal. seal-format retires SeaVault 0.16 and older by bumping the on-disk
+// reversal. seal-format retires open-seavault-rclone 0.16 and older by bumping the on-disk
 // Version to 3 and raising MinReader to 3 in one MAC'd rewrite; unseal-format
 // reverses it while no A3 directory-ID re-key has run.
 func cmdVault(args []string) error {
@@ -1616,7 +1616,7 @@ func cmdVaultSealFormat(args []string) error {
 	// inventory — or, when it is empty, sees the explicit no-telemetry warning.
 	fmt.Fprint(os.Stderr, formatReaderSignal(v.ReaderInventory()))
 	if !*yes {
-		ok, err := confirmPrompt("Seal the vault format now? This retires SeaVault 0.16 and older for every device. [y/N]: ")
+		ok, err := confirmPrompt("Seal the vault format now? This retires open-seavault-rclone 0.16 and older for every device. [y/N]: ")
 		if err != nil {
 			return err
 		}
@@ -1627,7 +1627,7 @@ func cmdVaultSealFormat(args []string) error {
 	if err := v.SealFormat(); err != nil {
 		return err
 	}
-	fmt.Printf("sealed %s: version %d, minReader %d — SeaVault 0.16 and older can no longer open it (format epoch %d)\n", vaultPath, v.Config.Version, v.Config.MinReader, v.Config.FormatEpoch)
+	fmt.Printf("sealed %s: version %d, minReader %d — open-seavault-rclone 0.16 and older can no longer open it (format epoch %d)\n", vaultPath, v.Config.Version, v.Config.MinReader, v.Config.FormatEpoch)
 	return nil
 }
 
@@ -1652,7 +1652,7 @@ func cmdVaultUnsealFormat(args []string) error {
 	if err := v.UnsealFormat(); err != nil {
 		return err
 	}
-	fmt.Printf("unsealed %s: version %d, minReader %d — SeaVault 0.16 and older can open it again (format epoch %d)\n", vaultPath, v.Config.Version, v.Config.MinReader, v.Config.FormatEpoch)
+	fmt.Printf("unsealed %s: version %d, minReader %d — open-seavault-rclone 0.16 and older can open it again (format epoch %d)\n", vaultPath, v.Config.Version, v.Config.MinReader, v.Config.FormatEpoch)
 	return nil
 }
 
@@ -1665,7 +1665,7 @@ func cmdVaultUnsealFormat(args []string) error {
 // exist."
 func formatReaderSignal(inv []vault.ReaderRecord) string {
 	if len(inv) == 0 {
-		return "SeaVault has no inventory of your other devices; sealing now will lock out any device still on 0.16 or older with no automatic recovery. Confirm every device is upgraded first.\n"
+		return "open-seavault-rclone has no inventory of your other devices; sealing now will lock out any device still on 0.16 or older with no automatic recovery. Confirm every device is upgraded first.\n"
 	}
 	var b strings.Builder
 	b.WriteString("Devices seen opening this vault through this app-data directory (device-local; a 0.16 peer records nothing and may be missing):\n")
@@ -1791,9 +1791,9 @@ func cmdRsync(args []string) error {
 		fs := flag.NewFlagSet("rsync install", flag.ExitOnError)
 		ver := fs.String("version", "", "rsync version to register/install; default latest source release for runtime archive URLs")
 		fromBinary := fs.String("from-binary", "", "register/copy an existing rsync-compatible binary into the managed runtime")
-		offlineArchive := fs.String("offline-archive", "", "install from a local SeaVault rsync runtime zip archive")
+		offlineArchive := fs.String("offline-archive", "", "install from a local open-seavault-rclone rsync runtime zip archive")
 		offlineSHA := fs.String("offline-sha256sums", "", "SHA256SUMS file for --offline-archive")
-		runtimeBase := fs.String("runtime-base-url", "", "base URL for SeaVault-built rsync runtime artifacts")
+		runtimeBase := fs.String("runtime-base-url", "", "base URL for open-seavault-rclone-built rsync runtime artifacts")
 		buildID := fs.String("build-id", "", "optional runtime build identifier for provenance")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -1813,9 +1813,9 @@ func cmdRsync(args []string) error {
 		fs := flag.NewFlagSet("rsync update", flag.ExitOnError)
 		ver := fs.String("version", "", "rsync version to install; default latest upstream source release")
 		fromBinary := fs.String("from-binary", "", "register/copy an existing rsync-compatible binary into the managed runtime")
-		offlineArchive := fs.String("offline-archive", "", "install from a local SeaVault rsync runtime zip archive")
+		offlineArchive := fs.String("offline-archive", "", "install from a local open-seavault-rclone rsync runtime zip archive")
 		offlineSHA := fs.String("offline-sha256sums", "", "SHA256SUMS file for --offline-archive")
-		runtimeBase := fs.String("runtime-base-url", "", "base URL for SeaVault-built rsync runtime artifacts")
+		runtimeBase := fs.String("runtime-base-url", "", "base URL for open-seavault-rclone-built rsync runtime artifacts")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}

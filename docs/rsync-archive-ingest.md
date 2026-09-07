@@ -1,6 +1,6 @@
 # Rsync-assisted archive ingest
 
-SeaVault uses rsync as a local ingest helper, not as an encryption layer.
+open-seavault-rclone uses rsync as a local ingest helper, not as an encryption layer.
 
 The CLI command:
 
@@ -19,8 +19,8 @@ The safe design is:
 ```text
 source file/folder
   -> rsync copies to a temporary local staging directory
-  -> SeaVault reads staged files
-  -> SeaVault writes encrypted chunks and encrypted manifests into .seavault
+  -> open-seavault-rclone reads staged files
+  -> open-seavault-rclone writes encrypted chunks and encrypted manifests into .seavault
   -> staging directory is deleted
 ```
 

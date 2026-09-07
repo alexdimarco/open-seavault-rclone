@@ -1,6 +1,6 @@
 # Cloud provider notes
 
-SeaVault can use either local sync-client folders or direct rclone remotes.
+open-seavault-rclone can use either local sync-client folders or direct rclone remotes.
 
 ## Recommended modes
 

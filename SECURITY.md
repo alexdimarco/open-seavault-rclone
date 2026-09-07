@@ -2,7 +2,7 @@
 
 ## Threat model
 
-SeaVault assumes the cloud provider, cloud administrators, and sync transport may read, copy, delete, reorder, or replace files in the vault directory. The application encrypts and authenticates vault contents before data reaches that directory.
+open-seavault-rclone assumes the cloud provider, cloud administrators, and sync transport may read, copy, delete, reorder, or replace files in the vault directory. The application encrypts and authenticates vault contents before data reaches that directory.
 
 ## Protected
 
@@ -67,7 +67,7 @@ The OS keychain stores only the vault password and uses the vault ID as the acco
 
 New vaults keep their encrypted metadata in a visible `SeaVaultData` directory; legacy vaults use the hidden `.seavault` directory, and both are opened transparently. A vault this version creates is not located by a 0.15 or older client on another device (that client fails to find a vault rather than corrupting anything). See [docs/local-sync-location.md](docs/local-sync-location.md) for this metadata-directory compatibility boundary.
 
-Sync-client conflict files are expected in real cloud folders. SeaVault treats duplicate manifest variants conservatively: it keeps the newest generation as the main file and preserves other live versions as conflict copies instead of silently discarding them. A delete tombstone records the generation of the record it superseded (`deletedGeneration`): a live copy at or below that generation is a stale version the deleter had already seen and stays suppressed, while a live copy above it — a concurrent edit the deleter never saw — survives as a `*.conflict-*` copy rather than being lost to the delete. A tombstone written by an older client that lacks the field keeps every live copy as a conflict. Reconciliation itself writes nothing: a load computes these outcomes in memory and an explicit `compact` (CLI, or the GUI's Reclaim space) materialises them.
+Sync-client conflict files are expected in real cloud folders. open-seavault-rclone treats duplicate manifest variants conservatively: it keeps the newest generation as the main file and preserves other live versions as conflict copies instead of silently discarding them. A delete tombstone records the generation of the record it superseded (`deletedGeneration`): a live copy at or below that generation is a stale version the deleter had already seen and stays suppressed, while a live copy above it — a concurrent edit the deleter never saw — survives as a `*.conflict-*` copy rather than being lost to the delete. A tombstone written by an older client that lacks the field keeps every live copy as a conflict. Reconciliation itself writes nothing: a load computes these outcomes in memory and an explicit `compact` (CLI, or the GUI's Reclaim space) materialises them.
 
 ## Configuration integrity and freshness
 
@@ -86,7 +86,7 @@ Freshness is a separate, device-local mechanism. Each device records, under its
 app-data directory (never synced), the highest `formatEpoch` it has trusted for a
 vault and whether it has ever seen a valid tag. A config whose epoch is **lower**
 than that high-water is a possible rollback (an old `vault.json` replayed to
-re-enable a retired password): SeaVault **refuses to open it** and prints how to
+re-enable a retired password): open-seavault-rclone **refuses to open it** and prints how to
 proceed — re-run with `--accept-rollback` if you deliberately restored the vault
 from an older backup, or, if the rollback was unexpected, do not enter a retired
 password and restore `vault.json` from a good backup. `--accept-rollback` accepts
@@ -100,7 +100,7 @@ for this phase and stated here:
   (re-TOFU). An operator who is tricked or coerced into passing it drops rollback
   protection for that vault on that device until a newer config re-anchors it.
 - **Reinstall / app-data reset resets protection to TOFU.** The anchor lives only
-  in app data. Reinstalling SeaVault, wiping its app-data directory, or opening
+  in app data. Reinstalling open-seavault-rclone, wiping its app-data directory, or opening
   the vault from a fresh device starts with no anchor, so the first config seen is
   trusted on faith — a rolled-back config presented to a fresh install is not
   detected as a rollback.

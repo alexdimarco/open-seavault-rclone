@@ -38,7 +38,7 @@ type Result struct {
 	RsyncOutput string            `json:"rsyncOutput,omitempty"`
 	Results     []vault.PutResult `json:"results"`
 	// Warnings carries the advisory lines the vault layer records for a put
-	// : a source directory merely NAMED like a SeaVault metadata dir
+	// : a source directory merely NAMED like a open-seavault-rclone metadata dir
 	// (a second vault's SeaVaultData, a legacy.seavault in a backup tree) that
 	// was imported as plain content rather than skipped. Dropping these here is
 	//  — the operator sees per-file success with no advisory.

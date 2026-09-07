@@ -1,6 +1,6 @@
 # Rsync-backed archive ingestion
 
-SeaVault can now use rsync as the staging mechanism before data is chunked and encrypted into the vault.
+open-seavault-rclone can now use rsync as the staging mechanism before data is chunked and encrypted into the vault.
 
 The flow is:
 

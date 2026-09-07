@@ -32,7 +32,7 @@ func Check() Report {
 	} else {
 		items = append(items, checkCommand("rsync", "System rsync", "Optional; native Go import is used when rsync is absent."))
 	}
-	items = append(items, checkCommand("rclone", "System rclone", "Optional; SeaVault can use the managed rclone runtime."))
+	items = append(items, checkCommand("rclone", "System rclone", "Optional; open-seavault-rclone can use the managed rclone runtime."))
 	return Report{Keychain: kc, Items: items}
 }
 

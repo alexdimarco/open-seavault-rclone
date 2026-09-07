@@ -156,7 +156,7 @@ func exportWroteFileWithContent(t *testing.T, dir string, want []byte) bool {
 // TestConditionsF1DirectoryPutReservedSegmentReachableAndReclaimable is the
 // tombstone for. It exercises
 // the exact mechanism the: THIS version's directory `put` of a
-// source tree that contains a subdirectory named like a SeaVault metadata dir
+// source tree that contains a subdirectory named like a open-seavault-rclone metadata dir
 // (the "legacy.seavault inside a backup tree" case the review names) walks the
 // tree and writes the foreign file to a reserved-segment virtual path
 // (content/backup/SeaVaultData/data.txt). the design requires that file be

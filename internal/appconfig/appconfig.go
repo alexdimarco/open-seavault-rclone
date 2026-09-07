@@ -183,7 +183,7 @@ func writeSelfSigned(certPath, keyPath, host string) error {
 		return err
 	}
 	now := time.Now().UTC()
-	tmpl := x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "SeaVault local GUI"}, NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(2, 0, 0), KeyUsage: x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, BasicConstraintsValid: true}
+	tmpl := x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "open-seavault-rclone local GUI"}, NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(2, 0, 0), KeyUsage: x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, BasicConstraintsValid: true}
 	if host == "" {
 		host = "127.0.0.1"
 	}

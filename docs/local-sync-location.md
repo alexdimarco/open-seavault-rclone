@@ -8,14 +8,14 @@ Paths can use `~`, `$HOME`, `${HOME}`, or `%USERPROFILE%`. The GUI and CLI expan
 
 ```text
 CloudSyncFolder/
-  SeaVault/
+  open-seavault-rclone/
     SeaVaultData/
       vault.json
       objects/chunks/...
       manifests/...
 ```
 
-Point the sync client at `CloudSyncFolder` or at `CloudSyncFolder/SeaVault`. Do not place plaintext source files inside the metadata directory.
+Point the sync client at `CloudSyncFolder` or at `CloudSyncFolder/open-seavault-rclone`. Do not place plaintext source files inside the metadata directory.
 
 ## Metadata directory name
 
@@ -31,7 +31,7 @@ example, in Nextcloud clear "Ignore hidden files" (Settings -> General), and for
 other clients remove any `.*` entry from the ignore/exclude list.
 
 One-way boundary: a vault this version **creates** (in `SeaVaultData`) is not
-located by SeaVault 0.15.0 or older on another device — that client looks only for
+located by open-seavault-rclone 0.15.0 or older on another device — that client looks only for
 `.seavault` and fails to find a vault (its actual message is a not-found error,
 `open <root>/.seavault/vault.json: no such file or directory`, verified against the
 0.15.0 build) rather than corrupting anything. Upgrade every device before
@@ -44,7 +44,7 @@ keep one and remove or rename the other.
 Profiles are local aliases that avoid repeating long cloud-sync paths.
 
 ```bash
-seavault profile add work-cloud "~/OneDrive - Example Org/SeaVault"
+seavault profile add work-cloud "~/OneDrive - Example Org/open-seavault-rclone"
 seavault put work-cloud ./budget.xlsx finance/budget.xlsx
 ```
 

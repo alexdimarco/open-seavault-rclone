@@ -202,7 +202,7 @@ func SuggestedVaultPaths() []string {
 		}
 	}
 	add(filepath.Join(home, "Nextcloud", "seavault"))
-	add(filepath.Join(home, "SeaVault"))
+	add(filepath.Join(home, "open-seavault-rclone"))
 	sort.Strings(out)
 	return out
 }

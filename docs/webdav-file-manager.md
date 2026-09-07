@@ -1,10 +1,10 @@
 # Built-in WebDAV file manager
 
-SeaVault includes an in-app WebDAV client/file manager so users do not need Finder, Windows Explorer, GNOME Files, KDE Dolphin, davfs2, WinFsp, macFUSE, FUSE, or another operating-system WebDAV client for the default workflow.
+open-seavault-rclone includes an in-app WebDAV client/file manager so users do not need Finder, Windows Explorer, GNOME Files, KDE Dolphin, davfs2, WinFsp, macFUSE, FUSE, or another operating-system WebDAV client for the default workflow.
 
 ## Model
 
-SeaVault still stores encrypted data in the vault directory:
+open-seavault-rclone still stores encrypted data in the vault directory:
 
 ```text
 <vault>/.seavault/vault.json

@@ -684,7 +684,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s.guiAuthEnabled() {
 			sess, ok := s.sessionOf(r)
 			if !ok || !sess.loggedIn {
-				http.Error(w, "SeaVault GUI login is required", http.StatusUnauthorized)
+				http.Error(w, "open-seavault-rclone GUI login is required", http.StatusUnauthorized)
 				return
 			}
 			s.refreshSessionCookie(w, r, sess)
@@ -809,7 +809,7 @@ func (s *Server) serveAuthorized(w http.ResponseWriter, r *http.Request) {
 	// CSRF: a state-changing API call must present the CSRF token, compared in
 	// constant time. step 6.
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-SeaVault-Token")), []byte(s.tokenValue())) != 1 {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-open-seavault-rclone-Token")), []byte(s.tokenValue())) != 1 {
 			writeJSON(w, http.StatusForbidden, apiError{Error: "invalid browser session token"})
 			return
 		}
@@ -1094,20 +1094,20 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	} else {
 		stored, err := keychain.Get(guiAuthAccount)
 		if err != nil {
-			s.handleLoginPage(w, r, "GUI login is using a legacy OS-keychain password, but SeaVault could not read it. Use Reset password and app configuration, then set the GUI login password again. Keychain detail: "+err.Error())
+			s.handleLoginPage(w, r, "GUI login is using a legacy OS-keychain password, but open-seavault-rclone could not read it. Use Reset password and app configuration, then set the GUI login password again. Keychain detail: "+err.Error())
 			return
 		}
 		passOK = subtle.ConstantTimeCompare([]byte(password), []byte(stored)) == 1
 	}
 	if !userOK || !passOK {
-		s.handleLoginPage(w, r, "Invalid SeaVault GUI username or password.")
+		s.handleLoginPage(w, r, "Invalid open-seavault-rclone GUI username or password.")
 		return
 	}
 	// Success sets loggedIn on the EXISTING session (created by the launch
 	// redemption); no new cookie is issued. step 5.
 	c, err := r.Cookie(guiSessionCookie)
 	if err != nil || strings.TrimSpace(c.Value) == "" {
-		s.handleLoginPage(w, r, "Your SeaVault session has expired. Open the launch link printed by seavault gui again.")
+		s.handleLoginPage(w, r, "Your open-seavault-rclone session has expired. Open the launch link printed by seavault gui again.")
 		return
 	}
 	now := time.Now()
@@ -1116,7 +1116,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !ok || now.After(sess.expires) {
 		delete(s.authSessions, c.Value)
 		s.mu.Unlock()
-		s.handleLoginPage(w, r, "Your SeaVault session has expired. Open the launch link printed by seavault gui again.")
+		s.handleLoginPage(w, r, "Your open-seavault-rclone session has expired. Open the launch link printed by seavault gui again.")
 		return
 	}
 	sess.loggedIn = true
@@ -1200,12 +1200,12 @@ func (s *Server) handleResetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// CSRF gate (a session cookie is already required to reach here)..
 	if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
-		s.handleResetConfigPage(w, r, "This reset request was blocked because it did not originate from the SeaVault page (cross-site request).", "")
+		s.handleResetConfigPage(w, r, "This reset request was blocked because it did not originate from the open-seavault-rclone page (cross-site request).", "")
 		return
 	}
 	if origin := r.Header.Get("Origin"); origin != "" {
 		if u, err := url.Parse(origin); err != nil || u.Host == "" || !loopback.HostAllowed(u.Host, s.AllowedHosts) {
-			s.handleResetConfigPage(w, r, "This reset request was blocked because its Origin is not a SeaVault loopback address.", "")
+			s.handleResetConfigPage(w, r, "This reset request was blocked because its Origin is not a open-seavault-rclone loopback address.", "")
 			return
 		}
 	}
@@ -3152,7 +3152,7 @@ func keychainUnavailableMessage(st keychain.Status) string {
 	if len(st.Missing) > 0 {
 		msg += " Missing: " + strings.Join(st.Missing, ", ") + "."
 	}
-	msg += " Enter the vault password manually, or set SEAVAULT_PASSWORD before launching SeaVault."
+	msg += " Enter the vault password manually, or set SEAVAULT_PASSWORD before launching open-seavault-rclone."
 	return msg
 }
 
@@ -3221,7 +3221,7 @@ var loginPage = template.Must(template.New("login").Parse(`<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/assets/svlogo/favicon-180.png">
-<title>SeaVault Login</title>
+<title>open-seavault-rclone Login</title>
 <style>
 :root { color-scheme: light dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --bg:#f7f7f5; --fg:#111827; --panel:#ffffff; --border:#d1d5db; --button:#fff1e8; --button-border:#e3b6a5; --danger:#b42318; }
 @media (prefers-color-scheme: dark) { :root { --bg:#0f1117; --fg:#f9fafb; --panel:#171a22; --border:#3b4252; --button:#33251f; --button-border:#704f43; } }
@@ -3238,8 +3238,8 @@ small { color:#4b5563; }
 </head>
 <body>
 <main>
-  <h1>SeaVault login</h1>
-  <p>Enter the local GUI username and password configured in SeaVault settings.</p>
+  <h1>open-seavault-rclone login</h1>
+  <p>Enter the local GUI username and password configured in open-seavault-rclone settings.</p>
   {{if .Message}}<p class="error">{{.Message}}</p>{{end}}
   <form method="post" action="/login" autocomplete="on">
     <label>Username <input name="username" autocomplete="username" autofocus required></label>
@@ -3247,7 +3247,7 @@ small { color:#4b5563; }
     <button type="submit">Log in</button>
   </form>
   <p><a class="button" href="/reset-config">Reset password and app configuration</a> <a class="button" href="/help">Help</a></p>
-  <p><small>Use reset if the configured GUI password is unavailable or the browser has a stale session. Logout clears the SeaVault browser session and local site storage for this origin.</small></p>
+  <p><small>Use reset if the configured GUI password is unavailable or the browser has a stale session. Logout clears the open-seavault-rclone browser session and local site storage for this origin.</small></p>
 </main>
 </body>
 </html>`))
@@ -3260,7 +3260,7 @@ var noSessionPage = template.Must(template.New("no-session").Parse(`<!doctype ht
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="/favicon.ico">
-<title>SeaVault session required</title>
+<title>open-seavault-rclone session required</title>
 <style>
 :root { color-scheme: light dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --bg:#f7f7f5; --fg:#111827; --panel:#ffffff; --border:#d1d5db; --muted:#4b5563; }
 @media (prefers-color-scheme: dark) { :root { --bg:#0f1117; --fg:#f9fafb; --panel:#171a22; --border:#3b4252; --muted:#cbd5e1; } }
@@ -3274,13 +3274,13 @@ small { color:var(--muted); }
 </head>
 <body>
 <main>
-  <h1>SeaVault session required</h1>
+  <h1>open-seavault-rclone session required</h1>
 {{if .CookieBlocked}}
-  <p>Your browser is <strong>not storing</strong> the SeaVault session cookie for <code>127.0.0.1</code>/<code>localhost</code>. Allow cookies for this address, then open the launch link again.</p>
+  <p>Your browser is <strong>not storing</strong> the open-seavault-rclone session cookie for <code>127.0.0.1</code>/<code>localhost</code>. Allow cookies for this address, then open the launch link again.</p>
   <p><small>Private-mode or cookie-blocking settings for local addresses prevent the GUI from keeping you signed in.</small></p>
 {{else}}
   <p>This page is only reachable through the launch link that <code>seavault gui</code> prints when it starts. Open that link (it looks like <code>http://127.0.0.1:8787/?launch=&hellip;</code>) to start a session.</p>
-  <p>Close this tab and start SeaVault again; it will open the app for you.</p>
+  <p>Close this tab and start open-seavault-rclone again; it will open the app for you.</p>
   <p><small>The launch link is printed to the terminal on every start; bookmarks to the bare address no longer open the app by design.</small></p>
 {{end}}
 </main>
@@ -3294,7 +3294,7 @@ var resetConfigPage = template.Must(template.New("reset-config").Parse(`<!doctyp
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/assets/svlogo/favicon-180.png">
-<title>Reset SeaVault configuration</title>
+<title>Reset open-seavault-rclone configuration</title>
 <style>
 :root { color-scheme: light dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --bg:#f7f7f5; --fg:#111827; --panel:#ffffff; --border:#d1d5db; --button:#fff1e8; --button-border:#e3b6a5; --danger:#b42318; --muted:#4b5563; }
 @media (prefers-color-scheme: dark) { :root { --bg:#0f1117; --fg:#f9fafb; --panel:#171a22; --border:#3b4252; --button:#33251f; --button-border:#704f43; --muted:#cbd5e1; } }
@@ -3312,17 +3312,17 @@ small { color:var(--muted); }
 </head>
 <body>
 <main>
-  <h1>Reset SeaVault password and app configuration</h1>
+  <h1>Reset open-seavault-rclone password and app configuration</h1>
   {{if .Message}}<p class="message">{{.Message}}</p>{{end}}
-  <p class="warning">This resets only the local SeaVault application configuration and GUI login password. It does not delete encrypted vault data, saved vault locations, vault passwords, SSH keys, or remote repository profiles.</p>
+  <p class="warning">This resets only the local open-seavault-rclone application configuration and GUI login password. It does not delete encrypted vault data, saved vault locations, vault passwords, SSH keys, or remote repository profiles.</p>
   <form method="post" action="/reset-config" autocomplete="off">
     <input type="hidden" name="nonce" value="{{.Nonce}}">
     <label>Type RESET to confirm <input name="confirm" autocomplete="off" required></label>
     <button type="submit">Reset password and app configuration</button>
-    {{if .LaunchURL}}<a class="button" href="{{.LaunchURL}}">Back to SeaVault</a>{{else}}<a class="button" href="/login">Back to login</a>{{end}}
+    {{if .LaunchURL}}<a class="button" href="{{.LaunchURL}}">Back to open-seavault-rclone</a>{{else}}<a class="button" href="/login">Back to login</a>{{end}}
     <a class="button" href="/help">Help</a>
   </form>
-  <p><small>After reset, reload SeaVault and configure HTTP/HTTPS, GUI login, logging, runtime sources, and certificate settings again.</small></p>
+  <p><small>After reset, reload open-seavault-rclone and configure HTTP/HTTPS, GUI login, logging, runtime sources, and certificate settings again.</small></p>
 </main>
 </body>
 </html>`))
@@ -3334,7 +3334,7 @@ var helpPage = template.Must(template.New("help").Parse(`<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <link rel="icon" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/assets/svlogo/favicon-180.png">
-<title>SeaVault Help</title>
+<title>open-seavault-rclone Help</title>
 <style>
 :root { color-scheme: light dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --bg:#f7f7f5; --fg:#111827; --panel:#ffffff; --panel-2:#f3f4f6; --border:#d1d5db; --muted:#4b5563; --button:#fff1e8; --button-border:#e3b6a5; }
 @media (prefers-color-scheme: dark) { :root { --bg:#0f1117; --fg:#f9fafb; --panel:#171a22; --panel-2:#111827; --border:#3b4252; --muted:#cbd5e1; --button:#33251f; --button-border:#704f43; } }
@@ -3355,8 +3355,8 @@ small, .hint { color:var(--muted); }
 </head>
 <body>
 <header>
-  <h1>SeaVault help</h1>
-  <p class="hint">Step-by-step reference for the local SeaVault GUI, settings, runtime dependencies, and recovery options.</p>
+  <h1>open-seavault-rclone help</h1>
+  <p class="hint">Step-by-step reference for the local open-seavault-rclone GUI, settings, runtime dependencies, and recovery options.</p>
   <nav aria-label="Help sections">
     <a href="/">Main app</a>{{if .AuthEnabled}}<a href="/logout">Logout</a>{{end}}<a href="/reset-config">Reset password/config</a>
     <a href="#start">How to start</a><a href="#vaults">Vaults</a><a href="#upload">Upload</a><a href="#webdav">WebDAV</a><a href="#remotes">Remote vaults</a><a href="#settings">Settings</a><a href="#security">Security</a><a href="#disclaimer">Disclaimer</a>
@@ -3366,13 +3366,13 @@ small, .hint { color:var(--muted); }
   <div class="help-grid">
     <section id="start" class="help-box full">
       <h2>How to start</h2>
-      <p>SeaVault creates an encrypted vault folder. The safest first test is a small local vault on a local disk before using cloud sync or remote repositories.</p>
+      <p>open-seavault-rclone creates an encrypted vault folder. The safest first test is a small local vault on a local disk before using cloud sync or remote repositories.</p>
       <h3>Create a vault on a local disk</h3>
       <ol>
         <li>Create or choose an empty local folder, for example <code>~/SeaVaults/work</code> on Linux/macOS or <code>C:\Users\you\SeaVaults\work</code> on Windows.</li>
         <li>Open the main app and enter that path in the vault path field.</li>
         <li>Enter a strong vault password. Store it in your password manager. Losing this password can make the encrypted data unrecoverable.</li>
-        <li>Select <strong>Create vault and open</strong>. SeaVault creates the protected <code>content/</code> workspace inside the vault.</li>
+        <li>Select <strong>Create vault and open</strong>. open-seavault-rclone creates the protected <code>content/</code> workspace inside the vault.</li>
         <li>Upload a small test file, verify that it appears in WebDAV files, then download or export it to confirm recovery works.</li>
         <li>After the test succeeds, move the vault folder into a cloud sync folder only if that sync client is trusted for your use case.</li>
       </ol>
@@ -3381,22 +3381,22 @@ small, .hint { color:var(--muted); }
         <li>Create and test a local vault first. Remote repositories move encrypted vault objects, but the vault password still controls decryption.</li>
         <li>Install or configure rclone from <strong>Settings</strong> and confirm the dependency status is healthy.</li>
         <li>Create an rclone remote with the rclone configuration workflow for the storage target.</li>
-        <li>Return to SeaVault and add a remote repository profile that points to the tested rclone remote path.</li>
+        <li>Return to open-seavault-rclone and add a remote repository profile that points to the tested rclone remote path.</li>
         <li>Use <strong>Dry run</strong> or <strong>Check</strong> first, then use <strong>Push</strong> to upload encrypted vault data or <strong>Pull</strong> to restore it.</li>
       </ol>
       <h3>Amazon storage through rclone</h3>
       <ol>
-        <li>For Amazon object storage, configure rclone with an S3-compatible remote and a bucket/path dedicated to SeaVault encrypted data.</li>
+        <li>For Amazon object storage, configure rclone with an S3-compatible remote and a bucket/path dedicated to open-seavault-rclone encrypted data.</li>
         <li>Use least-privilege AWS credentials limited to that bucket or prefix. Avoid using administrator credentials.</li>
         <li>Amazon EBS is block storage and is not normally an rclone remote by itself. To use EBS, mount it on a host and use a local path or expose it through a supported protocol.</li>
-        <li>Run rclone <code>ls</code>, <code>copy --dry-run</code>, or SeaVault remote <strong>Check</strong> before using it for production data.</li>
+        <li>Run rclone <code>ls</code>, <code>copy --dry-run</code>, or open-seavault-rclone remote <strong>Check</strong> before using it for production data.</li>
       </ol>
       <h3>SSH/SFTP remote through rclone</h3>
       <ol>
         <li>Generate or import an SSH key from the <strong>SSH keys</strong> settings section.</li>
         <li>Install the public key on the server account that will hold the encrypted remote repository.</li>
         <li>Create an rclone SFTP remote using that key and a locked-down server path.</li>
-        <li>Add the SFTP remote path as a SeaVault remote repository profile, then test with <strong>Dry run</strong> and <strong>Check</strong>.</li>
+        <li>Add the SFTP remote path as a open-seavault-rclone remote repository profile, then test with <strong>Dry run</strong> and <strong>Check</strong>.</li>
       </ol>
     </section>
     <section id="vaults" class="help-box">
@@ -3443,7 +3443,7 @@ small, .hint { color:var(--muted); }
         <li><strong>Local dependencies:</strong> shows OS keychain, WSL, rsync, rclone, and other local runtime checks.</li>
         <li><strong>WebDAV details:</strong> shows current WebDAV mode, path, URL, and file-manager state.</li>
         <li><strong>GUI protocol and certificate:</strong> choose HTTP or HTTPS. HTTPS uses the configured certificate files or app-managed self-signed certificate files.</li>
-        <li><strong>GUI user and password:</strong> set local browser login. SeaVault stores a salted Argon2id password verifier in the local app configuration, not the plaintext password. Logout clears the browser session for this origin.</li>
+        <li><strong>GUI user and password:</strong> set local browser login. open-seavault-rclone stores a salted Argon2id password verifier in the local app configuration, not the plaintext password. Logout clears the browser session for this origin.</li>
         <li><strong>Reset password and app configuration:</strong> clears the GUI login and local app config when a password is lost or settings need to return to defaults.</li>
         <li><strong>Log settings:</strong> controls maximum in-memory entries, optional local log file path, persistent logging, manual save, and clear.</li>
         <li><strong>Runtime and WSL sources:</strong> sets rclone channel, rsync source URLs, managed runtime URL, and WSL install/update source.</li>
@@ -3464,9 +3464,9 @@ small, .hint { color:var(--muted); }
     </section>
     <section id="disclaimer" class="help-box full">
       <h2>7. Disclaimer and user responsibility</h2>
-      <p>SeaVault is provided without warranty. The developer is not responsible for data loss, security incidents, service outages, incorrect configuration, failed backups, failed restores, account charges, remote-provider issues, credential exposure, regulatory consequences, or any other loss or damage arising from use of the app.</p>
+      <p>open-seavault-rclone is provided without warranty. The developer is not responsible for data loss, security incidents, service outages, incorrect configuration, failed backups, failed restores, account charges, remote-provider issues, credential exposure, regulatory consequences, or any other loss or damage arising from use of the app.</p>
       <p>By using the app, the user assumes all responsibility for configuration, passwords, keys, storage choices, backup validation, restore testing, legal and regulatory suitability, and operational risk.</p>
-      <p>Before using SeaVault with important data, test vault creation, upload, export, remote push, remote pull, and restore on non-critical sample data.</p>
+      <p>Before using open-seavault-rclone with important data, test vault creation, upload, export, remote push, remote pull, and restore on non-critical sample data.</p>
     </section>
   </div>
 </main>
@@ -3480,7 +3480,7 @@ var page = template.Must(template.New("page").Parse(`<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <link rel="icon" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/assets/svlogo/favicon-180.png">
-<title>SeaVault Fast | Crescendum</title>
+<title>open-seavault-rclone | Crescendum</title>
 <style>
 :root {
   color-scheme: light dark;
@@ -3707,7 +3707,7 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
   <div class="header-row">
     <div class="header-main">
       <div class="brand-lockup">
-        <img class="brand-logo-img" src="/assets/svlogo/logo.png" alt="SeaVault Fast">
+        <img class="brand-logo-img" src="/assets/svlogo/logo.png" alt="open-seavault-rclone">
         <div class="brand-copy">
           <div class="brand-eyebrow"><a href="https://crescendum.ca" target="_blank" rel="noopener noreferrer">Crescendum secure workspace</a></div>
           <h1 class="brand-title">Encrypted File Storage</h1>
@@ -3736,7 +3736,7 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
 <div class="content">
 <section id="files-panel">
   <h2>WebDAV file manager</h2>
-  <p class="hint">This is SeaVault's built-in WebDAV client. It talks to the local same-origin WebDAV endpoint and does not depend on Finder, Windows Explorer, GNOME Files, KDE Dolphin, davfs2, WinFsp, macFUSE, or FUSE.</p>
+  <p class="hint">This is open-seavault-rclone's built-in WebDAV client. It talks to the local same-origin WebDAV endpoint and does not depend on Finder, Windows Explorer, GNOME Files, KDE Dolphin, davfs2, WinFsp, macFUSE, or FUSE.</p>
   <p class="row-actions">
     <button class="operation" onclick="refreshDavFiles()">Refresh folder</button>
     <button class="secondary operation" onclick="closeVaultFromWebDAV()">Close vault</button>
@@ -4011,7 +4011,7 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
 
 <section id="managed-tools-panel">
   <h2>Managed rsync runtime</h2>
-  <p class="hint">Managed rsync is optional. SeaVault works without it by using native Go import. Installing managed rsync only affects local path ingest, not browser uploads or rclone remote transport.</p>
+  <p class="hint">Managed rsync is optional. open-seavault-rclone works without it by using native Go import. Installing managed rsync only affects local path ingest, not browser uploads or rclone remote transport.</p>
   <div class="form-grid">
     <label>Version
       <input id="rsyncVersion" placeholder="latest upstream source release or 3.4.2" autocomplete="off">
@@ -4019,15 +4019,15 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
     </label>
     <label>Register existing rsync binary
       <input id="rsyncFromBinary" placeholder="/usr/bin/rsync" autocomplete="off">
-      <small>Copies a verified existing rsync into SeaVault's managed runtime folder.</small>
+      <small>Copies a verified existing rsync into open-seavault-rclone's managed runtime folder.</small>
     </label>
     <label>Offline runtime ZIP
       <input id="rsyncOfflineArchive" placeholder="/path/to/seavault-rsync-runtime.zip" autocomplete="off">
-      <small>Use an enterprise-built SeaVault rsync runtime archive.</small>
+      <small>Use an enterprise-built open-seavault-rclone rsync runtime archive.</small>
     </label>
     <label>Runtime base URL
       <input id="rsyncRuntimeBaseURL" placeholder="optional enterprise runtime URL" autocomplete="off">
-      <small>Advanced. Direct upstream rsync is source-first, so binary runtime artifacts should come from a controlled SeaVault build channel.</small>
+      <small>Advanced. Direct upstream rsync is source-first, so binary runtime artifacts should come from a controlled open-seavault-rclone build channel.</small>
     </label>
   </div>
   <p class="row-actions">
@@ -4129,7 +4129,7 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
       </div>
       <p id="guiAuthStatus" class="hint">GUI login status will appear after settings load.</p>
       <p class="row-actions"><button class="danger" onclick="clearGuiLogin()">Clear GUI login</button><a class="settings-button danger" href="/reset-config">Reset password and app configuration</a></p>
-      <p class="hint">SeaVault stores a salted Argon2id password verifier in local app configuration, not the plaintext password. This avoids OS-keychain dependency failures for GUI login. Use Reset password and app configuration if the GUI password is lost or the saved configuration should be restored to defaults.</p>
+      <p class="hint">open-seavault-rclone stores a salted Argon2id password verifier in local app configuration, not the plaintext password. This avoids OS-keychain dependency failures for GUI login. Use Reset password and app configuration if the GUI password is lost or the saved configuration should be restored to defaults.</p>
     </div>
     <div class="settings-box">
       <h3>Log settings</h3>
@@ -4192,7 +4192,7 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
 
 <script>
 let token = document.documentElement.dataset.token;
-let jsonHeaders = {'Content-Type':'application/json','X-SeaVault-Token':token};
+let jsonHeaders = {'Content-Type':'application/json','X-open-seavault-rclone-Token':token};
 let activeController = null;
 let activeCancelled = false;
 let lastStatus = null;
@@ -4202,7 +4202,7 @@ let selectedDavIsDir = false;
 let appLog = [];
 let appConfig = null;
 let pendingVaultOpen = null;
-function updateSessionToken(t){ if(t && t !== token){ token = t; document.documentElement.dataset.token = t; jsonHeaders = {'Content-Type':'application/json','X-SeaVault-Token':token}; } }
+function updateSessionToken(t){ if(t && t !== token){ token = t; document.documentElement.dataset.token = t; jsonHeaders = {'Content-Type':'application/json','X-open-seavault-rclone-Token':token}; } }
 function $(id){ return document.getElementById(id); }
 function setProgress(done, total, text){ const p=$('progress'); p.max=Math.max(1,total||1); p.value=Math.min(p.max,done||0); $('progressText').innerHTML='<small>'+esc(text||'')+'</small>'; }
 function setProgressIndeterminate(text){ const p=$('progress'); p.removeAttribute('value'); p.max=1; $('progressText').innerHTML='<small>'+esc(text||'')+'</small>'; }
@@ -4244,10 +4244,10 @@ function cancelActive(){ if(activeController){ activeCancelled=true; activeContr
 function clearOutput(){ $('message').className=''; $('message').textContent='Ready.'; setProgress(0,1,'No active operation.'); }
 async function api(path, opts){
   opts = opts || {};
-  if(opts.method && opts.method !== 'GET') opts.headers = Object.assign({}, opts.headers || {}, {'X-SeaVault-Token': token});
+  if(opts.method && opts.method !== 'GET') opts.headers = Object.assign({}, opts.headers || {}, {'X-open-seavault-rclone-Token': token});
   let res;
   try { res = await fetch(path, opts); }
-  catch(err) { throw new Error('The browser could not reach the local SeaVault GUI service. Confirm the seavault gui process is still running, then refresh this tab. Browser detail: ' + (err && err.message ? err.message : err)); }
+  catch(err) { throw new Error('The browser could not reach the local open-seavault-rclone GUI service. Confirm the seavault gui process is still running, then refresh this tab. Browser detail: ' + (err && err.message ? err.message : err)); }
   const ct = res.headers.get('content-type') || '';
   let body;
   if(ct.indexOf('application/json') >= 0){ body = await res.json(); } else { body = await res.text(); }
@@ -4692,8 +4692,8 @@ function startBrowserHeartbeat(){
     // The browser-session stream authenticates by the GUI session cookie; the
     // CSRF token is no longer placed in the URL. See.
     const session = new EventSource('/api/browser-session');
-    session.onopen = () => appendLog('Browser session monitor connected', 'SeaVault will stop after this browser page closes when exit-on-browser-close is enabled.', 'success');
-    session.onerror = () => appendLog('Browser session monitor disconnected', 'SeaVault will stop shortly if no browser page reconnects.', 'warning');
+    session.onopen = () => appendLog('Browser session monitor connected', 'open-seavault-rclone will stop after this browser page closes when exit-on-browser-close is enabled.', 'success');
+    session.onerror = () => appendLog('Browser session monitor disconnected', 'open-seavault-rclone will stop shortly if no browser page reconnects.', 'warning');
     window.addEventListener('beforeunload', () => session.close());
   } catch(err) {
     appendLog('Browser session monitor unavailable', err && err.message ? err.message : String(err), 'warning');
@@ -4806,7 +4806,7 @@ async function uploadFiles(inputId, preserveFolders){
       }
       const batchLabel = 'batch ' + (b+1) + ' of ' + batches.length + ', files ' + (completedFiles+1) + '-' + (completedFiles+batch.length) + ' of ' + files.length;
       setProgress(totalBytes > 0 ? completedBytes : completedFiles, totalBytes > 0 ? totalBytes : files.length, uploadProgressText('Uploading', completedBytes, totalBytes, batchLabel));
-      const res = await uploadRequest('POST', '/api/upload', fd, {'X-SeaVault-Token':token}, ctl.signal, loaded => {
+      const res = await uploadRequest('POST', '/api/upload', fd, {'X-open-seavault-rclone-Token':token}, ctl.signal, loaded => {
         const sent = completedBytes + Math.min(loaded || 0, batchBytes || loaded || 0);
         setProgress(totalBytes > 0 ? sent : completedFiles, totalBytes > 0 ? totalBytes : files.length, uploadProgressText('Uploading', sent, totalBytes, batchLabel));
       });
@@ -4914,7 +4914,7 @@ function davPathFromHref(href){
 async function davFetch(method, p, opts){
   opts = opts || {};
   opts.method = method;
-  opts.headers = Object.assign({}, opts.headers || {}, {'X-SeaVault-Token': token});
+  opts.headers = Object.assign({}, opts.headers || {}, {'X-open-seavault-rclone-Token': token});
   const res = await fetch(davURL(p), opts);
   if(!res.ok) throw new Error(await res.text() || res.statusText);
   return res;
@@ -5025,9 +5025,9 @@ async function downloadSelectedDavZip(){
     // Mint a single-use ticket, then navigate to the download; the CSRF token
     // never rides in the download URL. See.
     const res = await api('/api/export-zip/ticket', {method:'POST', headers:jsonHeaders, body:JSON.stringify({path: selectedDavPath})});
-    if(!res || !res.ticket){ showError('ZIP download failed', 'The local SeaVault server did not return an export ticket.'); return; }
+    if(!res || !res.ticket){ showError('ZIP download failed', 'The local open-seavault-rclone server did not return an export ticket.'); return; }
     window.location = '/api/export-zip?ticket=' + encodeURIComponent(res.ticket);
-    showHuman('ZIP download started', 'The selected folder is being streamed as a ZIP download by the local SeaVault server.');
+    showHuman('ZIP download started', 'The selected folder is being streamed as a ZIP download by the local open-seavault-rclone server.');
   } catch(e){ showError('ZIP download failed', e.message); }
 }
 async function renameSelectedDav(){
@@ -5107,7 +5107,7 @@ async function uploadDavItems(items){
       }
       const fileSize = (item.file && item.file.size) || 0;
       setProgress(totalBytes > 0 ? completedBytes : i, totalBytes > 0 ? totalBytes : items.length, uploadProgressText('Uploading', completedBytes, totalBytes, (i+1) + ' of ' + items.length + ': ' + rel));
-      const res = await uploadRequest('PUT', davURL(dest), item.file, {'X-SeaVault-Token':token}, ctl.signal, loaded => {
+      const res = await uploadRequest('PUT', davURL(dest), item.file, {'X-open-seavault-rclone-Token':token}, ctl.signal, loaded => {
         const sent = completedBytes + Math.min(loaded || 0, fileSize || loaded || 0);
         setProgress(totalBytes > 0 ? sent : i, totalBytes > 0 ? totalBytes : items.length, uploadProgressText('Uploading', sent, totalBytes, (i+1) + ' of ' + items.length + ': ' + rel));
       });
@@ -5395,7 +5395,7 @@ document.addEventListener('keydown', ev => {
 });
 reportBrowserSupport();
 startBrowserHeartbeat();
-appendLog('SeaVault GUI started','Ready.'); refreshStatus(); loadAppConfig(); rsyncStatus(false); rcloneStatus(false); loadRemotes(); loadSSHKeys();
+appendLog('open-seavault-rclone GUI started','Ready.'); refreshStatus(); loadAppConfig(); rsyncStatus(false); rcloneStatus(false); loadRemotes(); loadSSHKeys();
 </script>
 </body>
 </html>`))
