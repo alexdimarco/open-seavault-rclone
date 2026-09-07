@@ -30,3 +30,15 @@ seavault remote config validate
 ```
 
 Provider credentials are stored outside the vault. Where possible, use OS keychain or provider-specific short-lived credentials.
+
+## Placement caveats (single source of truth)
+
+The per-provider placement caveats the setup wizard shows inline (for example
+OneDrive Files On-Demand, or iCloud "Optimize Storage" evicting local copies)
+are authored in code, in `internal/setup/providers.go`, as the one caveat
+catalog (`Provider` → caveat text). That table — not this document — is the
+authoritative source consumed by the CLI wizard, the GUI stepper, and the
+`internal/setup.DetectSyncFolders` detector, so a caveat is written and updated
+in exactly one place (design `docs/design-setup-wizard.md` §4, review condition
+C7). Box, pCloud and MEGA are intentionally absent from the wizard's provider
+enum until each has a verified caveat.

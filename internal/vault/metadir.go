@@ -63,9 +63,18 @@ func isMetadataDirName(segment string) bool {
 // bare "Sync" token (too generic).
 var syncClientFolderNames = []string{"Nextcloud", "ownCloud", "OneDrive", "Dropbox", "Google Drive", "iCloud Drive", "Syncthing"}
 
+// orgSuffixedSyncPrefixes are the stems of the macOS Library/CloudStorage
+// folder names, which the sync clients suffix with the account/organization
+// (e.g. "OneDrive-Personal", "GoogleDrive-you@example.com", "Box-Acme"). A path
+// segment that begins with one of these stems (followed by the "-" separator)
+// is a sync-client folder, so the preflight note fires for exactly the
+// org-suffixed folders the setup wizard recommends (C4).
+var orgSuffixedSyncPrefixes = []string{"OneDrive-", "GoogleDrive-", "Box-"}
+
 // hasSyncClientSegment reports whether any path SEGMENT of root equals a known
-// sync-client folder name, case-insensitively (matcher shape reused
-// from userpath's segment-wise comparison).
+// sync-client folder name (case-insensitively), OR begins with one of the
+// org-suffixed CloudStorage stems (C4). The matcher shape is reused from
+// userpath's segment-wise comparison.
 func hasSyncClientSegment(root string) bool {
 	for _, seg := range strings.Split(filepath.ToSlash(root), "/") {
 		if seg == "" {
@@ -73,6 +82,14 @@ func hasSyncClientSegment(root string) bool {
 		}
 		for _, name := range syncClientFolderNames {
 			if strings.EqualFold(seg, name) {
+				return true
+			}
+		}
+		for _, prefix := range orgSuffixedSyncPrefixes {
+			// Require a real suffix after the stem: the bare "OneDrive" form is
+			// already covered by the exact-match list above, so a prefix hit only
+			// adds the org-suffixed "OneDrive-Personal" shape.
+			if len(seg) > len(prefix) && strings.EqualFold(seg[:len(prefix)], prefix) {
 				return true
 			}
 		}
