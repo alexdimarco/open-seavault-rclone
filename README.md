@@ -4,7 +4,31 @@ open-seavault-rclone is a cross-platform prototype for client-side encrypted sto
 
 This repository is a working MVP, not an audited production replacement for Cryptomator.
 
+## Quick start
 
+New here? Run the guided wizard:
+
+```bash
+seavault setup
+```
+
+Its first question is where the vault should live. If it finds a cloud-sync folder on your machine — Dropbox, OneDrive, iCloud Drive, Google Drive, Nextcloud, or Syncthing — it offers to put the vault **inside that folder**. That is the easiest setup and needs no rclone, no remote, and no transport to configure: the vault is just encrypted files in a plain directory, so the sync client you already run uploads it for you (the wizard shows the provider's placement caveat — for example keeping the folder available offline — and asks you to confirm your client shows it uploading; it never claims "synced" on its own). With no sync client it falls back to `~/open-seavault-rclone/MyVault`. It then takes a password, offers to remember it in your OS keychain and to create a recovery key, and opens the app. Advanced knobs stay one flag away — `seavault setup --expert` adds the KDF and chunk-size parameters (validated against the same floor as `init`).
+
+### Non-interactive setup (for scripts)
+
+Pass `--preset` for an unattended run and supply the password through `SEAVAULT_PASSWORD` — never on the command line:
+
+```bash
+export SEAVAULT_PASSWORD='your-password'
+# Inside a folder your own sync client already watches:
+seavault setup --preset synced-folder --vault ~/Dropbox/MyVault
+# Local-only vault (no cloud):
+seavault setup --preset local --vault ~/open-seavault-rclone/MyVault
+# An rclone remote that already exists (configured in rclone or imported):
+seavault setup --preset rclone --vault ~/open-seavault-rclone/MyVault --remote myremote --allow-download
+```
+
+A non-interactive run never generates a recovery key (a phrase nobody has seen must not be committed) — it prints the command to create one afterwards. `--preset rclone` refuses to fetch the rclone runtime unless you pass `--allow-download`, or install it offline first with `seavault rclone install --offline-archive <zip>` / `--from-binary <path>`. Add `--no-keychain`, `--profile NAME`, or `--no-open` as needed, and see `seavault setup --help`.
 
 ## License
 
@@ -366,6 +390,8 @@ Do not bind the GUI to a public or shared network interface.
 ## CLI overview
 
 ```bash
+seavault setup [--expert] [--no-keychain] [--profile NAME] [--no-open]
+seavault setup --preset synced-folder|rclone|local --vault PATH [--remote NAME] [--allow-download] [--no-keychain] [--profile NAME] [--no-open]
 seavault init [flags] VAULT_DIR
 seavault put [--method auto|native|managed-rsync|system-rsync|rsync] [flags] VAULT_DIR_OR_PROFILE SOURCE_PATH [VIRTUAL_PATH]
 seavault get [flags] VAULT_DIR_OR_PROFILE VIRTUAL_PATH DEST_PATH

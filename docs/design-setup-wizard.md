@@ -1,6 +1,6 @@
 # Design — Phase U1: the setup wizard (`seavault setup` + GUI first-run stepper)
 
-STATUS: Revision 2 — the 14 conditions of the pre-code review (`docs/review-setup-wizard-predesign.md`, GO_WITH_CONDITIONS) are applied below and in §9. Ready to build.
+STATUS: Built. Phase U1 shipped on `feature/setup-wizard` in four slices: S1 `internal/setup` detect/plan/execute (4c626f7), S2 the interactive wizard + `seavault setup` CLI (1592909), S3 the GUI first-run stepper + `/api/setup/*` (f756328), and S4 docs + final verification (this commit). The 14 conditions of the pre-code review (`docs/review-setup-wizard-predesign.md`, GO_WITH_CONDITIONS) are applied below and in §9; the T1–T15 matrix in §7 is implemented and the unfiltered `go test -race ./...` suite is green.
 
 ## 1. Goal and scope
 
