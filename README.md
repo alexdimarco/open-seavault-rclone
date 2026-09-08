@@ -69,6 +69,21 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 
 Vendored and bundled third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The GPL does not grant trademark rights: the **open-seavault-rclone** and **Crescendum** names, logos, icons, favicons, wordmarks, and visual identity remain reserved &mdash; see [TRADEMARKS.md](TRADEMARKS.md).
 
+## What changed in v0.18 (setup wizard)
+
+- **`seavault setup`** — a guided first-run wizard that gets a new user from nothing to a working,
+  recoverable vault with every default chosen: it detects Dropbox, OneDrive, iCloud Drive, Google
+  Drive, Nextcloud and Syncthing folders and offers "inside your synced folder" first (no transport
+  to configure), sets a password with an OS-keychain offer, runs the recovery-key ceremony
+  (deferrable, with print-before-re-type), and only asks about the cloud when nothing is synced.
+  `--expert` exposes the KDF and chunk knobs; `--preset synced-folder|rclone|local` with
+  `SEAVAULT_PASSWORD` is the scriptable form (idempotent rerun, `--json`, documented exit codes).
+- **GUI first-run stepper** — the app opens on the same guided steps when nothing is set up yet,
+  with a way back from "skip to advanced" and a persisted recovery-deferral reminder.
+- Fixes surfaced by the reviews: the rclone `RemoteTest` argv bug that failed every real remote,
+  atomic vault creation with leftover detection, profile-name collisions caught before anything is
+  written, and the recovery phrase file refused inside the vault or a cloud-synced folder.
+
 ## What changed in v0.17 (Phase A2 config-and-key layer)
 
 Phase A2 adds a config-and-key layer to the vault format without re-keying any manifest or rewriting any chunk. Every addition is an additive `omitempty` field on a `Version = 2` config, so the vault stays **openable by a v0.16 client throughout the grace release** — the format grows while the on-the-wire `Version` stays 2. The one deliberate, operator-triggered boundary is `seavault vault seal-format`.

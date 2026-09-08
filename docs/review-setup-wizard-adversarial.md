@@ -87,3 +87,19 @@ Each fix ships prove-fail → prove-pass per the repo's testing discipline; seve
 have a throwaway regression that can be promoted (kept, not deleted) — notably the profile-collision
 orphan assertion, the `SyncClientPreflightNote`-over-`DetectSyncRoots` T-row, and the recovery in-vault
 refusal test.
+
+---
+
+## Addendum — fix tranche (2026-09-07)
+
+All 14 confirmed findings are closed on `feature/setup-wizard` by the four fix-tranche commits
+(`a60aa1c` setup package + rclone transport, `4e5a701` CLI, `e42c1e5` GUI, `dab4d80` docs), each
+behaviour carrying a red-first regression test that an independent verifier re-proved red.
+Highlights: the recovery save-to-file now refuses an in-vault path and requires a second
+confirmation under a cloud-synced folder; the profile-name collision is caught in
+`Plan.Validate` and at the start of `Execute` before anything is created, and the keychain is
+written only after a successful profile add; the preflight matcher and the detector share one
+folder-name source so every detected root yields a note; a bare `~/Sync` no longer pre-answers
+"already synced"; the EOF consent default is now decline; the rclone `--log-format` token bug
+that failed every real RemoteTest is fixed with a real-binary test. Residuals documented in the
+design (I-S5 staging-in-synced-parent, symlinked provider roots accepted).

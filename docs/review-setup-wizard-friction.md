@@ -146,3 +146,18 @@ A verified rclone remote could not be exercised end-to-end (no managed/system rc
 a real backend in the isolated env). The rclone-preset gates, the consent refusal, and
 the (buggy) RemoteTest argv were all validated; a real put/get against a live remote
 remains a throwaway-remote lab drill (ALWAYS destroyed).
+
+---
+
+## Addendum — overseer disposition and fix tranche (2026-09-07)
+
+The report's verdict (SHIPPABLE_WITH_BACKLOG) was not accepted as-is: two Type II rows were
+treated as ship-blockers — the `--log-format level` correctness bug that failed every real
+RemoteTest, and the golden-path cloud step defaulting to "already watched by my sync client"
+with nothing detected. All 14 Type II rows are closed by the fix tranche (`a60aa1c`, `4e5a701`,
+`e42c1e5`, `dab4d80`): typed-error affordances (open-it-instead, remove-and-retry, suffixed
+profile name), the failure summary that names what was created, an idempotent `--preset` rerun
+and `--json` for fleets, the `--help`/usage contract, a way back from "skip to advanced", the
+persisted recovery-deferral reminder, the returning-user path deferred to U2, and the "Undo a
+setup" docs. Verdict after the tranche: **SHIPPABLE_WITH_BACKLOG** — the 23 Type III legibility
+items are the U2 polish backlog alongside the four-destination GUI restructure.

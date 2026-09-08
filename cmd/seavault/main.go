@@ -45,7 +45,7 @@ import (
 	"github.com/alexdimarco/open-seavault-rclone/internal/webui"
 )
 
-const version = "0.17.0"
+const version = "0.18.0"
 
 func main() {
 	if len(os.Args) < 2 {
