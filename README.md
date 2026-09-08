@@ -12,7 +12,7 @@ New here? Run the guided wizard:
 seavault setup
 ```
 
-Its first question is where the vault should live. If it finds a cloud-sync folder on your machine — Dropbox, OneDrive, iCloud Drive, Google Drive, Nextcloud, or Syncthing — it offers to put the vault **inside that folder** (iCloud Drive and Google Drive are detected on macOS and Windows only; Dropbox, OneDrive, Nextcloud and Syncthing on every platform). That is the easiest setup and needs no rclone, no remote, and no transport to configure: the vault is just encrypted files in a plain directory, so the sync client you already run uploads it for you (the wizard shows the provider's placement caveat — for example keeping the folder available offline — and asks you to confirm your client shows it uploading; it never claims "synced" on its own). The per-provider placement caveats are listed in [docs/cloud-provider-notes.md](docs/cloud-provider-notes.md). With no sync client it falls back to `~/open-seavault-rclone/MyVault`. It then takes a password, offers to remember it in your OS keychain and to create a recovery key, and opens the app. The recovery key is optional at that step — set it up now, or defer it; if you defer (and a non-interactive run always defers, because a phrase nobody has seen must not be committed) the wizard reminds you with the exact `seavault recovery generate` command to run later, and the app shows a dismissible "no recovery key" reminder for any open vault that has none. Advanced knobs stay one flag away — `seavault setup --expert` adds the KDF and chunk-size parameters (validated against the same floor as `init`).
+Its first question is where the vault should live. If it finds a cloud-sync folder on your machine — Dropbox, OneDrive, iCloud Drive, Google Drive, Nextcloud, or Syncthing — it offers to put the vault **inside that folder** (iCloud Drive and Google Drive are detected on macOS and Windows only; Dropbox, OneDrive, Nextcloud and Syncthing on every platform). That is the easiest setup and needs no rclone, no remote, and no transport to configure: the vault is just encrypted files in a plain directory, so the sync client you already run uploads it for you (the wizard shows the provider's placement caveat — for example keeping the folder available offline — and asks you to confirm your client shows it uploading; it never claims "synced" on its own). The cloud step is a **three-way question** — the vault reaches your cloud through a folder your own sync client already watches, through an existing rclone remote, or not at all (local / external-drive only); the wizard picks the safe local default when it detects no sync client, so accepting the defaults never tells you to check a client you do not run. The per-provider placement caveats are listed in [docs/cloud-provider-notes.md](docs/cloud-provider-notes.md). With no sync client it falls back to `~/open-seavault-rclone/MyVault`. It then takes a password, offers to remember it in your OS keychain and to create a recovery key, and opens the app. The recovery key is optional at that step — set it up now, or defer it; if you defer (and a non-interactive run always defers, because a phrase nobody has seen must not be committed) the wizard reminds you with the exact `seavault recovery generate` command to run later, and the app shows a dismissible "no recovery key" reminder for any open vault that has none. Advanced knobs stay one flag away — `seavault setup --expert` adds the KDF and chunk-size parameters (validated against the same floor as `init`).
 
 ### Non-interactive setup (for scripts)
 
@@ -42,6 +42,8 @@ seavault remote config import ~/.config/rclone/rclone.conf  # import an existing
 
 `--remote NAME` then names that existing remote. `--preset rclone` refuses to fetch the rclone runtime unless you pass `--allow-download`, or install it offline first with `seavault rclone install --offline-archive <zip>` / `--from-binary <path>`. See `seavault setup --help` for the full flag and exit-code contract.
 
+To confirm a remote is wired up, `seavault remote config validate [PATH]` checks a config file — by default the **managed** config at your app-data `rclone/rclone.conf` (the same file `seavault remote config import` writes and `seavault remote config export-redacted` reads back), or an explicit `PATH`. Point it at the managed path, not `~/.config/rclone/rclone.conf`, after an import-then-export round-trip.
+
 **Exit codes and idempotent re-runs (for fleets).** `seavault setup` exits **0** on success — and, under `--preset`, also exits **0** when a vault already exists at `--vault` and matches the requested plan (an idempotent no-op, so a provisioning loop can safely re-run the same command; it registers the profile if only that was missing). It exits **1** on failure: bad flags, a refused rclone download, an existing vault whose profile name already points at a *different* vault, or an error while creating the vault. Pass `--json` with `--preset` for a machine-readable result (vault ID, paths, and whether the vault already existed; never a secret) instead of the prose summary.
 
 ### Undo a setup
@@ -68,6 +70,66 @@ open-seavault-rclone is free software, licensed under the **GNU General Public L
 This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details. You are free to use, study, modify, and redistribute it under the terms of the GPL.
 
 Vendored and bundled third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The GPL does not grant trademark rights: the **open-seavault-rclone** and **Crescendum** names, logos, icons, favicons, wordmarks, and visual identity remain reserved &mdash; see [TRADEMARKS.md](TRADEMARKS.md).
+
+## What changed in v0.19 (four-destination GUI, word recovery phrases, operability polish)
+
+Phase U2 makes the product usable every day without hiding anything from an expert. It is pure
+UX/legibility over the unchanged v0.17 security mechanisms — no vault-format change, no change to
+the recovery read-back ceremony, the strict rollback gate, or the config-tamper/freshness checks.
+
+- **Word-based recovery phrases + a printable card.** A recovery phrase is now shown as **24
+  numbered words** by default (the BIP-39 English wordlist, vendored and license-recorded in
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)), with the base32 **compact form** beneath it.
+  The words and the compact form encode the **same** 256-bit secret — no re-wrap, no config change —
+  so a phrase written down in 0.15–0.18 keeps working, and a 24-word phrase can still be redeemed on
+  a 0.17 client through its compact form. Redeem and the read-back accept either form; a mistyped or
+  unknown word is caught before any unlock — an unknown word by the wordlist lookup, a single mistype
+  by the built-in checksum — with a specific message instead of a generic "wrong secret". **Redeem is
+  single-use:** redeeming a phrase consumes that recovery entry (so a leaked phrase cannot keep
+  opening the vault), so after you redeem, mint a fresh key with `seavault recovery generate`. The
+  GUI, the CLI `setup` wizard, and `seavault recovery generate --save PATH` can save/print a
+  **recovery card** (vault name, date, the 24 words, the compact form); a card written before you
+  finish the read-back is stamped **DRAFT** and re-issued clean only after you confirm (`--save`
+  refuses a path inside the vault folder, warns and re-confirms under a detected cloud-sync folder,
+  writes owner-only `0600`, and offers to delete the DRAFT if you abandon the read-back).
+- **Recovery `generate` is interactive-only.** `seavault recovery generate` opens the vault (so it
+  asks for the vault password unless it is in the OS keychain or `SEAVAULT_PASSWORD`), shows the
+  phrase once, and requires a typed read-back before it commits — it is never a non-interactive
+  command. With stdin redirected from a file, a pipe, or a script it **refuses before opening the
+  vault or showing any phrase** — a typed error names the terminal requirement and tells you to run
+  it directly in a terminal (there is no environment override for the read-back), so a script can
+  never capture a freshly minted secret. A vault with no recovery key is flagged as a persistent
+  reminder when it is opened interactively and in `seavault profile list --status`.
+- **Four-destination GUI.** The browser GUI is reorganised into four destinations — **Files**,
+  **Cloud sync**, **Security**, **Advanced** — showing one at a time instead of ~22 stacked panels,
+  with a returning-user **Welcome back** unlock view (saved vaults + password, or "I already have a
+  vault — choose its folder"). Every prior element id, handler, and `/api` route is unchanged; the
+  restructure moves markup only.
+- **`--help` that teaches, and an exit-code change.** Every subcommand has a one-line synopsis and a
+  double-dash usage line, and the group verbs — `password`, `recovery`, `vault`, `keychain`,
+  `rclone`, `rsync`, `remote`, `ssh-key`, and `profile` — list their subcommands. An explicit
+  `--help` or a bare invocation of one of those group verbs now **exits 0** (it used to exit
+  non-zero); an **unknown** subcommand still exits non-zero, and an unknown top-level command exits
+  2, so error-guarding scripts detect typos. **If a script relied on a bare group verb's old
+  non-zero exit, invoke an explicit subcommand instead** (a bare `seavault recovery` is now success,
+  not an error). `app-config` and `gui` are not group verbs: `gui` with no vault argument launches
+  the app, and `app-config` still requires a subcommand (though `app-config --help` exits 0).
+- **`SEAVAULT_NEW_PASSWORD`.** `password change` and `recovery redeem` read the *new* password from
+  `SEAVAULT_NEW_PASSWORD` when it is set, so a rotation can be scripted without a prompt (the *old*
+  password still comes from `SEAVAULT_PASSWORD`/keychain/prompt; neither password is ever on argv).
+- **Write commands write a `configTag`.** The first write-capable open (`put`, `remove`, `gc`,
+  `compact`, `serve`) of a legacy/untagged vault opportunistically writes the `configTag` (the HMAC
+  over the config) and latches this device's freshness anchor, so config-tamper and rollback
+  detection start protecting the vault without a separate migration step.
+- **Sealing is reversible until an A3 re-key.** `seavault vault seal-format` raises the reader floor
+  (retiring 0.16-and-older clients); `seavault vault unseal-format` reverses it — restoring `Version`
+  2 / `minReader` 2 — **as long as no later phase (A3) has re-keyed the manifests**. Take a backup
+  before sealing; the seal itself is the one-way advertised step only once A3 lands.
+- **CLI legibility sweep.** The 25 first-run papercuts are closed: a provider caveat is shown once
+  (not doubled), the doubled "Note: note:" label is gone, `ErrVaultDirLeftovers` names its remedy, a
+  keychain-store failure is a plain one-liner (the raw error only under `--debug`), `profile remove`
+  says what it removed, `--no-open` is inert under `--preset` and the "open the app" trailer is
+  dropped for fleets, and the exit-code contract is documented in `setup --help`.
 
 ## What changed in v0.18 (setup wizard)
 
@@ -452,7 +514,7 @@ seavault stats [flags] VAULT_DIR_OR_PROFILE
 seavault serve [--addr 127.0.0.1:8765] [--user seavault] [--password-file PATH] [--quiet-credentials] [--allow-host NAME] [--drop-os-junk] [--no-keychain] [--insecure-bind] VAULT_DIR_OR_PROFILE
 seavault gui [--addr 127.0.0.1:8787] [--no-open] [--allow-host NAME] [--exit-on-browser-close] [--insecure-bind] [VAULT_DIR_OR_PROFILE]
 seavault rclone status|install|check-update|update|rollback|version|path|verify-runtime
-seavault remote add|list|show|delete|test|dry-run|push|pull|check|config
+seavault remote add|edit|list|show|delete|test|dry-run|push|pull|check|sync|config
 seavault ssh-key generate|import|list|public
 ```
 
@@ -510,7 +572,7 @@ GOOS=windows GOARCH=amd64 go build -o dist/seavault-windows-amd64.exe ./cmd/seav
 - Managed rsync is optional. `--method auto` falls back to native ingest when managed/system rsync is unavailable; strict rsync modes require either a verified managed runtime or a system binary.
 - Native mount integrations are not included; `serve` provides a minimal WebDAV-compatible local endpoint.
 - Multi-device concurrent edits are preserved as conflict copies, but the app does not merge application-level document contents.
-- Signed release pipelines, installer packages, and full admin policy enforcement are still future work. (Password rotation and recovery keys shipped in v0.17 — see the Phase A2 notes above.)
+- Signed release pipelines, installer packages, and full admin policy enforcement are still future work.
 
 ## Security boundary
 

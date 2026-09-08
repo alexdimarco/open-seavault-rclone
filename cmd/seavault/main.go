@@ -45,84 +45,13 @@ import (
 	"github.com/alexdimarco/open-seavault-rclone/internal/webui"
 )
 
-const version = "0.18.0"
+const version = "0.19.0"
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-
-	var err error
-	switch os.Args[1] {
-	case "setup":
-		err = cmdSetup(os.Args[2:])
-	case "init":
-		err = cmdInit(os.Args[2:])
-	case "put":
-		err = cmdPut(os.Args[2:])
-	case "get":
-		err = cmdGet(os.Args[2:])
-	case "export":
-		err = cmdExport(os.Args[2:])
-	case "list":
-		err = cmdList(os.Args[2:])
-	case "remove", "rm":
-		err = cmdRemove(os.Args[2:])
-	case "verify":
-		err = cmdVerify(os.Args[2:])
-	case "gc":
-		err = cmdGC(os.Args[2:])
-	case "compact":
-		err = cmdCompact(os.Args[2:])
-	case "stats":
-		err = cmdStats(os.Args[2:])
-	case "serve":
-		err = cmdServe(os.Args[2:])
-	case "gui":
-		err = cmdGUI(os.Args[2:])
-	case "app-config", "config":
-		err = cmdAppConfig(os.Args[2:])
-	case "profile":
-		err = cmdProfile(os.Args[2:])
-	case "move":
-		err = cmdMove(os.Args[2:])
-	case "vault":
-		err = cmdVault(os.Args[2:])
-	case "password":
-		err = cmdPassword(os.Args[2:])
-	case "recovery":
-		err = cmdRecovery(os.Args[2:])
-	case "keychain":
-		err = cmdKeychain(os.Args[2:])
-	case "rclone":
-		err = cmdRclone(os.Args[2:])
-	case "rsync":
-		err = cmdRsync(os.Args[2:])
-	case "remote":
-		err = cmdRemote(os.Args[2:])
-	case "ssh-key":
-		err = cmdSSHKey(os.Args[2:])
-	case "version":
-		fmt.Println(version)
-		return
-	default:
-		usage()
-		os.Exit(2)
-	}
-
-	if err != nil {
-		// A command that wants a specific, non-1 process exit code (e.g. the gc
-		// dry-run "action required" code 3) returns an
-		// *exitCodeError. It carries its own exit code and has already written any
-		// human message itself, so main neither prints "error:" nor forces exit 1.
-		var ec *exitCodeError
-		if errors.As(err, &ec) {
-			os.Exit(ec.code)
-		}
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
-	}
+	// main() dispatches FROM the command registry (commands.go). All command
+	// wiring, the exit-code contract, and usage rendering live there, so a single
+	// table is the one source of truth and run() stays testable without os.Exit.
+	os.Exit(run(os.Args[1:]))
 }
 
 // exitCodeError lets a command request a specific process exit code without the
@@ -158,6 +87,7 @@ type setupFlags struct {
 	profileName   *string
 	noOpen        *bool
 	jsonOut       *bool
+	debug         *bool
 }
 
 // registerSetupFlags defines every `setup` flag on fs. It is the single source of
@@ -173,6 +103,7 @@ func registerSetupFlags(fs *flag.FlagSet) *setupFlags {
 		profileName:   fs.String("profile", "", "profile name for the new vault (default: the vault folder's name)"),
 		noOpen:        fs.Bool("no-open", false, "do not open the app at the end"),
 		jsonOut:       fs.Bool("json", false, "with --preset, emit the machine-readable result as JSON instead of prose (never a secret)"),
+		debug:         fs.Bool("debug", false, "print extra diagnostic detail (e.g. the raw keychain error) that the plain summary omits"),
 	}
 }
 
@@ -238,6 +169,7 @@ func cmdSetup(args []string) error {
 			noKeychain:    *f.noKeychain,
 			profileName:   *f.profileName,
 			jsonOut:       *f.jsonOut,
+			debug:         *f.debug,
 		})
 	}
 
@@ -269,6 +201,11 @@ func cmdSetup(args []string) error {
 		}
 		return err
 	}
+	// Under --debug, surface the raw keychain error detail the plain summary
+	// one-liner (CLI-1) deliberately omits.
+	if *f.debug && res.KeychainErrDetail != "" {
+		fmt.Fprintln(os.Stderr, "keychain error detail:", res.KeychainErrDetail)
+	}
 	return nil
 }
 
@@ -288,6 +225,19 @@ func setupFailureLines(res setup.Result) []string {
 	return lines
 }
 
+// annotateSetupError names the remedy for a typed setup error that the
+// non-interactive --preset path would otherwise surface bare (ADM-5). A
+// leftovers directory (a non-empty target with no vault.json, from an
+// interrupted setup) gets the "remove it or choose a different --vault" remedy
+// the interactive flow offers as a prompt. Any other error is returned
+// unchanged.
+func annotateSetupError(err error) error {
+	if errors.Is(err, setup.ErrVaultDirLeftovers) {
+		return fmt.Errorf("%w — remove that directory and re-run, or choose a different --vault", err)
+	}
+	return err
+}
+
 type setupPresetArgs struct {
 	preset        string
 	vaultArg      string
@@ -296,6 +246,7 @@ type setupPresetArgs struct {
 	noKeychain    bool
 	profileName   string
 	jsonOut       bool
+	debug         bool
 }
 
 // setupResultJSON is the machine-readable shape `setup --preset --json` emits
@@ -410,7 +361,9 @@ func runSetupPreset(a setupPresetArgs) error {
 		for _, line := range setupFailureLines(res) {
 			fmt.Fprintln(os.Stderr, line)
 		}
-		return err
+		// ADM-5: a leftovers directory has no interactive remove-and-retry prompt
+		// on the --preset path, so name the remedy in the error itself.
+		return annotateSetupError(err)
 	}
 
 	// I-S3: recovery is skipped in a non-interactive run; print the remedy. The
@@ -420,8 +373,17 @@ func runSetupPreset(a setupPresetArgs) error {
 	if a.jsonOut {
 		return emitSetupJSON(res, a.preset, false)
 	}
-	for _, line := range setup.SummaryLines(res, false) {
+	// offerOpen=false: a scripted --preset run never launches the GUI, so the
+	// "Next: open it with …" trailer is dropped for fleets (ADM-1). --no-open is
+	// likewise inert under --preset (it is not even read here); it is accepted
+	// only for symmetry with the interactive form.
+	for _, line := range setup.SummaryLines(res, false, false) {
 		fmt.Println(line)
+	}
+	// Under --debug, surface the raw keychain error detail that the plain
+	// one-liner (CLI-1) deliberately omits.
+	if a.debug && res.KeychainErrDetail != "" {
+		fmt.Fprintln(os.Stderr, "keychain error detail:", res.KeychainErrDetail)
 	}
 	return nil
 }
@@ -666,7 +628,7 @@ func cmdInit(args []string) error {
 // It surfaces the preflight note, the rollback warning, and the
 // anchor note to stderr, never stdout, so machine-readable output stays clean.
 func openVaultForCLI(vaultPath string, useKeychain, acceptRollback bool) (*vault.Vault, error) {
-	password, _, err := resolveVaultPasswordSource(vaultPath, useKeychain)
+	password, interactive, err := resolveVaultPasswordSource(vaultPath, useKeychain)
 	if err != nil {
 		return nil, err
 	}
@@ -680,7 +642,42 @@ func openVaultForCLI(vaultPath string, useKeychain, acceptRollback bool) (*vault
 	if note := v.FreshnessAnchorNote(); note != "" {
 		fmt.Fprintln(os.Stderr, note)
 	}
+	// CLI-4: re-emit the recovery-deferral reminder when a keyless vault is opened
+	// interactively (a human typed the password), so the one-shot setup note is
+	// not the only surface. It is gated on the interactive unlock so a scripted
+	// run (SEAVAULT_PASSWORD / keychain) is never nagged, and goes to stderr so it
+	// never contaminates machine-readable stdout.
+	if interactive {
+		if reminder := recoveryDeferralReminder(v.WrapEntryRefs(), vaultPath); reminder != "" {
+			fmt.Fprintln(os.Stderr, reminder)
+		}
+	}
 	return v, nil
+}
+
+// vaultHasRecoveryKey reports whether any wrap entry is a recovery entry. A
+// recovery key is ALWAYS stored as a recovery-type wrap entry, so the absence of
+// one (including an empty wrap-entry array — a fresh vault keeps its password in
+// the legacy wrap, not the array) means the vault has no recovery key.
+func vaultHasRecoveryKey(refs []vault.WrapEntryRef) bool {
+	for _, ref := range refs {
+		if ref.Type == vault.WrapTypeRecovery {
+			return true
+		}
+	}
+	return false
+}
+
+// recoveryDeferralReminder returns the "no recovery key" reminder for a vault
+// whose wrap entries carry no recovery entry (CLI-4), or "" when the vault has a
+// recovery key. The remedy names the vault shell-quoted so it pastes cleanly. It
+// carries no secret. vaultArg is the argument the user opened with (a path or
+// profile); it is echoed only as a pasteable remedy target.
+func recoveryDeferralReminder(refs []vault.WrapEntryRef, vaultArg string) string {
+	if vaultHasRecoveryKey(refs) {
+		return ""
+	}
+	return fmt.Sprintf("note: this vault has no recovery key. If you forget the password, the vault cannot be opened. Add one any time with `seavault recovery generate %s`.", shellQuoteArg(vaultArg))
 }
 
 // openVaultForWrite opens a vault for a WRITE-CAPABLE command (put, remove, gc,
@@ -1491,9 +1488,22 @@ func cmdServe(args []string) error {
 const guiAuthAccount = "seavault-gui-http-auth"
 
 func cmdAppConfig(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: seavault app-config path|reset|reset-gui-login")
+	// sweep-docs-1 (C7): a --help anywhere prints the registry usage and runs
+	// NOTHING — `app-config reset --help` must not delete the local config. (The
+	// top-level dispatch also intercepts leaf --help, but this keeps the handler
+	// self-protecting when called directly.)
+	if hasHelpFlag(args) {
+		if row, ok := topLevelCommand("app-config"); ok {
+			renderCommandHelp(os.Stdout, row)
+		}
+		return nil
 	}
+	if len(args) < 1 {
+		return fmt.Errorf("usage: seavault app-config path | reset | reset-gui-login")
+	}
+	// registry-cli-2: only the documented sub-actions are accepted; the former
+	// undocumented aliases (reset-config, clear-gui-login, reset-password) are
+	// dropped so the accepted set matches the usage line the registry advertises.
 	switch args[0] {
 	case "path":
 		p, err := appconfig.Path()
@@ -1502,12 +1512,12 @@ func cmdAppConfig(args []string) error {
 		}
 		fmt.Println(p)
 		return nil
-	case "reset", "reset-config":
+	case "reset":
 		return resetLocalAppConfiguration(true)
-	case "reset-gui-login", "clear-gui-login", "reset-password":
+	case "reset-gui-login":
 		return resetLocalAppConfiguration(false)
 	default:
-		return fmt.Errorf("usage: seavault app-config path|reset|reset-gui-login")
+		return fmt.Errorf("usage: seavault app-config path | reset | reset-gui-login")
 	}
 }
 
@@ -1543,11 +1553,14 @@ func resetLocalAppConfiguration(resetAll bool) error {
 }
 
 func cmdGUI(args []string) error {
+	// registry-cli-2: only the documented sub-actions are accepted; the former
+	// undocumented aliases (reset, reset-password, clear-login) are dropped so the
+	// accepted set matches the synopsis the registry advertises.
 	if len(args) > 0 {
 		switch args[0] {
-		case "reset", "reset-config":
+		case "reset-config":
 			return resetLocalAppConfiguration(true)
-		case "reset-login", "reset-password", "clear-login":
+		case "reset-login":
 			return resetLocalAppConfiguration(false)
 		case "config-path":
 			p, err := appconfig.Path()
@@ -1689,7 +1702,9 @@ func cmdMove(args []string) error {
 	return nil
 }
 
-func cmdProfile(args []string) error {
+func cmdProfile(args []string) error { return dispatchGroup("profile", execProfile, args) }
+
+func execProfile(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault profile add [--save-password] NAME VAULT_DIR | save [--save-password] NAME VAULT_DIR | move [--replace] [--update-remotes=true] NAME NEW_VAULT_DIR | list [--status] | remove NAME")
 	}
@@ -1767,7 +1782,7 @@ func cmdProfile(args []string) error {
 				fmt.Printf("%s\t%s\n", e.Name, e.VaultPath)
 				continue
 			}
-			status, keychainStatus := "missing", "no keychain entry"
+			status, keychainStatus, recoveryStatus := "missing", "no keychain entry", ""
 			if cfg, err := vault.ReadConfig(e.VaultPath); err == nil {
 				status = "vault exists"
 				if cfg.VaultID != "" {
@@ -1775,15 +1790,41 @@ func cmdProfile(args []string) error {
 						keychainStatus = "keychain saved"
 					}
 				}
+				// CLI-4: name the missing recovery key as a persistent surface. The
+				// wrap-entry types are in the public config (no password needed); a
+				// recovery key is always a recovery-type entry, so its absence — an
+				// empty array included — is a keyless vault.
+				recoveryStatus = "no recovery key — add one with `seavault recovery generate`"
+				for _, we := range cfg.WrapEntries {
+					if we.Type == vault.WrapTypeRecovery {
+						recoveryStatus = "recovery key set"
+						break
+					}
+				}
 			}
-			fmt.Printf("%s\t%s\t%s\t%s\n", e.Name, e.VaultPath, status, keychainStatus)
+			fmt.Printf("%s\t%s\t%s\t%s\t%s\n", e.Name, e.VaultPath, status, keychainStatus, recoveryStatus)
 		}
 		return nil
 	case "remove", "rm":
 		if len(args) != 2 {
 			return fmt.Errorf("usage: seavault profile remove NAME")
 		}
-		return profile.Remove(args[1])
+		// DOC-6: say what was removed instead of exiting silently. Resolve the path
+		// first (best-effort) so the confirmation can name where the vault data was
+		// left; the profile store, not the vault, is all that is removed.
+		removedPath := ""
+		if e, found, rerr := profile.Resolve(args[1]); rerr == nil && found {
+			removedPath = e.VaultPath
+		}
+		if err := profile.Remove(args[1]); err != nil {
+			return err
+		}
+		if removedPath != "" {
+			fmt.Printf("removed profile %s (the vault data at %s was left in place)\n", args[1], removedPath)
+		} else {
+			fmt.Printf("removed profile %s\n", args[1])
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown profile command %q", args[0])
 	}
@@ -1811,7 +1852,9 @@ func keychainStatusLine(serviceReachable bool, getErr error) (line string, isErr
 // cmdPassword implements `seavault password change`: rotate
 // the vault password by rewrapping the same master||index bundle (no chunk or
 // manifest rewrite) and refreshing the OS keychain entry when one exists.
-func cmdPassword(args []string) error {
+func cmdPassword(args []string) error { return dispatchGroup("password", execPassword, args) }
+
+func execPassword(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault password change [--no-keychain] [--accept-rollback] VAULT_DIR_OR_PROFILE")
 	}
@@ -1858,7 +1901,9 @@ func cmdPasswordChange(args []string) error {
 // ): the recovery-key lifecycle. generate mints a phrase with a
 // mandatory read-back; redeem consumes a phrase to set a new password; revoke
 // retires one entry; list shows the entry IDs to revoke.
-func cmdRecovery(args []string) error {
+func cmdRecovery(args []string) error { return dispatchGroup("recovery", execRecovery, args) }
+
+func execRecovery(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault recovery generate|redeem|revoke|list VAULT_DIR_OR_PROFILE")
 	}
@@ -1876,20 +1921,129 @@ func cmdRecovery(args []string) error {
 	}
 }
 
+// stdinIsInteractive reports whether standard input is a terminal (a character
+// device). `recovery generate` and the last-key `recovery revoke` gate consult
+// it: a freshly minted phrase is shown once and must be typed back at a live
+// terminal, and destroying the last recovery key must be a deliberate
+// interactive act — so a redirected/piped stdin (a script, a log capture) is
+// refused (or forced to pass --yes). It is a package var so a test can drive the
+// interactive path without a real PTY.
+var stdinIsInteractive = func() bool {
+	return stdinIsTTY()
+}
+
+// readRecoveryReadback reads the mandatory read-back for `recovery generate` from
+// the terminal ONLY (design U2 §2.5 / review DOCS-1). Unlike `recovery redeem`,
+// where SEAVAULT_RECOVERY_PHRASE lets an operator script a phrase they already
+// hold, a phrase nobody has seen must not be confirmable by a script, so there is
+// deliberately NO environment hook here. It is a package var so a test can supply
+// a controlled read-back.
+var readRecoveryReadback = func(prompt string) (string, error) {
+	return passphrase.Read(prompt)
+}
+
+// recoveryEntryIDsCLI returns the IDs of a vault's recovery wrap entries in
+// on-disk order (the appended one is last) — the input to the last-key revoke
+// gate and to the device-local label lookup, mirroring webui's recoveryEntryIDs.
+func recoveryEntryIDsCLI(v *vault.Vault) []string {
+	ids := []string{}
+	for _, ref := range v.WrapEntryRefs() {
+		if ref.Type == vault.WrapTypeRecovery {
+			ids = append(ids, ref.ID)
+		}
+	}
+	return ids
+}
+
+// recordRecoveryLabelCLI writes the device-local label for the recovery entry
+// just appended to v (design U2 §2.6, review cli-label-gap): the created date
+// and this device's hostname, keyed by the entry's full ID. It returns the
+// entry's stable 4-hex handle. Display-only and best-effort — a store failure is
+// swallowed (the entry is already durable) and never fails the commit, mirroring
+// webui's recordRecoveryLabel.
+func recordRecoveryLabelCLI(v *vault.Vault) string {
+	ids := recoveryEntryIDsCLI(v)
+	if len(ids) == 0 {
+		return ""
+	}
+	id := ids[len(ids)-1]
+	host, _ := os.Hostname()
+	_ = profile.SetRecoveryLabel(id, profile.RecoveryKeyLabel{
+		Created: time.Now().Format("2006-01-02"),
+		Device:  host,
+	})
+	return profile.Handle(id)
+}
+
+// confirmPromptDefault is confirmPrompt with an explicit default for an empty or
+// closed-stdin answer, so the abandoned-card delete offer can default to the safe
+// direction (delete a plaintext secret) the setup ceremony uses.
+func confirmPromptDefault(prompt string, defaultYes bool) (bool, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return defaultYes, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true, nil
+	case "n", "no":
+		return false, nil
+	default:
+		return defaultYes, nil
+	}
+}
+
 func cmdRecoveryGenerate(args []string) error {
 	fs := flag.NewFlagSet("recovery generate", flag.ExitOnError)
 	noKeychain := fs.Bool("no-keychain", false, "do not try the OS keychain for the current password")
 	acceptRollback := fs.Bool("accept-rollback", false, "open a config older than this device last saw (a restore from backup)")
+	save := fs.String("save", "", "also write the recovery card (24 words + compact form) to this file (0600); refused inside the vault folder, warned under a detected cloud-sync folder")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: seavault recovery generate [--no-keychain] [--accept-rollback] VAULT_DIR_OR_PROFILE")
+		return fmt.Errorf("usage: seavault recovery generate [--no-keychain] [--accept-rollback] [--save PATH] VAULT_DIR_OR_PROFILE")
 	}
 	vaultPath, err := resolveVaultArg(fs.Arg(0))
 	if err != nil {
 		return err
 	}
+	// DOCS-1 (make the v0.19 "interactive-only" claim TRUE): the read-back must be
+	// typed at a live terminal, so refuse a non-interactive stdin BEFORE opening
+	// the vault or emitting any phrase. A script or a redirect must never be able
+	// to capture a freshly minted secret, and there is deliberately no environment
+	// override for the read-back.
+	if !stdinIsInteractive() {
+		return errors.New("recovery generate needs an interactive terminal: the phrase is shown once and must be typed back to confirm it, so it will not run with input redirected from a file, pipe, or script (there is no environment override). Run it directly in a terminal")
+	}
+	// CLI-2 (design §2.5): validate a --save destination BEFORE minting, applying
+	// the U1 save-path rules the setup ceremony uses. A path inside the vault
+	// folder is refused outright (a plaintext master secret there would be uploaded
+	// to the remote and defeat the encryption); a path under a detected cloud
+	// provider root is allowed only after a second confirmation naming the risk.
+	// Deciding up front means no phrase is minted if the target is unsafe.
+	saveTarget := ""
+	if strings.TrimSpace(*save) != "" {
+		saveTarget = filepath.Clean(*save)
+		if setup.PathInsideVault(saveTarget, vaultPath, runtime.GOOS) {
+			return fmt.Errorf("refusing to save the recovery card to %s: that path is inside the vault folder. The recovery phrase is the master key; a plaintext copy inside the vault would be uploaded to your cloud/remote and defeat the encryption. Choose a location OUTSIDE the vault (a password manager, a USB key, or print it)", saveTarget)
+		}
+		home, _ := os.UserHomeDir()
+		if prov, ok := setup.ProviderRootFor(saveTarget, home, runtime.GOOS); ok {
+			ok2, cerr := confirmPrompt(fmt.Sprintf("Warning: %s is inside your %s folder, so the plaintext recovery card would be UPLOADED to your cloud in the clear — anyone with access to that cloud could unlock the vault. Save it there anyway? [y/N]: ", saveTarget, setup.DisplayName(prov)))
+			if cerr != nil {
+				return cerr
+			}
+			if !ok2 {
+				return fmt.Errorf("did not save the recovery card; choose a location outside your sync folders (a password manager, a USB key, or print it)")
+			}
+		}
+	}
+	// CLI-4: `recovery generate` opens the vault, so it asks for the vault
+	// password unless one is already available. Say so up front so the password
+	// prompt is expected, not a surprise.
+	fmt.Println("Note: recovery generate opens the vault, so you'll be asked for the vault password (unless it is saved in the OS keychain or set in SEAVAULT_PASSWORD).")
 	v, err := openVaultForCLI(vaultPath, !*noKeychain, *acceptRollback)
 	if err != nil {
 		return err
@@ -1898,24 +2052,90 @@ func cmdRecoveryGenerate(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("Recovery phrase — write it down and store it safely. It is shown ONCE and never stored:")
+	fmt.Println("Recovery phrase — write it down and store it safely. It is shown ONCE and never stored.")
+	// Show the 24 numbered words by DEFAULT (design U2 §2.5), with the base32
+	// compact form beneath for people who prefer it (and for redeeming on a 0.17
+	// client). The words are a pure re-encoding of the SAME secret.
+	words, werr := vault.RecoveryPhraseWords(phrase)
+	if werr == nil {
+		fmt.Println()
+		for i, w := range words {
+			fmt.Printf("  %2d. %s\n", i+1, w)
+		}
+	}
 	fmt.Println()
+	fmt.Println("Compact form (base32) — the same key, for redeeming on a 0.17 client:")
 	fmt.Println("    " + phrase)
 	fmt.Println()
-	// MANDATORY read-back before commit: the owner
-	// re-enters the phrase, verified against the in-memory value; a mismatch aborts
-	// with nothing written.
-	readback, err := readRecoveryPhrasePrompt("Re-enter the recovery phrase to confirm: ")
+	// CLI-2 (C6): write the DRAFT card BEFORE the read-back gate, so the owner can
+	// save/print the phrase while it is on screen. It is the SAME card the setup
+	// ceremony writes (setup.RecoveryCardText), stamped DRAFT until the read-back
+	// commits and written owner-only (0600).
+	vaultName := filepath.Base(filepath.Clean(vaultPath))
+	savedPath := ""
+	if saveTarget != "" {
+		card := setup.RecoveryCardText(vaultName, words, phrase, werr != nil, true)
+		if werr2 := os.WriteFile(saveTarget, []byte(card), 0o600); werr2 != nil {
+			return fmt.Errorf("could not write the recovery card to %s: %w", saveTarget, werr2)
+		}
+		savedPath = saveTarget
+		fmt.Printf("saved the recovery card (DRAFT) to %s — it holds the plaintext recovery phrase, so anyone who can read it can unlock the vault. It was written owner-only (0600) BEFORE you confirm below, and is stamped DRAFT until you complete the read-back. Keep it safe, and delete it once the phrase is stored somewhere secure.\n", saveTarget)
+	}
+	// offerDeleteCard runs on any exit WITHOUT a committed key: it offers to delete
+	// a card written before the gate (recovery-integration-2), defaulting to delete
+	// (the safe direction for an abandoned plaintext secret).
+	offerDeleteCard := func() {
+		if savedPath == "" {
+			return
+		}
+		del, derr := confirmPromptDefault(fmt.Sprintf("A recovery card was written to %s before the phrase was confirmed, but NO recovery key was added. It holds the plaintext phrase. Delete that file now? [Y/n]: ", savedPath), true)
+		if derr == nil && del {
+			if rerr := os.Remove(savedPath); rerr != nil {
+				fmt.Fprintf(os.Stderr, "could not delete %s: %v — remove it by hand; it holds the plaintext recovery phrase.\n", savedPath, rerr)
+			} else {
+				fmt.Printf("deleted the abandoned recovery card %s.\n", savedPath)
+			}
+			return
+		}
+		fmt.Printf("kept %s — it holds the plaintext recovery phrase and was written before confirmation; delete it by hand once you no longer need it.\n", savedPath)
+	}
+	// MANDATORY read-back before commit: the owner re-enters the phrase, verified
+	// against the in-memory value; a mismatch aborts with nothing written.
+	// RecoveryPhraseCheck (not the boolean facade) surfaces the SPECIFIC typed
+	// error, so a single mistyped word reads as a mistyped-word/checksum message
+	// rather than a generic mismatch — and never leaks either phrase (§2.5, C1).
+	// readRecoveryReadback reads from the terminal only (no env hook, DOCS-1).
+	readback, err := readRecoveryReadback("Re-enter the recovery phrase to confirm: ")
 	if err != nil {
+		offerDeleteCard()
 		return err
 	}
-	if !vault.RecoveryPhraseMatches(phrase, readback) {
-		return fmt.Errorf("the re-entered phrase did not match; nothing was written — run `recovery generate` again")
+	if cerr := vault.RecoveryPhraseCheck(phrase, readback); cerr != nil {
+		offerDeleteCard()
+		return fmt.Errorf("the re-entered phrase did not match (%w); nothing was written — run `recovery generate` again", cerr)
 	}
 	if err := commit(); err != nil {
+		offerDeleteCard()
 		return err
 	}
-	fmt.Println("recovery key added")
+	// cli-label-gap (design §2.6): record the device-local label (created date +
+	// hostname) for the just-appended entry, keyed by its full ID. Best-effort.
+	handle := recordRecoveryLabelCLI(v)
+	// CLI-2 (C6): re-stamp the saved card as CONFIRMED now the key is durable. A
+	// rewrite failure is non-fatal — the DRAFT card still holds the correct phrase.
+	if savedPath != "" {
+		confirmed := setup.RecoveryCardText(vaultName, words, phrase, werr != nil, false)
+		if rerr := os.WriteFile(savedPath, []byte(confirmed), 0o600); rerr != nil {
+			fmt.Fprintf(os.Stderr, "the recovery key was added, but the card file %s could not be re-stamped as confirmed (%v); it still holds the correct phrase.\n", savedPath, rerr)
+		} else {
+			fmt.Printf("re-stamped the recovery card %s as confirmed (the DRAFT marker is removed).\n", savedPath)
+		}
+	}
+	if handle != "" {
+		fmt.Printf("recovery key added (#%s)\n", handle)
+	} else {
+		fmt.Println("recovery key added")
+	}
 	return nil
 }
 
@@ -1961,24 +2181,49 @@ func cmdRecoveryRevoke(args []string) error {
 	fs := flag.NewFlagSet("recovery revoke", flag.ExitOnError)
 	noKeychain := fs.Bool("no-keychain", false, "do not try the OS keychain for the current password")
 	acceptRollback := fs.Bool("accept-rollback", false, "open a config older than this device last saw (a restore from backup)")
+	yes := fs.Bool("yes", false, "confirm revoking the LAST recovery key non-interactively (the vault would then have no recovery path)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 {
-		return fmt.Errorf("usage: seavault recovery revoke [--no-keychain] [--accept-rollback] VAULT_DIR_OR_PROFILE ENTRY_ID")
+		return fmt.Errorf("usage: seavault recovery revoke [--no-keychain] [--accept-rollback] [--yes] VAULT_DIR_OR_PROFILE ENTRY_ID")
 	}
 	vaultPath, err := resolveVaultArg(fs.Arg(0))
 	if err != nil {
 		return err
 	}
+	entryID := fs.Arg(1)
 	v, err := openVaultForCLI(vaultPath, !*noKeychain, *acceptRollback)
 	if err != nil {
 		return err
 	}
-	if err := v.RevokeRecovery(fs.Arg(1)); err != nil {
+	// wiring-1 / CLI-5 (design §2.7, I-U4, matrix S1): revoking the vault's LAST
+	// remaining recovery key destroys the only route back if the password is
+	// forgotten. Gate it exactly as the GUI does (webui handleRecoveryRevoke): when
+	// one or zero recovery keys remain, require an explicit confirmation that names
+	// the consequence — an interactive y/N prompt, or --yes when stdin is not a
+	// terminal. Without it, refuse and change NOTHING.
+	if len(recoveryEntryIDsCLI(v)) <= 1 && !*yes {
+		const consequence = "Revoking the last recovery key leaves the vault with no recovery path; a forgotten password cannot be recovered."
+		if stdinIsInteractive() {
+			ok, perr := confirmPrompt(consequence + " Revoke it anyway? [y/N]: ")
+			if perr != nil {
+				return perr
+			}
+			if !ok {
+				return errors.New("the last recovery key was not revoked")
+			}
+		} else {
+			return fmt.Errorf("refusing to revoke the last recovery key: %s Re-run with --yes to confirm non-interactively", consequence)
+		}
+	}
+	if err := v.RevokeRecovery(entryID); err != nil {
 		return err
 	}
-	fmt.Printf("revoked recovery entry %s\n", fs.Arg(1))
+	// cli-label-gap / wordlist-labels-3: drop the device-local label so a revoked
+	// key's hostname/date do not linger in the store. Best-effort, display-only.
+	_ = profile.DeleteRecoveryLabel(entryID)
+	fmt.Printf("revoked recovery entry %s\n", entryID)
 	return nil
 }
 
@@ -2000,15 +2245,25 @@ func cmdRecoveryList(args []string) error {
 	if err != nil {
 		return err
 	}
-	count := 0
-	for _, ref := range v.WrapEntryRefs() {
-		if ref.Type == vault.WrapTypeRecovery {
-			fmt.Println(ref.ID)
-			count++
-		}
-	}
-	if count == 0 {
+	// cli-label-gap (design §2.6 / C4): join the recovery entry IDs with this
+	// device's label store and print each entry's stable 4-hex handle plus its
+	// label-or-creation detail (falling back to the bare handle), followed by the
+	// full entry ID revoke/redeem still need. A label-store read error degrades to
+	// the bare IDs rather than failing the list.
+	ids := recoveryEntryIDsCLI(v)
+	if len(ids) == 0 {
 		fmt.Fprintln(os.Stderr, "no recovery keys are registered for this vault")
+		return nil
+	}
+	views, verr := profile.LabelledRecoveryKeys(ids)
+	if verr != nil {
+		for _, id := range ids {
+			fmt.Println(id)
+		}
+		return nil
+	}
+	for _, view := range views {
+		fmt.Printf("%s  (id %s)\n", view.Display(), view.ID)
 	}
 	return nil
 }
@@ -2018,7 +2273,9 @@ func cmdRecoveryList(args []string) error {
 // reversal. seal-format retires open-seavault-rclone 0.16 and older by bumping the on-disk
 // Version to 3 and raising MinReader to 3 in one MAC'd rewrite; unseal-format
 // reverses it while no A3 directory-ID re-key has run.
-func cmdVault(args []string) error {
+func cmdVault(args []string) error { return dispatchGroup("vault", execVault, args) }
+
+func execVault(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault vault seal-format|unseal-format [flags] VAULT_DIR_OR_PROFILE")
 	}
@@ -2135,7 +2392,9 @@ func confirmPrompt(prompt string) (bool, error) {
 	}
 }
 
-func cmdKeychain(args []string) error {
+func cmdKeychain(args []string) error { return dispatchGroup("keychain", execKeychain, args) }
+
+func execKeychain(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault keychain store VAULT_DIR_OR_PROFILE | status VAULT_DIR_OR_PROFILE | delete VAULT_DIR_OR_PROFILE")
 	}
@@ -2208,7 +2467,9 @@ func cmdKeychain(args []string) error {
 	}
 }
 
-func cmdRsync(args []string) error {
+func cmdRsync(args []string) error { return dispatchGroup("rsync", execRsync, args) }
+
+func execRsync(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault rsync status|install|check-update|update|rollback|verify-runtime|path")
 	}
@@ -2295,7 +2556,9 @@ func cmdRsync(args []string) error {
 	}
 }
 
-func cmdRclone(args []string) error {
+func cmdRclone(args []string) error { return dispatchGroup("rclone", execRclone, args) }
+
+func execRclone(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault rclone status|install|check-update|update|rollback|version|path|verify-runtime")
 	}
@@ -2391,7 +2654,9 @@ func cmdRclone(args []string) error {
 	}
 }
 
-func cmdRemote(args []string) error {
+func cmdRemote(args []string) error { return dispatchGroup("remote", execRemote, args) }
+
+func execRemote(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault remote add|list|show|edit|delete|test|dry-run|push|pull|sync|check|config")
 	}
@@ -2536,6 +2801,15 @@ func runRemote(op, name string) error {
 }
 
 func cmdRemoteConfig(args []string) error {
+	// sweep-docs-1 (C7): a --help anywhere in the nested invocation prints the
+	// registry usage and runs NOTHING — `remote config create --help` must not
+	// create rclone.conf. This runs BEFORE any sub-action dispatch below.
+	if hasHelpFlag(args) {
+		if row, ok := groupCommand("remote", "config"); ok {
+			renderCommandHelp(os.Stdout, row)
+		}
+		return nil
+	}
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault remote config path|import|export-redacted|validate")
 	}
@@ -2610,7 +2884,9 @@ func cmdRemoteConfig(args []string) error {
 	}
 }
 
-func cmdSSHKey(args []string) error {
+func cmdSSHKey(args []string) error { return dispatchGroup("ssh-key", execSSHKey, args) }
+
+func execSSHKey(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault ssh-key generate NAME | list | public PRIVATE_KEY_OR_NAME | import NAME PRIVATE_KEY")
 	}
@@ -2800,57 +3076,4 @@ func openBrowser(url string) error {
 	default:
 		return exec.Command("xdg-open", url).Start()
 	}
-}
-
-func usage() {
-	fmt.Fprint(os.Stderr, usageText())
-}
-
-func usageText() string {
-	return fmt.Sprintf(`seavault %s
-
-Cloud-folder client-side encrypted storage.
-
-Usage:
-  seavault setup [--expert] [--no-keychain] [--profile NAME] [--no-open]
-  seavault setup --preset synced-folder|rclone|local --vault PATH [--remote NAME] [--allow-download] [flags]
-  seavault init [flags] VAULT_DIR
-  seavault put [--method auto|native|managed-rsync|system-rsync|rsync] [flags] VAULT_DIR_OR_PROFILE SOURCE_PATH [VIRTUAL_PATH]
-  seavault get [flags] VAULT_DIR_OR_PROFILE VIRTUAL_PATH DEST_PATH
-  seavault export [--overwrite fail|skip|replace] [--zip] [--dry-run] VAULT_DIR_OR_PROFILE VIRTUAL_PATH DEST_LOCAL_FOLDER_OR_ZIP
-  seavault list [flags] VAULT_DIR_OR_PROFILE
-  seavault remove [flags] VAULT_DIR_OR_PROFILE VIRTUAL_PATH
-  seavault verify [flags] VAULT_DIR_OR_PROFILE
-  seavault gc [--confirm] [--fence 72h] [--json] [flags] VAULT_DIR_OR_PROFILE
-  seavault compact [flags] VAULT_DIR_OR_PROFILE
-  seavault stats [flags] VAULT_DIR_OR_PROFILE
-  seavault serve [--addr 127.0.0.1:8765] [--user seavault] [--password-file PATH] [--quiet-credentials] [--allow-host NAME] [--drop-os-junk] [flags] VAULT_DIR_OR_PROFILE
-  seavault gui [--addr 127.0.0.1:8787] [--no-open] [--allow-host NAME] [flags] [VAULT_DIR_OR_PROFILE]
-  seavault gui reset-config | reset-login | config-path
-  seavault app-config path | reset | reset-gui-login
-  seavault profile add [--save-password] NAME VAULT_DIR
-  seavault profile save [--save-password] NAME VAULT_DIR
-  seavault profile move [--replace] [--update-remotes=true] NAME NEW_VAULT_DIR
-  seavault move [--profile NAME] [--replace] SOURCE_VAULT_DIR_OR_PROFILE DEST_VAULT_DIR
-  seavault profile list [--status]
-  seavault profile remove NAME
-  seavault password change [--no-keychain] [--accept-rollback] VAULT_DIR_OR_PROFILE
-  seavault recovery generate | redeem | list VAULT_DIR_OR_PROFILE
-  seavault recovery revoke VAULT_DIR_OR_PROFILE ENTRY_ID
-  seavault vault seal-format [--yes] VAULT_DIR_OR_PROFILE
-  seavault vault unseal-format VAULT_DIR_OR_PROFILE
-  seavault keychain store VAULT_DIR_OR_PROFILE
-  seavault keychain status VAULT_DIR_OR_PROFILE
-  seavault keychain delete VAULT_DIR_OR_PROFILE
-  seavault rclone status | install | check-update | update | rollback | verify-runtime
-  seavault rsync status | install | check-update | update | rollback | verify-runtime | path
-  seavault remote add NAME VAULT_DIR_OR_PROFILE RCLONE_REMOTE_PATH
-  seavault remote list | show NAME | test NAME | dry-run NAME | push NAME | pull NAME | check NAME
-  seavault ssh-key generate NAME | list | public NAME | import NAME PRIVATE_KEY
-
-VAULT_DIR is the encrypted folder. Put it inside any local cloud-sync directory.
-Passwords are read from SEAVAULT_PASSWORD, then OS keychain, then a hidden prompt.
-The serve command uses a separate WebDAV credential: SEAVAULT_SERVE_PASSWORD or --password-file (otherwise generated and printed once).
-A bare "seavault gc" is a dry run: if it finds chunks it would reclaim, it writes an advisory to stderr and exits 3 (action required, not an error) so scripted callers detect that nothing was reclaimed without --confirm.
-`, version)
 }

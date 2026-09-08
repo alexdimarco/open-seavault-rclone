@@ -78,9 +78,16 @@ type Result struct {
 	ProfileName   string
 	KeychainSaved bool
 	KeychainNote  string
-	RecoveryNote  string
-	CloudNote     string
-	PreflightNote string
+	// KeychainErrDetail carries the RAW underlying keychain error (e.g. the
+	// secret-tool exec message) when a keychain store failed. It is NEVER shown
+	// in the default summary — KeychainNote is the plain, user-facing one-liner
+	// (CLI-1). A CLI caller prints this detail only under --debug; it carries no
+	// secret (a keychain backend error names the service/keyring, not the
+	// password).
+	KeychainErrDetail string
+	RecoveryNote      string
+	CloudNote         string
+	PreflightNote     string
 	// CaveatNote carries the placement caveat for the sync provider the vault
 	// landed inside (on-demand/online-only eviction guidance), when the vault
 	// is a SyncedFolder with a known provider — including a custom path or a
@@ -262,7 +269,10 @@ func Execute(p Plan, password string, deps Deps) (Result, error) {
 	if p.SaveKeychain {
 		if err := deps.KeychainSet(cfg.VaultID, password); err != nil {
 			res.KeychainSaved = false
-			res.KeychainNote = fmt.Sprintf("could not save the password to the OS keychain: %v. The vault still opens with the password you typed or via SEAVAULT_PASSWORD; store it later with `seavault keychain store %s`.", err, shellQuote(name))
+			// Plain, user-facing one-liner (CLI-1): the raw exec error is kept in
+			// KeychainErrDetail for --debug, not spilled into the summary.
+			res.KeychainNote = fmt.Sprintf("could not save the password to the OS keychain (it may be locked, unavailable, or not configured). The vault still opens with the password you typed or via SEAVAULT_PASSWORD; store it later with `seavault keychain store %s`.", shellQuote(name))
+			res.KeychainErrDetail = err.Error()
 		} else {
 			res.KeychainSaved = true
 		}

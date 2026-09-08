@@ -61,15 +61,14 @@ func Save(s Store) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
 	s.Version = 1
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o600)
+	// Force 0600 on the file and 0700 on the config dir even when either already
+	// exists (review wordlist-labels-2); shared with the recovery-label writer.
+	return writeDeviceLocalFile(p, data)
 }
 
 func Add(name, vaultPath string) (Entry, error) {

@@ -120,6 +120,14 @@ func RunInteractive(pr Prompter, deps Deps, opts RunOptions) (Result, error) {
 		return Result{}, nil
 	}
 
+	// The location step shows the provider caveat inline exactly when it resolves
+	// to a SyncedFolder with a known provider (stepVaultLocation's list branch or
+	// resolveCustomLocation's typed-path branch). Remember that so the summary
+	// does NOT repeat it — the caveat is shown ONCE (CLI-2). The Result still
+	// carries CaveatNote for the GUI and the --preset path, which have no inline
+	// surface.
+	caveatShownInline := isSyncedWithProvider(cloud)
+
 	// Step 1 (--expert): KDF + chunk knobs, validated against the floor later.
 	var expert *ExpertOptions
 	if opts.Expert {
@@ -207,7 +215,16 @@ func RunInteractive(pr Prompter, deps Deps, opts RunOptions) (Result, error) {
 		}
 	}
 
-	for _, line := range SummaryLines(res, opened) {
+	// Render the summary from a copy: when the caveat was already shown inline at
+	// the location step, blank it here so it appears exactly once (CLI-2). The
+	// returned res keeps CaveatNote intact for the GUI/preset callers. offerOpen
+	// is true for the interactive wizard (it prints the "open it" next step); the
+	// --preset path passes false (a fleet run never launches the GUI).
+	summaryRes := res
+	if caveatShownInline {
+		summaryRes.CaveatNote = ""
+	}
+	for _, line := range SummaryLines(summaryRes, opened, true) {
 		pr.Show(line)
 	}
 
@@ -248,9 +265,13 @@ func stepVaultLocation(pr Prompter, home, goos string) (string, CloudChoice, err
 
 	options := make([]Option, 0, len(detected)+1)
 	for _, f := range detected {
+		// The provider caveat is NOT attached as the option Note: a prompter that
+		// renders option notes would print it during the list AND the code below
+		// shows it again once the folder is chosen, which is the doubled caveat the
+		// friction review flagged (CLI-2). The caveat is shown exactly once, inline,
+		// right after the choice.
 		options = append(options, Option{
 			Label: fmt.Sprintf("Inside your %s folder (%s)", DisplayName(f.Provider), filepath.Join(f.Path, defaultVaultName)),
-			Note:  f.Note,
 		})
 	}
 	options = append(options, Option{Label: fmt.Sprintf("A custom folder (default: %s)", def)})
@@ -465,25 +486,39 @@ func runRecoveryCeremony(pr Prompter, vaultDir, home, goos, password string) str
 		return fmt.Sprintf("the vault was created, but the recovery key could not be set up now (%v); set one up later with `seavault recovery generate %s`.", err, remedy)
 	}
 
-	pr.Show("Your recovery phrase — write it down or print it and store it safely. It is shown once and never stored:")
+	// Show the 24 numbered words by DEFAULT (design U2 §2.5), with the base32
+	// compact form beneath for people who prefer it (and for redeeming on a 0.17
+	// client). The words are a pure re-encoding of the SAME secret. The compact
+	// form is shown on its own bare line so the re-type gate below verifies the
+	// same value the owner wrote down.
+	vaultName := filepath.Base(filepath.Clean(vaultDir))
+	words, werr := vault.RecoveryPhraseWords(phrase)
+	pr.Show("Your recovery phrase — write down the 24 numbered words (in order) or print the card, and store it safely. It is shown once and never stored:")
+	for _, line := range numberedWordLines(words) {
+		pr.Show(line)
+	}
+	pr.Show("Compact form (base32) — the same key, for redeeming on a 0.17 client:")
 	pr.Show(phrase)
 
 	// Let the user save the shown phrase before the re-type gate (C6). A blank
 	// answer skips saving; the re-type still verifies whatever they wrote down.
-	// The file is a plaintext recovery phrase, so it is written owner-only
-	// (0600), the destination is validated against the vault dir and detected
-	// provider roots (recovery-integration-1), and the confirmation LABELS it as
-	// sensitive AND as written-before-confirmation (C6, recovery-integration-2).
+	// The saved file is a printable recovery CARD (the 24 words + compact form),
+	// stamped DRAFT until the read-back commits (C6). It is a plaintext copy of
+	// the master recovery secret, so it is written owner-only (0600), the
+	// destination is validated against the vault dir and detected provider roots
+	// (recovery-integration-1), and the confirmation LABELS it as sensitive AND as
+	// written-before-confirmation (C6, recovery-integration-2).
 	savedPath := ""
-	if path, terr := pr.Text("Optional: a file to save the phrase to now (leave blank to skip)", ""); terr == nil {
+	if path, terr := pr.Text("Optional: a file to save the recovery card to now (leave blank to skip)", ""); terr == nil {
 		if path = strings.TrimSpace(path); path != "" {
 			target := filepath.Clean(path)
 			if allowRecoverySavePath(pr, target, vaultDir, home, goos) {
-				if werr := os.WriteFile(target, []byte(phrase+"\n"), 0o600); werr != nil {
-					pr.Show(fmt.Sprintf("could not save the phrase to %s: %v", target, werr))
+				card := recoveryCardText(vaultName, words, phrase, werr != nil, true)
+				if werr2 := os.WriteFile(target, []byte(card), 0o600); werr2 != nil {
+					pr.Show(fmt.Sprintf("could not save the card to %s: %v", target, werr2))
 				} else {
 					savedPath = target
-					pr.Show(fmt.Sprintf("saved the recovery phrase to %s — this file is sensitive: it holds the plaintext recovery phrase, so anyone who can read it can unlock the vault, and it was written now, BEFORE you confirm the phrase below. It is written owner-only; keep it that way, and delete it once the phrase is stored somewhere safe.", target))
+					pr.Show(fmt.Sprintf("saved the recovery card to %s — this file is sensitive: it holds the plaintext recovery phrase, so anyone who can read it can unlock the vault, and it was written now, BEFORE you confirm the phrase below. It is stamped DRAFT until you complete the read-back. It is written owner-only; keep it that way, and delete it once the phrase is stored somewhere safe.", target))
 				}
 			}
 		}
@@ -507,6 +542,16 @@ func runRecoveryCeremony(pr Prompter, vaultDir, home, goos, password string) str
 		if vault.RecoveryPhraseMatches(phrase, readback) {
 			if cerr := commit(); cerr != nil {
 				return noCommitExit(fmt.Sprintf("the recovery phrase matched but could not be saved (%v); set one up later with `seavault recovery generate %s`.", cerr, remedy))
+			}
+			// The read-back committed: re-write the saved card WITHOUT the DRAFT
+			// stamp so a printed card is the confirmed one (C6). A rewrite failure
+			// is non-fatal — the key is committed; the file simply keeps its DRAFT
+			// stamp, which is the safe direction.
+			if savedPath != "" {
+				confirmed := recoveryCardText(vaultName, words, phrase, werr != nil, false)
+				if rerr := os.WriteFile(savedPath, []byte(confirmed), 0o600); rerr != nil {
+					pr.Show(fmt.Sprintf("the recovery key was saved, but the card file %s could not be re-stamped as confirmed (%v); it still holds the correct phrase.", savedPath, rerr))
+				}
 			}
 			return "A recovery key was created. Keep the phrase safe: it is the only way back into the vault if you forget the password."
 		}
@@ -573,11 +618,35 @@ func recoveryDeferNote(profileOrDir string) string {
 	return fmt.Sprintf("No recovery key was set up. Without one, a forgotten password means the vault cannot be opened — set one up any time with `seavault recovery generate %s`.", shellQuote(profileOrDir))
 }
 
+// isSyncedWithProvider reports whether a CloudChoice is a SyncedFolder bound to a
+// known provider — the case in which the location step showed the placement
+// caveat inline (CLI-2). A manual "already watched" SyncedFolder has an empty
+// Provider and shows no caveat.
+func isSyncedWithProvider(c CloudChoice) bool {
+	sf, ok := c.(SyncedFolder)
+	return ok && sf.Provider != ""
+}
+
+// stripLeadingNoteLabel removes a redundant leading "note:"/"Note:" from a note
+// string so a caller that adds its own "Note:" label does not print "Note: note:"
+// (CLI-2). It is display-only and never alters a note that does not start with the
+// prefix.
+func stripLeadingNoteLabel(s string) string {
+	for _, prefix := range []string{"note:", "Note:"} {
+		if strings.HasPrefix(s, prefix) {
+			return strings.TrimSpace(s[len(prefix):])
+		}
+	}
+	return s
+}
+
 // SummaryLines renders the plain-language success summary (design §3.3): what was
 // created, where, whether the keychain holds the password, whether a recovery key
 // exists, the cloud outcome, and the next step. It carries NO secret (I-S1): it
-// reads only the non-secret Result fields.
-func SummaryLines(res Result, opened bool) []string {
+// reads only the non-secret Result fields. offerOpen prints the "open it" next
+// step; a scripted --preset run passes false because it never launches the GUI
+// (the "open the app" trailer is dropped for fleets, ADM-1).
+func SummaryLines(res Result, opened bool, offerOpen bool) []string {
 	lines := []string{
 		"Your vault is ready.",
 		fmt.Sprintf("  Location: %s", res.VaultDir),
@@ -604,11 +673,13 @@ func SummaryLines(res Result, opened bool) []string {
 		lines = append(lines, "  Sync tip: "+res.CaveatNote)
 	}
 	if res.PreflightNote != "" {
-		lines = append(lines, "  Note:     "+res.PreflightNote)
+		// Strip a redundant leading "note:" so the "Note:" label is not doubled
+		// into "Note: note:" (CLI-2).
+		lines = append(lines, "  Note:     "+stripLeadingNoteLabel(res.PreflightNote))
 	}
 	if opened {
 		lines = append(lines, fmt.Sprintf("Opening the app for %q now.", res.ProfileName))
-	} else {
+	} else if offerOpen {
 		lines = append(lines, fmt.Sprintf("Next: open it with  seavault gui %s", res.ProfileName))
 	}
 	return lines

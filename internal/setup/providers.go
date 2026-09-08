@@ -35,8 +35,10 @@ var AllProviders = []Provider{
 }
 
 // caveats is the ONE source of truth for provider caveats (C7). The text lives
-// here in code, not in docs/cloud-provider-notes.md (which carries no caveat
-// text); that doc points at this catalog. Each string is the placement warning
+// here in code; docs/cloud-provider-notes.md carries a VERBATIM MIRROR of every
+// string below, kept honest by the DOC-3 drift guard (TestDocsMirrorCaveatCatalog)
+// so the doc can never silently diverge — this catalog stays authoritative. Each
+// string is the placement warning
 // the wizard shows inline when a provider folder is chosen, and the Note the
 // detector attaches to every hit. The common thread across providers is
 // on-demand / online-only file eviction: a vault is only openable when every

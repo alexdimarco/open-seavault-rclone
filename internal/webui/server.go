@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -209,6 +210,14 @@ type openRequest struct {
 	Password     string `json:"password"`
 	UseKeychain  bool   `json:"useKeychain"`
 	SavePassword bool   `json:"savePassword"`
+	// AcceptRollback is the GUI accept-rollback affordance (design U2 §2.7): a
+	// rolled-back config makes vault.Open refuse with ErrConfigRolledBack, and the
+	// page then offers an explicit "I restored this from a backup" re-submit that
+	// sets this AND re-supplies the password. The server passes AcceptRollback into
+	// vault.OpenWithOptions ONLY for such a request, and rejects an acceptRollback
+	// without a re-entered password (the same rule the CLI follows: acceptance
+	// always re-supplies the credential).
+	AcceptRollback bool `json:"acceptRollback,omitempty"`
 	// These are accepted so older browser pages that reused the create form
 	// payload can still open existing vaults without hitting DisallowUnknownFields.
 	Profile string `json:"profile,omitempty"`
@@ -1270,11 +1279,39 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	// it flips a per-session flag so the full page renders now and on every later
 	// reload for this session (design §3.4). The full page's "Back to guided
 	// setup" link (GUI-4) lands as /?guided=1 and clears that flag, so the
-	// stepper renders again while the first-run trigger still holds.
-	if r.URL.Query().Get("guided") == "1" {
+	// stepper renders again while the first-run trigger still holds. The
+	// Welcome-back "Go to the full app" link (/?app=1) also sticks the app view.
+	q := r.URL.Query()
+	if q.Get("guided") == "1" {
 		s.clearSetupSkipped(r)
-	} else if r.URL.Query().Get("advanced") == "1" {
+	} else if q.Get("advanced") == "1" || q.Get("app") == "1" {
 		s.markSetupSkipped(r)
+	}
+	s.mu.Lock()
+	vaultOpen := s.vault != nil
+	vaultPath := s.vaultPath
+	s.mu.Unlock()
+	vaultName := ""
+	if vaultOpen {
+		vaultName = filepath.Base(vaultPath)
+	}
+	setupSkipped := s.setupSkippedFor(r)
+	// The landing view (design U2 §2.1/§2.2). Whenever no vault is open the index
+	// lands on the Welcome-back view (review C5) — the stepper is NO LONGER the
+	// automatic landing for zero profiles; it is reached through the Create button
+	// (/?create=1) or the Back-to-guided link (/?guided=1). Skip-to-advanced
+	// (/?advanced=1) and "Go to the full app" (/?app=1) both set setupSkipped and
+	// land on the app; a vault open lands on the app (Files). The data-first-run
+	// attribute (below) is UNCHANGED: it still marks the raw first-run trigger, so
+	// the stepper markup is served and reachable on a fresh install.
+	view := "welcome"
+	switch {
+	case vaultOpen:
+		view = "app"
+	case q.Get("create") == "1" || q.Get("guided") == "1":
+		view = "stepper"
+	case setupSkipped:
+		view = "app"
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = page.Execute(w, struct {
@@ -1285,7 +1322,11 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		AuthEnabled     bool
 		FirstRun        bool
 		SkippedFirstRun bool
-	}{Token: s.token, InitialPath: s.vaultPath, SuggestedPaths: userpath.SuggestedVaultPaths(), RsyncHint: rsyncput.DefaultBinaryHint(), AuthEnabled: s.guiAuthEnabled(), FirstRun: s.firstRun(r), SkippedFirstRun: s.skippedFirstRun(r)})
+		View            string
+		VaultOpen       bool
+		VaultName       string
+		ShowAdvanced    bool
+	}{Token: s.token, InitialPath: s.vaultPath, SuggestedPaths: userpath.SuggestedVaultPaths(), RsyncHint: rsyncput.DefaultBinaryHint(), AuthEnabled: s.guiAuthEnabled(), FirstRun: s.firstRun(r), SkippedFirstRun: s.skippedFirstRun(r), View: view, VaultOpen: vaultOpen, VaultName: vaultName, ShowAdvanced: q.Get("advanced") == "1"})
 }
 
 // firstRun reports whether the GUI should render the first-run stepper instead
@@ -1489,6 +1530,14 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
+	// Accept-rollback (design U2 §2.7) always re-supplies the credential: an
+	// acceptRollback:true request WITHOUT a re-entered password is rejected (400)
+	// before any keychain fallback, so a rollback can never be accepted on a saved
+	// keychain secret alone.
+	if req.AcceptRollback && strings.TrimSpace(req.Password) == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "re-enter the vault password to accept a restored backup; a rollback cannot be accepted without re-supplying the password"})
+		return
+	}
 	password := req.Password
 	cfg, cfgErr := vault.ReadConfig(vaultPath)
 	if strings.TrimSpace(password) == "" && req.UseKeychain {
@@ -1511,8 +1560,25 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "password is required unless the OS keychain has this vault"})
 		return
 	}
-	v, err := vault.Open(vaultPath, password)
+	var v *vault.Vault
+	if req.AcceptRollback {
+		// The operator has explicitly acknowledged a restore-from-backup: pass
+		// AcceptRollback into Open so the strict freshness gate clears the anchor and
+		// re-TOFUs, for THIS request only. checkFreshness and the non-interactive
+		// path are untouched (I-U5).
+		v, err = vault.OpenWithOptions(vaultPath, password, vault.OpenOptions{AcceptRollback: true})
+	} else {
+		v, err = vault.Open(vaultPath, password)
+	}
 	if err != nil {
+		// A rolled-back config surfaces the accept-rollback affordance: the page
+		// reads canAcceptRollback and offers "I restored this from a backup", which
+		// re-submits with acceptRollback:true AND the re-entered password (design
+		// U2 §2.7). The error text still carries the strict-gate instructions.
+		if errors.Is(err, vault.ErrConfigRolledBack) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "canAcceptRollback": true})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
@@ -1623,17 +1689,34 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.refreshVaultKeychain(v.ID(), req.NewPassword)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "formatEpoch": v.Config.FormatEpoch})
+	// passwordChanged drives the plain-language humanize() sentence (design U2
+	// §2.4) so the GUI never renders the raw JSON body as the success message.
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "passwordChanged": true, "formatEpoch": v.Config.FormatEpoch})
 }
 
 type recoveryEntryDTO struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
+	// Handle is the stable 4-hex display handle (design U2 §2.6 / review C4): it
+	// is shown in the list on EVERY device regardless of a local label record, so
+	// a targeted revoke can never retire the wrong key even after earlier revokes
+	// renumber the ordinals. Ordinal is the 1-based on-disk position; Label /
+	// Created / Device come from the device-local store when a record exists;
+	// Display is the ready-to-render human label. All are display-only and never
+	// enter vault.json.
+	Handle    string `json:"handle,omitempty"`
+	Ordinal   int    `json:"ordinal,omitempty"`
+	HasRecord bool   `json:"hasRecord"`
+	Label     string `json:"label,omitempty"`
+	Created   string `json:"created,omitempty"`
+	Device    string `json:"device,omitempty"`
+	Display   string `json:"display,omitempty"`
 }
 
-// handleRecoveryList returns the recovery-entry IDs registered for the open vault
-//
-//	so the panel can offer them for revoke. Secret-free: IDs only.
+// handleRecoveryList returns the recovery entries registered for the open vault,
+// joined with this device's label store so the panel can show the stable handle
+// and the device-local label (design U2 §2.6). Secret-free: IDs, handles, and
+// display metadata only — never wrap ciphertext, salts, or any phrase.
 func (s *Server) handleRecoveryList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -1643,13 +1726,44 @@ func (s *Server) handleRecoveryList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	out := []recoveryEntryDTO{}
-	for _, ref := range v.WrapEntryRefs() {
-		if ref.Type == vault.WrapTypeRecovery {
-			out = append(out, recoveryEntryDTO{ID: ref.ID, Type: ref.Type})
+	ids := recoveryEntryIDs(v)
+	views, err := profile.LabelledRecoveryKeys(ids)
+	if err != nil {
+		// The label store is device-local and best-effort: a read error degrades to
+		// the bare handles rather than failing the list (design §6).
+		views = make([]profile.RecoveryKeyView, 0, len(ids))
+		for i, id := range ids {
+			views = append(views, profile.RecoveryKeyView{ID: id, Handle: profile.Handle(id), Ordinal: i + 1})
 		}
 	}
+	out := []recoveryEntryDTO{}
+	for _, view := range views {
+		out = append(out, recoveryEntryDTO{
+			ID:        view.ID,
+			Type:      vault.WrapTypeRecovery,
+			Handle:    view.Handle,
+			Ordinal:   view.Ordinal,
+			HasRecord: view.HasRecord,
+			Label:     view.Label,
+			Created:   view.Created,
+			Device:    view.Device,
+			Display:   view.Display(),
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": out})
+}
+
+// recoveryEntryIDs returns the IDs of the open vault's recovery wrap entries in
+// on-disk order (the appended one is last), the input to LabelledRecoveryKeys and
+// to the last-key revoke gate.
+func recoveryEntryIDs(v *vault.Vault) []string {
+	ids := []string{}
+	for _, ref := range v.WrapEntryRefs() {
+		if ref.Type == vault.WrapTypeRecovery {
+			ids = append(ids, ref.ID)
+		}
+	}
+	return ids
 }
 
 // handleRecoveryGenerate mints a recovery phrase and parks it as the pending
@@ -1661,6 +1775,10 @@ func (s *Server) handleRecoveryGenerate(w http.ResponseWriter, r *http.Request) 
 		methodNotAllowed(w)
 		return
 	}
+	// This endpoint's success body carries the freshly minted recovery phrase and
+	// its 24 words. Mark every response non-cacheable BEFORE any write so no phrase
+	// is retained by a cache or the browser history (adversarial review recovery-gui-2).
+	setNoStore(w)
 	v, ok := s.currentVault(w)
 	if !ok {
 		return
@@ -1670,10 +1788,19 @@ func (s *Server) handleRecoveryGenerate(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
 	}
+	// The GUI shows the 24 numbered words by default (design U2 §2.5), with the
+	// base32 compact form beneath. The words are a pure re-encoding of the SAME
+	// 256-bit secret the phrase already carries — no new secret, no re-wrap,
+	// nothing written to vault.json.
+	words, err := vault.RecoveryPhraseWords(phrase)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
 	s.mu.Lock()
 	s.pendingRecovery = &pendingRecovery{phrase: phrase, commit: commit}
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "phrase": phrase})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "phrase": phrase, "words": words})
 }
 
 type recoveryCommitRequest struct {
@@ -1689,7 +1816,8 @@ func (s *Server) handleRecoveryCommit(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if _, ok := s.currentVault(w); !ok {
+	v, ok := s.currentVault(w)
+	if !ok {
 		return
 	}
 	var req recoveryCommitRequest
@@ -1703,8 +1831,13 @@ func (s *Server) handleRecoveryCommit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "no recovery generation is pending; generate a phrase first"})
 		return
 	}
-	if !vault.RecoveryPhraseMatches(pend.phrase, req.Readback) {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "the re-entered phrase did not match; nothing was written — check the phrase and try again"})
+	// Verify the read-back through RecoveryPhraseCheck (not the boolean
+	// RecoveryPhraseMatches) so a word-shaped read-back with a single mistyped or
+	// misordered word surfaces the specific checksum/word message with the
+	// usability-aid disclaimer, instead of the generic wrong-phrase line (design
+	// U2 §2.5 / review C1). A base32-shaped mismatch keeps the generic message.
+	if err := vault.RecoveryPhraseCheck(pend.phrase, req.Readback); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: recoveryReadbackMessage(err)})
 		return
 	}
 	if err := pend.commit(); err != nil {
@@ -1714,7 +1847,47 @@ func (s *Server) handleRecoveryCommit(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.pendingRecovery = nil
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	// The read-back matched and the entry is durable: record the device-local label
+	// for the just-appended recovery entry (design U2 §2.6). It is display-only,
+	// best-effort, and never touches vault.json — a failure never fails the commit.
+	handle := recordRecoveryLabel(v)
+	// recoverySaved drives the plain-language humanize() sentence (design U2 §2.4).
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "recoverySaved": true, "handle": handle})
+}
+
+// recoveryReadbackMessage renders the commit read-back failure message. A
+// word-shaped read-back that fails strict decode (an unknown, miscounted,
+// mistyped, or misordered word) gets the specific typed message plus the
+// disclaimer that the built-in checksum is a usability aid, not a security
+// control (design U2 §2.5 / matrix M1). A base32-shaped mismatch keeps the
+// generic line. The message never contains either secret.
+func recoveryReadbackMessage(err error) string {
+	switch {
+	case errors.Is(err, vault.ErrRecoveryChecksum), errors.Is(err, vault.ErrRecoveryWordUnknown), errors.Is(err, vault.ErrRecoveryWordCount):
+		return err.Error() + ". This checksum is a usability aid, not a security control. Nothing was written — check the words against your saved copy and try again."
+	default:
+		return "the re-entered phrase did not match; nothing was written — check the phrase and try again"
+	}
+}
+
+// recordRecoveryLabel writes the device-local label record for the recovery entry
+// just appended to v (design U2 §2.6): the created date and this device's
+// hostname, keyed by the entry's full ID. It returns the entry's stable 4-hex
+// handle for the commit response. Display-only and best-effort — a store write
+// failure is swallowed (the entry is already durable) and never surfaces the
+// error to the phrase-bearing commit response.
+func recordRecoveryLabel(v *vault.Vault) string {
+	ids := recoveryEntryIDs(v)
+	if len(ids) == 0 {
+		return ""
+	}
+	id := ids[len(ids)-1]
+	host, _ := os.Hostname()
+	_ = profile.SetRecoveryLabel(id, profile.RecoveryKeyLabel{
+		Created: time.Now().Format("2006-01-02"),
+		Device:  host,
+	})
+	return profile.Handle(id)
 }
 
 type recoveryRedeemRequest struct {
@@ -1780,9 +1953,18 @@ func (s *Server) handleRecoveryRedeem(w http.ResponseWriter, r *http.Request) {
 
 type recoveryRevokeRequest struct {
 	ID string `json:"id"`
+	// Confirm is the explicit acknowledgement required to revoke the LAST recovery
+	// key (design U2 §2.7 / I-U4): revoking it leaves the vault with no recovery
+	// path, so without Confirm the server refuses with 409 and a body naming the
+	// consequence. It is ignored when other recovery keys remain.
+	Confirm bool `json:"confirm"`
 }
 
-// handleRecoveryRevoke retires one recovery entry by ID.
+// handleRecoveryRevoke retires one recovery entry by ID. Revoking the LAST
+// recovery key requires an explicit confirm flag (I-U4): without it the request
+// is refused with 409 and a body that names the consequence (no recovery path; a
+// forgotten password cannot be recovered), so the destructive step is never taken
+// unacknowledged.
 func (s *Server) handleRecoveryRevoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -1800,10 +1982,22 @@ func (s *Server) handleRecoveryRevoke(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "a recovery entry ID is required"})
 		return
 	}
+	// Last-key gate: when the vault holds only one recovery key, revoking it (the
+	// only recovery entry) removes the vault's last recovery path. Refuse unless the
+	// request carries an explicit confirm flag.
+	if len(recoveryEntryIDs(v)) <= 1 && !req.Confirm {
+		writeJSON(w, http.StatusConflict, apiError{Error: "This is the last recovery key. Revoking it leaves the vault with no recovery path; a forgotten password cannot be recovered. Re-send the revoke with confirm set to proceed."})
+		return
+	}
 	if err := v.RevokeRecovery(req.ID); err != nil {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
+	// The entry is gone from the vault: retire its device-local label record too, so
+	// a revoked key leaves no orphaned hostname/date behind (adversarial review
+	// wordlist-labels-3). Display-only and best-effort — the vault mutation already
+	// succeeded, so a store failure never fails the revoke.
+	_ = profile.DeleteRecoveryLabel(req.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -3522,7 +3716,12 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
+// keychainUnavailableMessage renders the keychain-unavailable message with a
+// plain lead line BEFORE the technical detail (design U2 §2.4): a non-technical
+// owner reads what it means for them first, then the backend detail follows for
+// anyone who needs it. The lead line names no secret.
 func keychainUnavailableMessage(st keychain.Status) string {
+	const lead = "This computer's keychain isn't available right now, so open-seavault-rclone can't save or read your vault password automatically. You can still open the vault by typing its password."
 	msg := st.Summary
 	if msg == "" {
 		msg = "OS keychain unavailable"
@@ -3537,13 +3736,25 @@ func keychainUnavailableMessage(st keychain.Status) string {
 		msg += " Missing: " + strings.Join(st.Missing, ", ") + "."
 	}
 	msg += " Enter the vault password manually, or set SEAVAULT_PASSWORD before launching open-seavault-rclone."
-	return msg
+	return lead + " " + msg
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// setNoStore marks a response as non-cacheable. It MUST be called before the
+// first write (before writeJSON, which flushes the status line). It is set on
+// every response that can carry recovery-phrase material so no phrase is retained
+// by an intermediary or the browser's cache/history (adversarial review
+// recovery-gui-2). Cache-Control: no-store is the directive; Pragma: no-cache is
+// the HTTP/1.0 belt-and-braces for the same intent.
+func setNoStore(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Cache-Control", "no-store")
+	h.Set("Pragma", "no-cache")
 }
 
 func methodNotAllowed(w http.ResponseWriter) {
@@ -4084,13 +4295,34 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
   .checkline { width: 100%; }
   table { min-width: 620px; }
 }
-/* First-run stepper (design §3.4): shown only when the server renders the page
-   in first-run mode; it replaces the full 22-panel page until the user finishes
-   setup or follows "Skip to advanced". */
-#setup-stepper { display: none; }
-body.first-run #setup-stepper { display: block; }
-body.first-run > header .jump-links { display: none; }
-body.first-run .app-shell > .content > section:not(#setup-stepper) { display: none; }
+/* Four-destination shell (design U2 §2.1). The index renders one of three
+   server-chosen views (view-welcome / view-stepper / view-app) via the body
+   class; within the app view a single destination shows at a time (JS toggles
+   .active). The Welcome-back and stepper markup and every destination stay in
+   the DOM in all views so element ids never disappear (I-U1) — the view class
+   only chooses what is visible. */
+.destination-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+.destinations { display: flex; flex-wrap: wrap; gap: 8px; }
+.destination-tab { border: 1px solid var(--button-border); background: var(--panel); color: var(--fg); border-radius: 999px; padding: 8px 16px; font: inherit; cursor: pointer; }
+.destination-tab.active { background: var(--button); border-color: var(--focus); font-weight: 600; }
+.advanced-toggle-row { margin: 0; }
+.welcome-redeem { margin-top: 12px; border-top: 1px solid var(--button-border); padding-top: 12px; }
+.welcome-redeem > summary { cursor: pointer; color: var(--focus); }
+.section-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 4px; }
+.section-list a { color: var(--focus); text-decoration: none; padding: 4px 0; }
+.section-list a:hover { text-decoration: underline; }
+.field-note { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; }
+.field-note.field-alert { color: var(--danger, #b00020); }
+.destination { display: none; gap: 16px; grid-template-columns: 1fr; }
+.destination.active { display: grid; }
+#welcome-back, #setup-stepper { display: none; }
+body.view-welcome #welcome-back { display: block; }
+body.view-stepper #setup-stepper { display: block; }
+/* In the welcome and stepper views the destination shell (bar + panels) and the
+   result rail are hidden; the app view hides welcome-back and the stepper. */
+body.view-welcome .destination-bar, body.view-welcome .destination,
+body.view-stepper .destination-bar, body.view-stepper .destination { display: none; }
+body.view-welcome .result-panel, body.view-stepper .result-panel { display: none; }
 #setup-stepper .step { display: none; }
 #setup-stepper .step.active { display: block; }
 #setup-stepper .step-dots { display: flex; gap: 8px; margin: 6px 0 14px; flex-wrap: wrap; }
@@ -4104,7 +4336,7 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
 #setup-stepper .field-error.field-ok { color: var(--muted); }
 </style>
 </head>
-<body data-first-run="{{if .FirstRun}}true{{else}}false{{end}}" class="{{if .FirstRun}}first-run{{end}}">
+<body data-first-run="{{if .FirstRun}}true{{else}}false{{end}}" class="view-{{.View}}{{if eq .View "stepper"}} first-run{{end}}{{if .ShowAdvanced}} show-advanced{{end}}">
 <header>
   <div class="header-row">
     <div class="header-main">
@@ -4119,18 +4351,6 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
     </div>
     <div class="header-actions"><a class="settings-button" href="/help">Help</a><a class="settings-button" href="#settings-panel">Settings</a>{{if .AuthEnabled}}<a class="settings-button" href="/logout">Logout</a>{{end}}</div>
   </div>
-  <nav class="jump-links" aria-label="Page sections">
-    <a href="#files-panel">WebDAV files</a>
-    <a href="#vault-panel">Vault</a>
-    <a href="#upload-panel">Upload</a>
-    <a href="#move-panel">Move vault</a>
-    <a href="#export-panel">Export</a>
-    <a href="#remote-panel">Remote</a>
-    <a href="#settings-panel">Settings</a>
-    <a href="/help">Help</a>
-    <a href="#managed-tools-panel">Managed tools</a>
-    <a href="#keys-panel">SSH keys</a>
-  </nav>
   <div id="compatWarning" class="compat-warning" role="alert"></div>
   {{if .SkippedFirstRun}}<div id="backToGuided" class="notice-banner" role="status"><span class="notice-title">Guided setup</span> You skipped the first-run wizard. <a href="/?guided=1">Back to guided setup</a> &mdash; available until you create your first vault.</div>{{end}}
   <div id="recoveryReminder" class="notice-banner" role="status" hidden><button class="notice-dismiss" type="button" aria-label="Dismiss" onclick="dismissRecoveryReminder()">x</button><span class="notice-title">No recovery key</span> This vault has no recovery key. Without one, a forgotten password means the vault cannot be opened. Create one from the Password &amp; recovery panel with &ldquo;Generate recovery key&rdquo;.</div>
@@ -4138,6 +4358,57 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
 </header>
 <main class="app-shell">
 <div class="content">
+<div class="destination-bar">
+  <nav class="destinations" aria-label="Destinations">
+    <button type="button" class="destination-tab active" data-destination="files" onclick="showDestination('files')">Files</button>
+    <button type="button" class="destination-tab" data-destination="cloud" onclick="showDestination('cloud')">Cloud sync</button>
+    <button type="button" class="destination-tab" data-destination="security" onclick="showDestination('security')">Security</button>
+    <button type="button" class="destination-tab" data-destination="advanced" onclick="showDestination('advanced')">Advanced</button>
+  </nav>
+  <p class="advanced-toggle-row"><button type="button" id="showAdvancedToggle" onclick="toggleAdvanced()">Show advanced</button></p>
+</div>
+
+<section id="welcome-back" aria-label="Welcome back">
+  <h2>Welcome back</h2>
+  <p class="hint">Open one of your saved vaults, point open-seavault-rclone at a vault folder you already have, or create a new vault.</p>
+  <div id="welcomeVaultList" class="table-wrap"><p class="hint">Loading your saved vaults&hellip;</p></div>
+  <div class="form-grid">
+    <label>I already have a vault &mdash; choose its folder
+      <input id="welcomeVaultPath" placeholder="~/Nextcloud/seavault" autocomplete="off">
+      <small>Point to a vault folder you already have, for example one your sync client restored on this device. This opens it with the existing vault; nothing is created.</small>
+    </label>
+    <label>Password
+      <input id="welcomePassword" type="password" autocomplete="current-password">
+      <small>Leave blank only when this vault's password is saved in this computer's OS keychain.</small>
+    </label>
+  </div>
+  <p class="row-actions">
+    <button type="button" class="operation" onclick="welcomeOpen()">Open</button>
+    <a class="settings-button" href="/?create=1">Create a new vault</a>
+    <a class="settings-button" href="/?app=1">Go to the full app</a>
+  </p>
+  <details id="welcomeRedeem" class="welcome-redeem" ontoggle="welcomeRedeemPrefill()">
+    <summary>Forgot your password? Use a recovery key</summary>
+    <p class="hint">Use your recovery phrase to set a new password for a vault you cannot open. You do NOT need to open the vault first &mdash; the recovery phrase opens it. This consumes the recovery key.</p>
+    <div class="form-grid">
+      <label>Vault folder
+        <input id="welcomeRedeemVaultPath" placeholder="~/Nextcloud/seavault" autocomplete="off">
+        <small>The folder of the vault you want to recover. Prefilled from the folder you chose above; change it if the vault lives elsewhere.</small>
+      </label>
+      <label>Recovery phrase
+        <input id="welcomeRedeemPhrase" autocomplete="off" placeholder="24 words, or the compact XXXX-XXXX form">
+      </label>
+      <label>New password
+        <input id="welcomeRedeemNew" type="password" autocomplete="new-password" placeholder="new vault password">
+      </label>
+      <label>Confirm new password
+        <input id="welcomeRedeemNewConfirm" type="password" autocomplete="new-password" placeholder="re-enter the new password">
+      </label>
+    </div>
+    <p class="row-actions"><button type="button" class="operation" onclick="welcomeRedeem()">Set a new password with my recovery key</button></p>
+  </details>
+</section>
+
 <section id="setup-stepper" aria-label="First-run setup">
   <a class="skip-advanced" href="/?advanced=1">Skip to advanced view</a>
   <h2>Set up your encrypted vault</h2>
@@ -4238,47 +4509,16 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
   </div>
 </section>
 
-<section id="files-panel">
-  <h2>WebDAV file manager</h2>
-  <p class="hint">This is open-seavault-rclone's built-in WebDAV client. It talks to the local same-origin WebDAV endpoint and does not depend on Finder, Windows Explorer, GNOME Files, KDE Dolphin, davfs2, WinFsp, macFUSE, or FUSE.</p>
-  <p class="row-actions">
-    <button class="operation" onclick="refreshDavFiles()">Refresh folder</button>
-    <button class="secondary operation" onclick="closeVaultFromWebDAV()">Close vault</button>
-    <button class="operation" onclick="createDavFolder()">New folder</button>
-    <button class="operation" onclick="downloadSelectedDav()">Download selected file</button>
-    <button class="operation" onclick="downloadSelectedDavZip()">Download selected folder as ZIP</button>
-    <button class="operation" onclick="renameSelectedDav()">Rename/move</button>
-    <button class="operation" onclick="copySelectedDav()">Copy</button>
-    <button class="danger operation" onclick="deleteSelectedDav()">Delete</button>
-    <button class="secondary" onclick="copyDavURL()">Copy WebDAV URL</button>
-    <label class="checkline"><input id="webdavReadOnly" type="checkbox" onchange="toggleWebDAVReadOnly()"> Read-only WebDAV mode</label>
-  </p>
-  <div class="form-grid">
-    <label>Upload files through WebDAV
-      <input id="davFileInput" type="file" multiple>
-      <small>Files upload into the current WebDAV folder.</small>
-    </label>
-    <label>Upload folder through WebDAV
-      <input id="davFolderInput" type="file" webkitdirectory directory multiple>
-      <small>Folder uploads preserve browser-provided relative paths.</small>
-    </label>
-  </div>
-  <div id="davDropZone" class="drop-zone">Drop files here to upload into the current folder.</div>
-  <div class="file-manager-grid">
-    <div class="folder-tree">
-      <strong>Folder tree</strong>
-      <div id="davTree"><p class="hint">Open a vault, then refresh.</p></div>
-    </div>
-    <div class="file-browser">
-      <div id="davBreadcrumb" class="breadcrumb"></div>
-      <div id="davTable" class="table-wrap"><p class="hint">Open a vault to browse files.</p></div>
-    </div>
-  </div>
-</section>
-
-
+<div class="destination active" id="dest-files" data-destination="files" aria-label="Files">
+  <nav class="section-list" aria-label="Files sections">
+    <a href="#vault-panel">Your vault</a>
+    <a href="#saved-vaults-panel">Switch vault</a>
+    <a href="#upload-panel">Add files</a>
+    <a href="#export-panel">Get files out</a>
+    <a href="#files-panel">Browse files</a>
+  </nav>
 <section id="vault-panel">
-  <h2>Open or create vault</h2>
+  <h2>Your vault</h2>
   <div class="form-grid">
     <label>Saved vault selector
       <select id="vaultSelect" onchange="selectSavedVault()">
@@ -4323,8 +4563,15 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
   <p class="hint">Saved vault locations are stored in the app profile list. Passwords are stored separately in the OS keychain by vault ID. The encrypted vault folder can still be moved by your sync client.</p>
 </section>
 
+<section id="saved-vaults-panel">
+  <h2>Switch vault</h2>
+  <p class="hint">These locations appear in the vault dropdown. Passwords are only stored when you save them to the OS keychain.</p>
+  <p><button onclick="refreshStatus()">Refresh saved vaults</button></p>
+  <div id="profiles" class="table-wrap"></div>
+</section>
+
 <section id="upload-panel">
-  <h2>Upload into encrypted archive</h2>
+  <h2>Add files</h2>
   <p class="hint">Browser uploads are encrypted directly into the vault. For very large folders, the GUI sends smaller batches. Local path ingest lets the local GUI server read the folder directly. It uses native Go import by default, or optional managed/system rsync staging when selected.</p>
   <div class="form-grid">
     <label>Virtual path or folder
@@ -4374,98 +4621,8 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
   </p>
 </section>
 
-
-<section id="move-panel">
-  <h2>Move vault location</h2>
-  <p class="hint">Move the encrypted vault folder to another local disk or sync-client folder. The OS keychain entry is kept because it is tied to the vault ID, not the path. Saved vault and matching remote profiles are updated after a successful move.</p>
-  <div class="form-grid">
-    <label>Saved vault to move
-      <select id="moveProfile" onchange="fillMoveFromProfile()">
-        <option value="">Use active/manual source path</option>
-      </select>
-      <small>Select a saved vault, or leave blank to move the active/manual source path.</small>
-    </label>
-    <label>Source vault path
-      <input id="moveSource" placeholder="active vault or saved profile path" autocomplete="off">
-      <small>Leave blank to move the active open vault, or enter a vault path/profile.</small>
-    </label>
-    <label>New vault location
-      <input id="moveDest" placeholder="~/Nextcloud/seavault-new" autocomplete="off">
-      <small>Choose the new encrypted vault folder location. Do not choose a folder inside the existing vault.</small>
-    </label>
-    <label>Move options
-      <span class="checkline"><input id="moveUpdateRemotes" type="checkbox" checked> Update matching remote profiles</span>
-      <span class="checkline"><input id="moveReplace" type="checkbox"> Replace existing destination if present</span>
-      <small>Replace removes the destination path first. Use it only when you are certain it does not contain needed data.</small>
-    </label>
-  </div>
-  <p class="row-actions">
-    <button class="operation" onclick="moveVaultLocation()">Move vault location</button>
-    <button class="secondary" onclick="prefillMoveFromActive()">Use active vault as source</button>
-  </p>
-</section>
-
-<section id="password-recovery-panel">
-  <h2>Password &amp; recovery</h2>
-  <p class="hint">Change the vault password or manage recovery keys for the open vault. Rotations rewrap the keys only &mdash; no file is re-encrypted &mdash; and update the OS keychain entry when one exists. Do a rotation on ONE device and let it sync before changing it elsewhere.</p>
-  <div class="form-grid">
-    <label>Change password &mdash; new password
-      <input id="pwNew" type="password" autocomplete="new-password" placeholder="new vault password">
-    </label>
-    <label>Confirm new password
-      <input id="pwNewConfirm" type="password" autocomplete="new-password" placeholder="re-enter the new password">
-    </label>
-  </div>
-  <p class="row-actions"><button class="operation" onclick="changeVaultPassword()">Change password</button></p>
-
-  <h3>Recovery keys</h3>
-  <p class="hint">A recovery key is a one-time phrase that can unlock the vault and set a new password if you lose the password. It is shown ONCE and never stored &mdash; write it down. Redeeming or revoking a key retires it.</p>
-  <p class="row-actions">
-    <button class="operation" onclick="generateRecovery()">Generate recovery key</button>
-    <button class="secondary" onclick="listRecovery()">Refresh recovery key list</button>
-  </p>
-  <div id="recoveryPhraseBox" hidden>
-    <div id="recoveryPhraseStep">
-      <p class="hint">Write this recovery phrase on paper now. It is shown ONCE and never stored. When you have written it down, continue to confirm it &mdash; the phrase is hidden before you re-enter it.</p>
-      <pre id="recoveryPhrase" class="table-wrap" style="white-space:pre-wrap;word-break:break-all;"></pre>
-      <p class="row-actions">
-        <button class="operation" onclick="recoveryWrittenDown()">I have written it down &mdash; continue</button>
-        <button class="secondary" onclick="cancelRecovery()">Cancel</button>
-      </p>
-    </div>
-    <div id="recoveryReadbackStep" hidden>
-      <p class="hint">Re-enter the recovery phrase from your written copy to confirm before it is saved. Paste is disabled so the re-entry proves you captured it off-screen.</p>
-      <div class="form-grid">
-        <label>Re-enter the recovery phrase to confirm
-          <input id="recoveryReadback" autocomplete="off" onpaste="return false" ondrop="return false" ondragover="return false" placeholder="type the phrase from your written copy">
-        </label>
-      </div>
-      <p class="row-actions">
-        <button class="operation" onclick="commitRecovery()">Confirm and save recovery key</button>
-        <button class="secondary" onclick="cancelRecovery()">Cancel</button>
-      </p>
-    </div>
-  </div>
-  <div id="recoveryList" class="table-wrap"></div>
-
-  <h3>Redeem a recovery key</h3>
-  <p class="hint">Use a recovery phrase to set a new password (for example, if you lost the password). You do NOT need to open the vault first &mdash; select or enter the vault path above, then redeem. This consumes the recovery key.</p>
-  <div class="form-grid">
-    <label>Recovery phrase
-      <input id="redeemPhrase" autocomplete="off" placeholder="recovery phrase">
-    </label>
-    <label>New password
-      <input id="redeemNew" type="password" autocomplete="new-password" placeholder="new vault password">
-    </label>
-    <label>Confirm new password
-      <input id="redeemNewConfirm" type="password" autocomplete="new-password" placeholder="re-enter the new password">
-    </label>
-  </div>
-  <p class="row-actions"><button class="operation" onclick="redeemRecovery()">Redeem recovery key</button></p>
-</section>
-
 <section id="export-panel">
-  <h2>Export plaintext from vault</h2>
+  <h2>Get files out</h2>
   <p class="hint">Exports decrypt files from the open vault to a local destination. The destination is never inside .seavault unless you explicitly type that path, which is not recommended.</p>
   <div class="form-grid">
     <label>Selected virtual folder or file
@@ -4496,21 +4653,224 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
   </p>
 </section>
 
+<section id="files-panel">
+  <h2>Browse files</h2>
+  <p class="hint">Browse, download, rename, and delete the files inside your open vault. This built-in WebDAV file manager works on its own &mdash; it does not need Finder, Windows Explorer, GNOME Files, KDE Dolphin, davfs2, WinFsp, macFUSE, or any FUSE mount.</p>
+  <p class="row-actions">
+    <button class="operation" onclick="refreshDavFiles()">Refresh folder</button>
+    <button class="secondary operation" onclick="closeVaultFromWebDAV()">Close vault</button>
+    <button class="operation" onclick="createDavFolder()">New folder</button>
+    <button class="operation" onclick="downloadSelectedDav()">Download selected file</button>
+    <button class="operation" onclick="downloadSelectedDavZip()">Download selected folder as ZIP</button>
+    <button class="operation" onclick="renameSelectedDav()">Rename/move</button>
+    <button class="operation" onclick="copySelectedDav()">Copy</button>
+    <button class="danger operation" onclick="deleteSelectedDav()">Delete</button>
+    <button class="secondary" onclick="copyDavURL()">Copy WebDAV URL</button>
+    <label class="checkline"><input id="webdavReadOnly" type="checkbox" onchange="toggleWebDAVReadOnly()"> Read-only WebDAV mode</label>
+  </p>
+  <div class="form-grid">
+    <label>Upload files through WebDAV
+      <input id="davFileInput" type="file" multiple>
+      <small>Files upload into the current WebDAV folder.</small>
+    </label>
+    <label>Upload folder through WebDAV
+      <input id="davFolderInput" type="file" webkitdirectory directory multiple>
+      <small>Folder uploads preserve browser-provided relative paths.</small>
+    </label>
+  </div>
+  <div id="davDropZone" class="drop-zone">Drop files here to upload into the current folder.</div>
+  <div class="file-manager-grid">
+    <div class="folder-tree">
+      <strong>Folder tree</strong>
+      <div id="davTree"><p class="hint">Open a vault, then refresh.</p></div>
+    </div>
+    <div class="file-browser">
+      <div id="davBreadcrumb" class="breadcrumb"></div>
+      <div id="davTable" class="table-wrap"><p class="hint">Open a vault to browse files.</p></div>
+    </div>
+  </div>
+</section>
+</div>
 
+<div class="destination" id="dest-cloud" data-destination="cloud" aria-label="Cloud sync">
+  <nav class="section-list" aria-label="Cloud sync sections">
+    <a href="#remote-panel">Cloud sync</a>
+    <a href="#keys-panel">SFTP keys</a>
+  </nav>
+<section id="remote-panel">
+  <h2>Cloud sync</h2>
+  <p class="hint">Cloud sync uses the managed rclone runtime. If it is not installed yet, choose &ldquo;Check cloud runtime&rdquo; and open-seavault-rclone will ask before downloading it.</p>
+  <p class="row-actions"><button type="button" class="secondary" onclick="ensureRcloneRuntime()">Check cloud runtime</button></p>
+  <div id="cloudRuntimeConsent" class="notice-banner" role="status" hidden>
+    <span class="notice-title">Cloud runtime needed</span>
+    <p id="cloudRuntimeConsentText">The rclone runtime is not installed. Download rclone from rclone.org to enable cloud sync?</p>
+    <p class="row-actions">
+      <button type="button" class="operation" onclick="cloudRuntimeInstall()">Download and install rclone</button>
+      <button type="button" class="secondary" onclick="cloudRuntimeConsentDismiss()">Not now</button>
+    </p>
+  </div>
+  <div class="form-grid">
+    <label>Name <input id="remoteName" placeholder="research-b2-ca" autocomplete="off"></label>
+    <label>Type <select id="remoteType"><option value="rclone">rclone</option><option value="local">local folder copy</option></select></label>
+    <label>Vault path/profile <input id="remoteVault" placeholder="leave blank to use open vault" autocomplete="off"></label>
+    <label>Remote path <input id="remotePath" placeholder="remote:bucket/path or ~/Backup/seavault" autocomplete="off"><small>For rclone, enter the provider path. The app transfers only .seavault.</small></label>
+    <label>Backend label <input id="remoteBackend" value="local" placeholder="local, sftp, s3, b2, onedrive, webdav" autocomplete="off"></label>
+    <label>Transfers <input id="remoteTransfers" type="number" value="8"></label>
+    <label>Checkers <input id="remoteCheckers" type="number" value="16"></label>
+    <label>Bandwidth limit <input id="remoteBandwidth" placeholder="optional, e.g. 10M" autocomplete="off"></label>
+  </div>
+  <p class="row-actions">
+    <label class="checkline"><input id="remoteFastList" type="checkbox" checked> Use fast-list when supported</label>
+    <button onclick="saveRemote()">Save remote profile</button>
+    <button onclick="loadRemotes()">Refresh remotes</button>
+  </p>
+  <div id="remotes" class="table-wrap"></div>
+  <pre id="remoteOutput">No remote action has run.</pre>
+</section>
+
+<section id="keys-panel">
+  <h2>SFTP keys</h2>
+  <div class="form-grid">
+    <label>Managed key name <input id="sshKeyName" placeholder="research-sftp" autocomplete="off"></label>
+    <label>Import existing private key path <input id="sshKeyPath" placeholder="optional path to import" autocomplete="off"></label>
+  </div>
+  <p class="row-actions"><button onclick="generateSSHKey()">Generate/import key</button><button onclick="loadSSHKeys()">Refresh keys</button></p>
+  <div id="sshKeys" class="table-wrap"></div>
+</section>
+</div>
+
+<div class="destination" id="dest-security" data-destination="security" aria-label="Security">
+  <nav class="section-list" aria-label="Security sections">
+    <a href="#password-recovery-panel">Password and recovery key</a>
+    <a href="#health-panel">Check vault health</a>
+  </nav>
+<section id="password-recovery-panel">
+  <h2 id="passwordRecoveryHeader">Password and recovery key{{if .VaultOpen}} &mdash; {{.VaultName}}{{end}}</h2>
+  <p class="hint">Change the vault password or manage recovery keys for the open vault. Rotations rewrap the keys only &mdash; no file is re-encrypted &mdash; and update the OS keychain entry when one exists. Do a rotation on ONE device and let it sync before changing it elsewhere.</p>
+  <div class="form-grid">
+    <label>Change password &mdash; new password
+      <input id="pwNew" type="password" autocomplete="new-password" placeholder="new vault password">
+      <small id="pwStrengthHint" class="field-note" role="status"></small>
+    </label>
+    <label>Confirm new password
+      <input id="pwNewConfirm" type="password" autocomplete="new-password" placeholder="re-enter the new password">
+    </label>
+  </div>
+  <small id="pwNewConfirmError" class="field-note field-alert" role="alert" hidden></small>
+  <p class="row-actions"><button class="operation" onclick="changeVaultPassword()">Change password</button></p>
+
+  <h3>Recovery keys</h3>
+  <p class="hint">A recovery key is a one-time phrase that can unlock the vault and set a new password if you lose the password. It is shown ONCE and never stored &mdash; write it down. Redeeming or revoking a key retires it.</p>
+  <p class="row-actions">
+    <button class="operation" onclick="generateRecovery()">Generate recovery key</button>
+    <button class="secondary" onclick="listRecovery()">Refresh recovery key list</button>
+  </p>
+  <div id="recoveryPhraseBox" hidden>
+    <div id="recoveryPhraseStep">
+      <p class="hint">Write these 24 numbered words on paper now, in order. They are shown ONCE and never stored. When you have written them down, continue to confirm them &mdash; the words are hidden before you re-enter them.</p>
+      <ol id="recoveryWords" class="recovery-words"></ol>
+      <p class="hint">Compact form (base32) &mdash; the same key, for anyone who prefers it or is redeeming on an older version:</p>
+      <pre id="recoveryPhrase" class="table-wrap" style="white-space:pre-wrap;word-break:break-all;"></pre>
+      <p class="row-actions">
+        <button class="secondary" onclick="recoveryPrintCard()">Print recovery card</button>
+        <button class="operation" onclick="recoveryWrittenDown()">I have written it down &mdash; continue</button>
+        <button class="secondary" onclick="cancelRecovery()">Cancel</button>
+      </p>
+    </div>
+    <div id="recoveryReadbackStep" hidden>
+      <p class="hint">Re-enter the recovery phrase from your written copy to confirm before it is saved. Paste is disabled so the re-entry proves you captured it off-screen.</p>
+      <p class="hint">If a word is mistyped or out of order, the built-in checksum will usually catch it and say so. That checksum is a usability aid, not a security control.</p>
+      <div class="form-grid">
+        <label>Re-enter the recovery phrase to confirm
+          <input id="recoveryReadback" autocomplete="off" onpaste="return false" ondrop="return false" ondragover="return false" placeholder="type the phrase from your written copy">
+        </label>
+      </div>
+      <p class="row-actions">
+        <button class="operation" onclick="commitRecovery()">Confirm and save recovery key</button>
+        <button class="secondary" onclick="cancelRecovery()">Cancel</button>
+      </p>
+    </div>
+  </div>
+  <div id="recoveryConfirmedCard" hidden>
+    <p class="hint">Recovery key confirmed. You can print a clean copy of the card (no draft stamp) for safekeeping. Keep it on paper, away from this computer.</p>
+    <p class="row-actions">
+      <button class="secondary" onclick="recoveryPrintConfirmedCard()">Print confirmed card</button>
+    </p>
+  </div>
+  <div id="recoveryList" class="table-wrap"></div>
+
+  <h3>Redeem a recovery key</h3>
+  <p class="hint">Use a recovery phrase to set a new password (for example, if you lost the password). You do NOT need to open the vault first &mdash; enter the vault's folder in the field below, then redeem. This consumes the recovery key.</p>
+  <div class="form-grid">
+    <label>Vault folder
+      <input id="redeemVaultPath" placeholder="~/Nextcloud/seavault" autocomplete="off">
+      <small>The folder of the vault to recover. You do not need to open it first; the recovery phrase opens it. Leave blank to use the vault already selected.</small>
+    </label>
+    <label>Recovery phrase
+      <input id="redeemPhrase" autocomplete="off" placeholder="24 words, or the compact XXXX-XXXX form">
+    </label>
+    <label>New password
+      <input id="redeemNew" type="password" autocomplete="new-password" placeholder="new vault password">
+    </label>
+    <label>Confirm new password
+      <input id="redeemNewConfirm" type="password" autocomplete="new-password" placeholder="re-enter the new password">
+    </label>
+  </div>
+  <p class="row-actions"><button class="operation" onclick="redeemRecovery()">Redeem recovery key</button></p>
+</section>
+
+<section id="health-panel">
+  <h2>Check vault health</h2>
+  <p class="hint">Verify decrypts and re-checks every referenced chunk. Reclaim space frees storage taken by unreferenced data, in two fenced steps so other devices can object first. Tidy conflicts only reconciles conflicting edits and stale records &mdash; it frees no space.</p>
+  <p class="row-actions"><button class="operation" onclick="verifyVault()">Verify</button><button class="operation" onclick="reclaimSpacePreview()">Reclaim space</button><button class="operation" onclick="compactVault()">Tidy conflicts</button></p>
+  <div id="gcPreview" class="gc-preview" hidden></div>
+</section>
+</div>
+
+<div class="destination" id="dest-advanced" data-destination="advanced" aria-label="Advanced" hidden>
+  <nav class="section-list" aria-label="Advanced sections">
+    <a href="#legacy-files-panel">Advanced raw file list</a>
+    <a href="#move-panel">Move vault location</a>
+    <a href="#managed-tools-panel">Managed rsync runtime</a>
+    <a href="#rclone-runtime-panel">Rclone runtime</a>
+    <a href="#settings-panel">Settings</a>
+    <a href="/help">Help</a>
+  </nav>
 <section id="legacy-files-panel">
   <h2>Advanced raw file list</h2>
-  <p class="hint">Debug view of virtual paths and chunk counts. Use the WebDAV file manager above for normal file browsing.</p>
-  <p class="row-actions"><button onclick="refreshFiles()">Refresh raw list</button><button class="operation" onclick="verifyVault()">Verify</button><button class="operation" onclick="reclaimSpacePreview()">Reclaim space</button><button class="operation" onclick="compactVault()">Tidy conflicts</button><button onclick="loadStats()">Stats</button></p>
-  <p class="hint">Reclaim space frees storage taken by unreferenced data, in two fenced steps so other devices can object first. Tidy conflicts only reconciles conflicting edits and stale records — it frees no space.</p>
-  <div id="gcPreview" class="gc-preview" hidden></div>
+  <p class="hint">Debug view of virtual paths and chunk counts. Use Browse files in the Files tab for normal file browsing.</p>
+  <p class="row-actions"><button onclick="refreshFiles()">Refresh raw list</button><button onclick="loadStats()">Stats</button></p>
   <div id="files" class="table-wrap"></div>
 </section>
 
-<section>
-  <h2>Saved vault locations</h2>
-  <p class="hint">These locations appear in the vault dropdown. Passwords are only stored when you save them to the OS keychain.</p>
-  <p><button onclick="refreshStatus()">Refresh saved vaults</button></p>
-  <div id="profiles" class="table-wrap"></div>
+<section id="move-panel">
+  <h2>Move vault location</h2>
+  <p class="hint">Move the encrypted vault folder to another local disk or sync-client folder. The OS keychain entry is kept because it is tied to the vault ID, not the path. Saved vault and matching remote profiles are updated after a successful move.</p>
+  <div class="form-grid">
+    <label>Saved vault to move
+      <select id="moveProfile" onchange="fillMoveFromProfile()">
+        <option value="">Use active/manual source path</option>
+      </select>
+      <small>Select a saved vault, or leave blank to move the active/manual source path.</small>
+    </label>
+    <label>Source vault path
+      <input id="moveSource" placeholder="active vault or saved profile path" autocomplete="off">
+      <small>Leave blank to move the active open vault, or enter a vault path/profile.</small>
+    </label>
+    <label>New vault location
+      <input id="moveDest" placeholder="~/Nextcloud/seavault-new" autocomplete="off">
+      <small>Choose the new encrypted vault folder location. Do not choose a folder inside the existing vault.</small>
+    </label>
+    <label>Move options
+      <span class="checkline"><input id="moveUpdateRemotes" type="checkbox" checked> Update matching remote profiles</span>
+      <span class="checkline"><input id="moveReplace" type="checkbox"> Replace existing destination if present</span>
+      <small>Replace removes the destination path first. Use it only when you are certain it does not contain needed data.</small>
+    </label>
+  </div>
+  <p class="row-actions">
+    <button class="operation" onclick="moveVaultLocation()">Move vault location</button>
+    <button class="secondary" onclick="prefillMoveFromActive()">Use active vault as source</button>
+  </p>
 </section>
 
 <section id="managed-tools-panel">
@@ -4543,7 +4903,7 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
   <pre id="rsyncStatus">No managed rsync status loaded.</pre>
 </section>
 
-<section>
+<section id="rclone-runtime-panel">
   <h2>Rclone runtime</h2>
   <p class="hint">This app uses an app-managed rclone executable for remote transport. It does not require system rclone.</p>
   <div class="form-grid">
@@ -4572,36 +4932,6 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
   <pre id="rcloneStatus">No runtime status loaded.</pre>
 </section>
 
-<section id="remote-panel">
-  <h2>Remote repositories</h2>
-  <div class="form-grid">
-    <label>Name <input id="remoteName" placeholder="research-b2-ca" autocomplete="off"></label>
-    <label>Type <select id="remoteType"><option value="rclone">rclone</option><option value="local">local folder copy</option></select></label>
-    <label>Vault path/profile <input id="remoteVault" placeholder="leave blank to use open vault" autocomplete="off"></label>
-    <label>Remote path <input id="remotePath" placeholder="remote:bucket/path or ~/Backup/seavault" autocomplete="off"><small>For rclone, enter the provider path. The app transfers only .seavault.</small></label>
-    <label>Backend label <input id="remoteBackend" value="local" placeholder="local, sftp, s3, b2, onedrive, webdav" autocomplete="off"></label>
-    <label>Transfers <input id="remoteTransfers" type="number" value="8"></label>
-    <label>Checkers <input id="remoteCheckers" type="number" value="16"></label>
-    <label>Bandwidth limit <input id="remoteBandwidth" placeholder="optional, e.g. 10M" autocomplete="off"></label>
-  </div>
-  <p class="row-actions">
-    <label class="checkline"><input id="remoteFastList" type="checkbox" checked> Use fast-list when supported</label>
-    <button onclick="saveRemote()">Save remote profile</button>
-    <button onclick="loadRemotes()">Refresh remotes</button>
-  </p>
-  <div id="remotes" class="table-wrap"></div>
-  <pre id="remoteOutput">No remote action has run.</pre>
-</section>
-
-<section id="keys-panel">
-  <h2>SSH keys for rclone SFTP</h2>
-  <div class="form-grid">
-    <label>Managed key name <input id="sshKeyName" placeholder="research-sftp" autocomplete="off"></label>
-    <label>Import existing private key path <input id="sshKeyPath" placeholder="optional path to import" autocomplete="off"></label>
-  </div>
-  <p class="row-actions"><button onclick="generateSSHKey()">Generate/import key</button><button onclick="loadSSHKeys()">Refresh keys</button></p>
-  <div id="sshKeys" class="table-wrap"></div>
-</section>
 <section id="settings-panel">
   <h2>Settings</h2>
   <p class="hint">Application settings are saved locally. Changing HTTP/HTTPS or certificate settings requires restarting the GUI.</p>
@@ -4659,6 +4989,7 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
   <h3>Application log</h3>
   <pre id="status" class="log-view">Loading...</pre>
 </section>
+</div>
 
 </div>
 
@@ -4756,7 +5087,7 @@ async function api(path, opts){
   let body;
   if(ct.indexOf('application/json') >= 0){ body = await res.json(); } else { body = await res.text(); }
   if(body && body.browserToken) updateSessionToken(body.browserToken);
-  if(!res.ok) throw new Error((body && body.error) || body || res.statusText);
+  if(!res.ok){ const err = new Error((body && body.error) || body || res.statusText); err.body = body; err.status = res.status; throw err; }
   return body;
 }
 function showHuman(title, obj, level){
@@ -4817,6 +5148,11 @@ function humanize(obj){
     return (obj.open ? 'Vault is open.' : 'No vault is open.') + (obj.vaultPath ? '\nVault path: ' + obj.vaultPath : '') + '\n\n' + JSON.stringify(obj, null, 2);
   }
   if(obj.move){ return 'Vault move complete.\nFrom: ' + obj.move.sourcePath + '\nTo: ' + obj.move.destinationPath + '\nUpdated saved vault locations: ' + (obj.move.updatedProfiles||0) + '\nUpdated remote profiles: ' + (obj.move.updatedRemotes||0) + (obj.reopened ? '\nVault reopened from OS keychain.' : (obj.closedActive ? '\nVault was moved and closed. Reopen it with a saved keychain password or typed password.' : '')) + ((obj.move.warnings||[]).length ? '\nWarnings: ' + obj.move.warnings.join('; ') : '') + '\n\n' + JSON.stringify(obj, null, 2); }
+  // Plain-language, JSON-free success sentences (design U2 §2.4). These branches
+  // sit BEFORE the generic obj.ok branch so a password-change / recovery-commit
+  // response never renders as a raw JSON dump.
+  if(obj.passwordChanged){ return 'Password changed. The old password no longer opens this vault. Other devices will need the new password after vault.json syncs.'; }
+  if(obj.recoverySaved){ return 'Recovery key saved' + (obj.label ? ' and labeled ' + obj.label : '') + '. Keep the recovery phrase on paper, away from this computer.'; }
   if(obj.ok){ return 'Operation completed successfully.\n\n' + JSON.stringify(obj, null, 2); }
   return JSON.stringify(obj, null, 2);
 }
@@ -4868,13 +5204,49 @@ async function moveVaultLocation(){
   } catch(e){ showError('Vault move failed', e.message); activeController=null; setBusy(false); }
 }
 
+// pwFieldNote writes an inline note beside a change-password field (design U2
+// §2.4). alert=true styles it as an error; false as a neutral hint.
+function pwFieldNote(id, text, alert){
+  const el = $(id);
+  if(!el) return;
+  el.textContent = text || '';
+  el.className = 'field-note' + (alert ? ' field-alert' : '');
+  el.hidden = !text;
+}
+// pwStrengthHint is a LIGHT strength hint — not a policy gate. The empty-password
+// guard in changeVaultPassword is unchanged; this only nudges toward a longer
+// passphrase (design U2 §2.4).
+function pwStrengthHint(pw){
+  if(!pw) return '';
+  if(pw.length < 8) return 'Short password. A longer passphrase is much harder to guess.';
+  if(pw.length < 12) return 'Reasonable length. A few more words makes it stronger.';
+  return 'Good length.';
+}
+// pwLiveMatch gives inline mismatch validation beside the confirm field as the
+// owner types (design U2 §2.4), mirroring the stepper's setupLiveMatch.
+function pwLiveMatch(){
+  const p1 = ($('pwNew') && $('pwNew').value) || '';
+  const p2 = ($('pwNewConfirm') && $('pwNewConfirm').value) || '';
+  pwFieldNote('pwStrengthHint', pwStrengthHint(p1), false);
+  if(!p2){ pwFieldNote('pwNewConfirmError', ''); return; }
+  if(p1 === p2){ pwFieldNote('pwNewConfirmError', 'Passwords match.', false); }
+  else { pwFieldNote('pwNewConfirmError', 'The new password and its confirmation do not match.', true); }
+}
 async function changeVaultPassword(){
   try {
     const p1 = $('pwNew').value, p2 = $('pwNewConfirm').value;
-    if(!p1){ showError('New password required', 'Enter a new vault password.'); return; }
-    if(p1 !== p2){ showError('Passwords do not match', 'The new password and its confirmation differ.'); return; }
+    if(!p1){ pwFieldNote('pwNewConfirmError', ''); showError('New password required', 'Enter a new vault password.'); return; }
+    if(p1 !== p2){
+      // Render the mismatch beside the confirm field, not only in the top banner.
+      pwFieldNote('pwNewConfirmError', 'The new password and its confirmation do not match.', true);
+      showError('Passwords do not match', 'The new password and its confirmation differ.');
+      const c = $('pwNewConfirm'); if(c) c.focus();
+      return;
+    }
+    pwFieldNote('pwNewConfirmError', '');
     const res = await api('/api/password-change',{method:'POST',headers:jsonHeaders,body:JSON.stringify({newPassword:p1})});
     $('pwNew').value=''; $('pwNewConfirm').value='';
+    pwFieldNote('pwStrengthHint', ''); pwFieldNote('pwNewConfirmError', '');
     showHuman('Password changed', res, 'success');
   } catch(e){ showError('Password change failed', e.message); }
 }
@@ -4885,25 +5257,84 @@ async function listRecovery(){
     const box = $('recoveryList');
     if(!box) return;
     if(rows.length === 0){ box.innerHTML = '<p class="hint">No recovery keys are registered.</p>'; return; }
-    box.innerHTML = '<table><thead><tr><th>Recovery key ID</th><th></th></tr></thead><tbody>' +
-      rows.map(r => '<tr><td>'+esc(r.id)+'</td><td><button class="secondary" onclick="revokeRecovery(\''+esc(r.id)+'\')">Revoke</button></td></tr>').join('') +
+    // Show the stable handle and the device-local label (design U2 §2.6); the
+    // full entry ID drives revoke. isLast is passed so the last remaining key
+    // triggers the consequence-naming confirmation before its revoke.
+    const isLast = rows.length === 1;
+    box.innerHTML = '<table><thead><tr><th>Recovery key</th><th>ID</th><th></th></tr></thead><tbody>' +
+      rows.map(r => '<tr><td>'+esc(r.display || ('Recovery key #' + (r.handle||'')))+'</td><td><code>'+esc(r.id)+'</code></td><td><button class="secondary" onclick="revokeRecovery(\''+esc(r.id)+'\','+(isLast?'true':'false')+')">Revoke</button></td></tr>').join('') +
       '</tbody></table>';
   } catch(e){ showError('Could not list recovery keys', e.message); }
+}
+// recoveryCardWords / recoveryCardHandle hold the just-generated phrase in memory
+// so the printable card (design U2 §2.5) can be rendered client-side. They are
+// retained only until the panel is closed (cancel clears them) and never re-fetched
+// from the server, which does not re-serve the phrase after commit or cancel.
+let recoveryCardWords = [];
+let recoveryCardHandle = '';
+function recoveryCardVaultName(){
+  const p = (lastStatus && lastStatus.vaultPath) || '';
+  if(!p) return 'your vault';
+  return p.split('/').pop().split('\\').pop() || 'your vault';
+}
+// recoveryCardHTML builds the printable card markup. The pre-commit card (draft
+// true) is stamped DRAFT; the confirmed reprint (draft false) carries no stamp
+// (review C6). Rendered entirely client-side from the words already on screen.
+function recoveryCardHTML(draft){
+  const words = recoveryCardWords || [];
+  const rows = words.map((w,i) => '<li>' + esc(w) + '</li>').join('');
+  const stamp = draft ? '<div class="draft-stamp" style="border:2px solid #b00;color:#b00;padding:6px;font-weight:bold;margin-bottom:10px">DRAFT &mdash; not confirmed until you complete the read-back; destroy this card if you cancel.</div>' : '';
+  const handleLine = recoveryCardHandle ? '<p>Recovery key #' + esc(recoveryCardHandle) + '</p>' : (draft ? '<p>Recovery key handle: assigned when you confirm the read-back.</p>' : '');
+  return '<div style="font-family:sans-serif;font-size:14px">' + stamp +
+    '<h2>open-seavault-rclone recovery card</h2>' +
+    '<p>Vault: ' + esc(recoveryCardVaultName()) + '</p>' +
+    '<p>Printed: ' + esc(new Date().toISOString().slice(0,10)) + '</p>' +
+    handleLine +
+    '<ol style="font-size:16px;line-height:1.6">' + rows + '</ol>' +
+    '<p>Keep this on paper, away from the computer. Anyone holding it can open the vault.</p>' +
+    '</div>';
+}
+function recoveryPrintWindow(html){
+  const win = window.open('', '_blank');
+  if(!win){ showError('Print blocked', 'The browser blocked the print window. Allow pop-ups to print the recovery card, or write the words down.'); return; }
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  win.print();
+}
+function recoveryPrintCard(){
+  if(!(recoveryCardWords && recoveryCardWords.length)){ showError('Nothing to print', 'Generate a recovery key first.'); return; }
+  recoveryPrintWindow(recoveryCardHTML(true));
+}
+function recoveryPrintConfirmedCard(){
+  if(!(recoveryCardWords && recoveryCardWords.length)){ showError('Nothing to print', 'The confirmed card is available only right after you save the key, before the panel is closed.'); return; }
+  recoveryPrintWindow(recoveryCardHTML(false));
+}
+function renderRecoveryWords(words){
+  const box = $('recoveryWords');
+  if(!box) return;
+  box.innerHTML = (words || []).map(w => '<li>' + esc(w) + '</li>').join('');
 }
 async function generateRecovery(){
   try {
     const res = await api('/api/recovery/generate',{method:'POST',headers:jsonHeaders,body:JSON.stringify({})});
+    recoveryCardWords = (res && res.words) || [];
+    recoveryCardHandle = '';
+    renderRecoveryWords(recoveryCardWords);
     $('recoveryPhrase').textContent = (res && res.phrase) || '';
     $('recoveryReadback').value = '';
     $('recoveryPhraseStep').hidden = false;
     $('recoveryReadbackStep').hidden = true;
+    if($('recoveryConfirmedCard')) $('recoveryConfirmedCard').hidden = true;
     $('recoveryPhraseBox').hidden = false;
-    showHuman('Recovery phrase generated', 'Write it down on paper. It is shown only once; the next step hides it and asks you to re-type it.', 'info');
+    showHuman('Recovery phrase generated', 'Write down the 24 numbered words on paper, in order. They are shown only once; the next step hides them and asks you to re-type them.', 'info');
   } catch(e){ showError('Could not generate a recovery key', e.message); }
 }
 function recoveryWrittenDown(){
-  // Hide and clear the phrase BEFORE the read-back appears, so a correct read-back
-  // evidences an off-screen (paper) capture rather than an on-screen copy.
+  // Hide and clear the words BEFORE the read-back appears, so a correct read-back
+  // evidences an off-screen (paper) capture rather than an on-screen copy. The
+  // words stay in memory (recoveryCardWords) only for the confirmed reprint.
+  renderRecoveryWords([]);
   $('recoveryPhrase').textContent = '';
   $('recoveryPhraseStep').hidden = true;
   $('recoveryReadbackStep').hidden = false;
@@ -4914,27 +5345,45 @@ async function commitRecovery(){
     const readback = $('recoveryReadback').value;
     if(!readback.trim()){ showError('Read-back required', 'Re-enter the recovery phrase to confirm you saved it.'); return; }
     const res = await api('/api/recovery/commit',{method:'POST',headers:jsonHeaders,body:JSON.stringify({readback:readback})});
-    $('recoveryPhraseBox').hidden = true;
-    $('recoveryPhraseStep').hidden = false;
+    recoveryCardHandle = (res && res.handle) || '';
+    $('recoveryPhraseStep').hidden = true;
     $('recoveryReadbackStep').hidden = true;
     $('recoveryPhrase').textContent = '';
     $('recoveryReadback').value = '';
+    renderRecoveryWords([]);
+    // The read-back is complete: offer the clean (no DRAFT stamp) confirmed reprint.
+    // The words remain in memory for it until the panel is closed.
+    if($('recoveryConfirmedCard')) $('recoveryConfirmedCard').hidden = false;
     showHuman('Recovery key saved', res, 'success');
     await listRecovery();
   } catch(e){ showError('Recovery key not saved', e.message); }
 }
 function cancelRecovery(){
+  // Cancel destroys the draft card material: the words are cleared from screen AND
+  // from memory, so no card survives a cancelled generation (review C6).
+  recoveryCardWords = [];
+  recoveryCardHandle = '';
+  renderRecoveryWords([]);
   $('recoveryPhraseBox').hidden = true;
   $('recoveryPhraseStep').hidden = false;
   $('recoveryReadbackStep').hidden = true;
+  if($('recoveryConfirmedCard')) $('recoveryConfirmedCard').hidden = true;
   $('recoveryPhrase').textContent = '';
   $('recoveryReadback').value = '';
   showHuman('Recovery generation cancelled', 'No recovery key was saved.', 'info');
 }
-async function revokeRecovery(id){
+async function revokeRecovery(id, isLast){
   try {
-    if(!window.confirm('Revoke recovery key ' + id + '? It will no longer be able to unlock the vault.')) return;
-    const res = await api('/api/recovery/revoke',{method:'POST',headers:jsonHeaders,body:JSON.stringify({id:id})});
+    let confirmFlag = false;
+    if(isLast){
+      // Last recovery key: name the consequence and require an explicit
+      // acknowledgement (I-U4). The server also refuses with 409 without confirm.
+      if(!window.confirm('This is the last recovery key. Revoking it leaves the vault with no recovery path — a forgotten password cannot be recovered. Revoke it anyway?')) return;
+      confirmFlag = true;
+    } else {
+      if(!window.confirm('Revoke recovery key ' + id + '? It will no longer be able to unlock the vault.')) return;
+    }
+    const res = await api('/api/recovery/revoke',{method:'POST',headers:jsonHeaders,body:JSON.stringify({id:id,confirm:confirmFlag})});
     showHuman('Recovery key revoked', res, 'success');
     await listRecovery();
   } catch(e){ showError('Revoke failed', e.message); }
@@ -4945,7 +5394,11 @@ async function redeemRecovery(){
     if(!phrase.trim()){ showError('Recovery phrase required', 'Enter the recovery phrase to redeem.'); return; }
     if(!p1){ showError('New password required', 'Enter a new vault password.'); return; }
     if(p1 !== p2){ showError('Passwords do not match', 'The new password and its confirmation differ.'); return; }
-    const vp = ($('vaultPath') && $('vaultPath').value) || (lastStatus && lastStatus.vaultPath) || ''; const res = await api('/api/recovery/redeem',{method:'POST',headers:jsonHeaders,body:JSON.stringify({vaultPath:vp,phrase:phrase,newPassword:p1})});
+    // The redeem form carries its own vault-path field so a locked-out owner does
+    // not depend on the Files-tab #vaultPath (friction GUI-D2-4/5); fall back to the
+    // Files-tab path or the open session path when it is left blank.
+    const vp = ($('redeemVaultPath') && $('redeemVaultPath').value.trim()) || ($('vaultPath') && $('vaultPath').value.trim()) || (lastStatus && lastStatus.vaultPath) || '';
+    const res = await api('/api/recovery/redeem',{method:'POST',headers:jsonHeaders,body:JSON.stringify({vaultPath:vp,phrase:phrase,newPassword:p1})});
     $('redeemPhrase').value=''; $('redeemNew').value=''; $('redeemNewConfirm').value='';
     showHuman('Recovery key redeemed', res, 'success');
     await listRecovery();
@@ -5090,6 +5543,120 @@ function scrollToCreateVault(){
   const el = $('vault-panel');
   if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
 }
+// ---- Four-destination shell (design U2 §2.1/§2.2) -----------------------
+// showDestination shows exactly one destination at a time. Selecting Advanced
+// reveals its (default-hidden) container. The harness never runs this — it
+// asserts the server-rendered markup and this source, not the client behaviour.
+function showDestination(name){
+  document.querySelectorAll('.destination').forEach(d => d.classList.toggle('active', d.dataset.destination === name));
+  document.querySelectorAll('.destination-tab').forEach(t => t.classList.toggle('active', t.dataset.destination === name));
+  if(name === 'advanced') revealAdvanced();
+  try { window.scrollTo({top:0, behavior:'smooth'}); } catch(_){}
+}
+// revealAdvanced un-hides the Advanced destination and remembers the choice
+// per-browser (localStorage, guarded), so it stays revealed on the next load.
+function revealAdvanced(){
+  const adv = document.getElementById('dest-advanced');
+  if(adv) adv.hidden = false;
+  try { localStorage.setItem('sv_show_advanced', '1'); } catch(_){}
+}
+// toggleAdvanced is the "Show advanced" control: reveal-and-open when hidden,
+// collapse (and fall back to Files if it was the active destination) when shown.
+function toggleAdvanced(){
+  const adv = document.getElementById('dest-advanced');
+  if(!adv) return;
+  if(adv.hidden){ showDestination('advanced'); }
+  else {
+    adv.hidden = true;
+    try { localStorage.removeItem('sv_show_advanced'); } catch(_){}
+    if(adv.classList.contains('active')) showDestination('files');
+  }
+}
+// destinationInit restores the per-browser "advanced revealed" state on load and
+// honours the stepper's Skip-to-advanced (body.show-advanced) which lands on
+// Files with Advanced shown. Files stays the active destination either way.
+function destinationInit(){
+  let show = false;
+  try { show = localStorage.getItem('sv_show_advanced') === '1'; } catch(_){}
+  if(document.body.classList.contains('show-advanced')){ show = true; }
+  if(show){ const adv = document.getElementById('dest-advanced'); if(adv) adv.hidden = false; }
+}
+// welcomeOpen opens the vault named in the Welcome-back folder picker through the
+// EXISTING /api/open route (design U2 §2.2). No server change; a returning owner
+// on a second device (zero profiles) points at a synced vault folder and opens.
+async function welcomeOpen(){
+  try {
+    const path = ($('welcomeVaultPath') && $('welcomeVaultPath').value.trim()) || '';
+    const pw = ($('welcomePassword') && $('welcomePassword').value) || '';
+    if(!path){ showError('Vault folder required', 'Enter or choose the folder of the vault you want to open.'); return; }
+    await api('/api/open',{method:'POST',headers:jsonHeaders,body:JSON.stringify({vaultPath: path, password: pw, useKeychain: !pw})});
+    window.location.href = '/';
+  } catch(e){ if(await offerAcceptRollback(e, path, pw)) return; showError('Could not open the vault', humanFetchError(e)); }
+}
+// welcomeRedeemPrefill copies the Welcome-back folder-picker path into the redeem
+// vault-path field when the redeem disclosure is opened and that field is still
+// blank, so a returning owner who typed the folder above does not retype it.
+function welcomeRedeemPrefill(){
+  const src = $('welcomeVaultPath'), dst = $('welcomeRedeemVaultPath');
+  if(src && dst && !dst.value.trim() && src.value.trim()){ dst.value = src.value.trim(); }
+}
+// welcomeRedeem lets a locked-out returning owner redeem a recovery key straight
+// from the Welcome-back view, WITHOUT opening the vault first (design U2 §2.2,
+// friction GUI-D2-4). It posts to the EXISTING /api/recovery/redeem with the vault
+// folder, the phrase (24 words or the compact base32 form), and a new password;
+// the endpoint opens the vault via the phrase (no prior unlock), so a second-device
+// owner with zero profiles recovers by path. On success the vault is open; go to
+// the app.
+async function welcomeRedeem(){
+  const vp = ($('welcomeRedeemVaultPath') && $('welcomeRedeemVaultPath').value.trim()) || ($('welcomeVaultPath') && $('welcomeVaultPath').value.trim()) || '';
+  try {
+    const phrase = ($('welcomeRedeemPhrase') && $('welcomeRedeemPhrase').value) || '';
+    const p1 = ($('welcomeRedeemNew') && $('welcomeRedeemNew').value) || '';
+    const p2 = ($('welcomeRedeemNewConfirm') && $('welcomeRedeemNewConfirm').value) || '';
+    if(!vp){ showError('Vault folder required', 'Enter or choose the folder of the vault you want to recover.'); return; }
+    if(!phrase.trim()){ showError('Recovery phrase required', 'Enter your 24-word recovery phrase, or the compact form.'); return; }
+    if(!p1){ showError('New password required', 'Enter a new vault password.'); return; }
+    if(p1 !== p2){ showError('Passwords do not match', 'The new password and its confirmation differ.'); return; }
+    await api('/api/recovery/redeem',{method:'POST',headers:jsonHeaders,body:JSON.stringify({vaultPath:vp,phrase:phrase,newPassword:p1})});
+    window.location.href = '/';
+  } catch(e){ showError('Could not use the recovery key', humanFetchError(e)); }
+}
+// offerAcceptRollback surfaces the GUI accept-rollback affordance (design U2 §2.7):
+// when /api/open refused with the rolled-back freshness gate the error body carries
+// canAcceptRollback. Offer "I restored this from a backup" and, on confirm, re-submit
+// /api/open with acceptRollback:true AND the re-entered password (never a keychain
+// secret). Returns true when it handled the error so the caller does not also show
+// the generic failure. A rollback refusal with no password re-entered asks for one.
+async function offerAcceptRollback(e, path, password){
+  if(!(e && e.body && e.body.canAcceptRollback)) return false;
+  if(!password){ showError('Password needed to accept a restored backup', 'Re-enter the vault password, then open again and choose "I restored this from a backup".'); return true; }
+  if(!window.confirm('I restored this from a backup.\n\nThis vault looks older than this device last saw it. If you deliberately restored it from a backup, open it and re-establish freshness?')) return true;
+  try {
+    await api('/api/open',{method:'POST',headers:jsonHeaders,body:JSON.stringify({vaultPath: path, password: password, acceptRollback: true})});
+    window.location.href = '/';
+  } catch(e2){ showError('Could not open the restored vault', e2.message); }
+  return true;
+}
+// renderWelcomeVaults fills the Welcome-back saved-vault list from /api/status.
+function renderWelcomeVaults(s){
+  const box = $('welcomeVaultList');
+  if(!box) return;
+  const rows = (s && s.availableVaults) || [];
+  if(rows.length === 0){ box.innerHTML = '<p class="hint">No saved vaults on this device yet. Point to a vault folder below, or create a new vault.</p>'; return; }
+  box.innerHTML = rows.map(v => {
+    const canKey = !!(v.keychain || v.keychainStatus === 'active' || v.keychainStatus === 'available');
+    return '<article class="vault-card"><header><span class="vault-name">'+esc(v.name || v.vaultPath)+'</span><span class="pill">'+esc(v.status || 'saved')+'</span></header><div class="vault-path">'+esc(v.vaultPath)+'</div><p class="row-actions"><button type="button" data-name="'+esc(v.name || '')+'" data-path="'+esc(v.vaultPath || '')+'" data-keychain="'+(canKey?'1':'0')+'" onclick="quickOpenVault(this)">Open</button></p></article>';
+  }).join('');
+}
+// updatePasswordRecoveryHeader keeps the Security panel header naming the open
+// vault after an in-page open, matching the server-rendered header (design §2.4).
+function updatePasswordRecoveryHeader(s){
+  const h = $('passwordRecoveryHeader');
+  if(!h) return;
+  const open = !!(s && s.open);
+  const name = open ? String((s.vaultPath || '').split('/').pop().split('\\').pop() || '') : '';
+  h.textContent = 'Password and recovery key' + (open && name ? ' — ' + name : '');
+}
 async function quickOpenVault(btn){
   const name = btn.dataset.name || '';
   const path = btn.dataset.path || '';
@@ -5184,7 +5751,7 @@ async function refreshStatus(){
     const s = await api('/api/status');
     if(s.browserToken) updateSessionToken(s.browserToken);
     lastStatus = s;
-    renderVaultSelector(s); renderAvailableVaults(s); renderTopVaultStrip(s); renderKeychainStatus(s); renderDependencies(s); renderWebDAVStatus(s); renderWebDAVQuick(s); renderAppConfig(s);
+    renderVaultSelector(s); renderAvailableVaults(s); renderTopVaultStrip(s); renderKeychainStatus(s); renderDependencies(s); renderWebDAVStatus(s); renderWebDAVQuick(s); renderAppConfig(s); renderWelcomeVaults(s); updatePasswordRecoveryHeader(s);
     if(!s.open) clearWebDAVUI('Open a vault to browse files.');
     showHuman('Status refreshed', s);
     const backgroundTasks = s.open ? [refreshFiles(), refreshDavFiles(), loadProfiles()] : [loadProfiles()];
@@ -5199,7 +5766,7 @@ async function refreshStatusFast(){
     const s = await api('/api/status');
     if(s.browserToken) updateSessionToken(s.browserToken);
     lastStatus = s;
-    renderVaultSelector(s); renderAvailableVaults(s); renderTopVaultStrip(s); renderKeychainStatus(s); renderDependencies(s); renderWebDAVStatus(s); renderWebDAVQuick(s); renderAppConfig(s);
+    renderVaultSelector(s); renderAvailableVaults(s); renderTopVaultStrip(s); renderKeychainStatus(s); renderDependencies(s); renderWebDAVStatus(s); renderWebDAVQuick(s); renderAppConfig(s); renderWelcomeVaults(s); updatePasswordRecoveryHeader(s);
     if(!s.open) clearWebDAVUI('Open a vault to browse files.');
     showHuman('Saved vaults refreshed', s, 'success');
   } catch(e){ showError('Could not refresh saved vaults', e.message); }
@@ -5235,7 +5802,7 @@ async function saveCurrentVaultProfile(){
   } catch(e){ showError('Could not save vault', e.message); }
 }
 async function initVault(){ try { const warn = localPathWarning(); if(warn){ showError('Invalid vault path', warn); return; } const res = await api('/api/init',{method:'POST',headers:jsonHeaders,body:JSON.stringify(initPayload())}); $('password').value=''; const status = await api('/api/status'); status.lastAction = res; lastStatus = status; renderVaultSelector(status); renderAvailableVaults(status); renderTopVaultStrip(status); renderKeychainStatus(status); renderDependencies(status); renderWebDAVStatus(status); renderWebDAVQuick(status); renderAppConfig(status); showHuman('Vault created and opened', status, 'success'); showNotices(res.warnings); await refreshFiles(); await refreshDavFiles(); await loadProfiles(); } catch(e){ showError('Could not create vault', e.message); } }
-async function openVault(useKeychain){ try { const warn = localPathWarning(); if(warn){ showError('Invalid vault path', warn); return; } const res = await api('/api/open',{method:'POST',headers:jsonHeaders,body:JSON.stringify(openPayload(useKeychain))}); $('password').value=''; const status = await api('/api/status'); status.lastAction = res; lastStatus = status; renderVaultSelector(status); renderAvailableVaults(status); renderTopVaultStrip(status); renderKeychainStatus(status); renderDependencies(status); renderWebDAVStatus(status); renderWebDAVQuick(status); renderAppConfig(status); showHuman('Vault opened', status, 'success'); showNotices(res.warnings); await refreshFiles(); await refreshDavFiles(); await loadProfiles(); } catch(e){ showError('Could not open vault', e.message); } }
+async function openVault(useKeychain){ try { const warn = localPathWarning(); if(warn){ showError('Invalid vault path', warn); return; } const res = await api('/api/open',{method:'POST',headers:jsonHeaders,body:JSON.stringify(openPayload(useKeychain))}); $('password').value=''; const status = await api('/api/status'); status.lastAction = res; lastStatus = status; renderVaultSelector(status); renderAvailableVaults(status); renderTopVaultStrip(status); renderKeychainStatus(status); renderDependencies(status); renderWebDAVStatus(status); renderWebDAVQuick(status); renderAppConfig(status); showHuman('Vault opened', status, 'success'); showNotices(res.warnings); await refreshFiles(); await refreshDavFiles(); await loadProfiles(); } catch(e){ if(await offerAcceptRollback(e, $('vaultPath').value, $('password').value)) return; showError('Could not open vault', e.message); } }
 function clearWebDAVUI(message){
   currentDavPath = 'content';
   selectedDavPath = '';
@@ -5867,6 +6434,34 @@ async function loadProfiles(){
 function selectMoveProfile(name,path){ $('moveProfile').value=name; $('moveSource').value=path; $('moveDest').value=''; showHuman('Move source selected', 'Selected saved vault ' + name + '. Enter the new vault location, then click Move vault location.'); location.hash='move-panel'; }
 async function deleteProfile(name){ try { await api('/api/profile?name='+encodeURIComponent(name),{method:'DELETE',headers:jsonHeaders}); showHuman('Saved vault removed', 'Removed saved vault location ' + name + '. The vault files and keychain password were not deleted.', 'success'); await refreshStatus(); } catch(e){ showError('Could not remove saved vault', e.message); } }
 async function rcloneStatus(check){ try { const s = await api('/api/rclone/status?checkUpdate='+(check?'1':'0')); $('rcloneStatus').textContent = JSON.stringify(s,null,2); } catch(e){ $('rcloneStatus').textContent = e.message; } }
+// ensureRcloneRuntime is the Cloud sync runtimes-on-demand flow (design U2 §2.3):
+// it consults the EXISTING /api/rclone/status and, when the runtime is missing,
+// reveals a consent step that calls the EXISTING /api/rclone/install. No new
+// download path is introduced. Returns true when the runtime is present.
+async function ensureRcloneRuntime(){
+  try {
+    const st = await api('/api/rclone/status');
+    if(st && st.installed){
+      cloudRuntimeConsentDismiss();
+      showHuman('Cloud runtime ready', 'The rclone runtime is installed. Cloud sync is available.', 'success');
+      return true;
+    }
+    const box = $('cloudRuntimeConsent');
+    if(box) box.hidden = false;
+    return false;
+  } catch(e){ showError('Could not check the cloud runtime', e.message); return false; }
+}
+function cloudRuntimeConsentDismiss(){ const box = $('cloudRuntimeConsent'); if(box) box.hidden = true; }
+async function cloudRuntimeInstall(){
+  // Consent granted: call the EXISTING install endpoint (no new download path).
+  try {
+    const res = await api('/api/rclone/install',{method:'POST',headers:jsonHeaders,body:JSON.stringify({channel:'stable'})});
+    cloudRuntimeConsentDismiss();
+    if($('rcloneStatus')) $('rcloneStatus').textContent = JSON.stringify(res,null,2);
+    showHuman('Cloud runtime installed', res, 'success');
+    return true;
+  } catch(e){ showError('Could not install the cloud runtime', e.message); return false; }
+}
 async function rcloneInstall(){ try { const req={version:$('rcloneVersion').value, channel:'stable', fromBinary:$('rcloneFromBinary').value, signature:$('rcloneSignature').value}; const res=await api('/api/rclone/install',{method:'POST',headers:jsonHeaders,body:JSON.stringify(req)}); $('rcloneStatus').textContent=JSON.stringify(res,null,2); showHuman('Rclone install/register complete', res, 'success'); } catch(e){ $('rcloneStatus').textContent=e.message; showError('Rclone install/register failed', e.message); } }
 async function rcloneUpdate(){ try { const req={version:$('rcloneVersion').value, channel:'stable', signature:$('rcloneSignature').value}; const res=await api('/api/rclone/update',{method:'POST',headers:jsonHeaders,body:JSON.stringify(req)}); $('rcloneStatus').textContent=JSON.stringify(res,null,2); showHuman('Rclone update complete', res, 'success'); } catch(e){ $('rcloneStatus').textContent=e.message; showError('Rclone update failed', e.message); } }
 async function rcloneRollback(){ try { const res=await api('/api/rclone/rollback',{method:'POST',headers:jsonHeaders,body:'{}'}); $('rcloneStatus').textContent=JSON.stringify(res,null,2); showHuman('Rclone rollback complete', res, 'success'); } catch(e){ $('rcloneStatus').textContent=e.message; showError('Rclone rollback failed', e.message); } }
@@ -6184,6 +6779,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   updateUploadSelectionSummaries();
   setupStepperInit();
+  destinationInit();
+  ['pwNew', 'pwNewConfirm'].forEach(id => { const el = $(id); if(el) el.addEventListener('input', pwLiveMatch); });
 });
 document.addEventListener('keydown', ev => {
   const modal = $('vaultPasswordModal');
