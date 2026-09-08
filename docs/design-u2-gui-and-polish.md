@@ -1,6 +1,6 @@
 # Design — Phase U2: the four-destination GUI, word recovery phrases, and the operability polish backlog
 
-STATUS: Revision 2 — the 9 conditions of the pre-code review (`docs/review-u2-predesign.md`, GO_WITH_CONDITIONS; 53 judged / 44 refuted / 0 blockers) are applied below and in §8. Ready to build.
+STATUS: **BUILT** (v0.19) — the 9 conditions of the pre-code review (`docs/review-u2-predesign.md`, GO_WITH_CONDITIONS; 53 judged / 44 refuted / 0 blockers) are applied below and in §8. Shipped across slices W (vault word core + device-local labels + THIRD_PARTY_NOTICES), G1 (four-destination restructure, Welcome-back view, advanced toggle, plain messages), G2 (recovery UX: words, printable card, labels, last-key revoke, GUI accept-rollback, runtimes on demand), C1 (command registry, synopses, group help, double-dash), and C2 (Type III sweep + docs + final verification). The §5 test matrix is green on the unfiltered `go test -race ./...` on Linux with clean windows/amd64 and darwin/arm64 cross-builds.
 
 ## 1. Goal and scope
 
