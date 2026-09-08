@@ -1,6 +1,6 @@
 # Design — Phase U2: the four-destination GUI, word recovery phrases, and the operability polish backlog
 
-STATUS: pre-code design, awaiting the 10-lens review. Revision 1.
+STATUS: Revision 2 — the 9 conditions of the pre-code review (`docs/review-u2-predesign.md`, GO_WITH_CONDITIONS; 53 judged / 44 refuted / 0 blockers) are applied below and in §8. Ready to build.
 
 ## 1. Goal and scope
 
@@ -43,8 +43,12 @@ lands on Files with advanced shown.
 
 ### 2.2 Returning-user unlock view (U1 friction GUI-5)
 
-When saved vaults exist and none is open, the index renders a small *Welcome back* view: the
-saved-vault list, a password field, Open, plus one link "Go to the full app". It is the existing
+Whenever no vault is open the index renders a small *Welcome back* view (C5): the saved-vault
+list (if any), a password field, Open, an **"I already have a vault — choose its folder"** path
+picker that calls the existing `/api/open` (the profile store is device-local, so a returning owner
+on a second device has zero profiles but a vault in a synced folder), a **"Create a new vault"**
+button that leads to the first-run stepper, plus one link "Go to the full app". The stepper is
+no longer the automatic landing for zero profiles; it is reached through that button. It is the existing
 open form re-skinned; it calls the existing `/api/open` and sets nothing new server-side. The
 first-run trigger (no vaults) still renders the stepper; a vault open renders Files.
 
@@ -71,15 +75,26 @@ groups; the **canonical wrap secret fed to the KDF is the ungrouped base32 strin
 (`internal/vault/recovery_phrase.go`). U2 adds an **encoding layer only**:
 
 - `internal/vault/recovery_words.go`: a vendored **BIP-39 English wordlist** (2048 words, 11
-  bits each; license recorded in THIRD_PARTY_NOTICES.md) and two pure functions —
+  bits each; license recorded in THIRD_PARTY_NOTICES.md), **pinned (C2)** by a golden-vector
+  test (a published BIP-39 English vector: fixed entropy → the exact known 24-word string →
+  `DecodeRecoveryWords` returns that secret) and a SHA-256 of the wordlist asserted against a
+  constant held outside the vendored file, so a silent re-vendor that would make printed cards
+  unredeemable is red and two pure functions —
   `EncodeRecoveryWords(secret [32]byte) []string` (24 words: 256 bits + an 8-bit SHA-256
   checksum, exactly BIP-39 mnemonic construction) and `DecodeRecoveryWords(words []string)
   ([32]byte, error)` with **strict** decoding: unknown word, wrong count, or checksum mismatch
   return typed errors (`ErrRecoveryWordUnknown`, `ErrRecoveryWordCount`,
   `ErrRecoveryChecksum`); input is normalized (trim, lowercase, collapse whitespace) before
   lookup and never panics on any input.
-- `canonicalRecovery(input)` accepts, in order: 24 words → decode → canonical base32; grouped or
-  ungrouped base32 → as today. So **redeem accepts either form for the same secret**, no
+- **Discriminator (C1):** after normalization, an input of **exactly 24 whitespace-separated tokens
+  that are all in the wordlist** is a word phrase; anything else is treated as base32. A
+  word-shaped input (24 tokens, or 20–28 tokens where most are wordlist words) that fails strict
+  decode returns the typed word error (`ErrRecoveryWordUnknown` / `ErrRecoveryWordCount` /
+  `ErrRecoveryChecksum`) on BOTH the GUI read-back path AND the redeem path
+  (`OpenWithRecovery`), and **never falls through to base32 stripping** — today
+  `canonicalRecovery` keeps only A–Z/2–7, which would map mistyped words to a wrong secret and
+  surface only a wrong-secret error. `canonicalRecovery(input)` therefore: word phrase → decode
+  → canonical base32; otherwise grouped or ungrouped base32 → as today. So **redeem accepts either form for the same secret**, no
   re-wrap, no config change, and every phrase issued by 0.15–0.18 keeps working.
 - Generate (CLI and GUI) shows the **24 numbered words** by default; the base32 "compact form"
   is shown beneath for people who prefer it. The read-back ceremony is unchanged (hide, re-type,
@@ -87,8 +102,11 @@ groups; the **canonical wrap secret fed to the KDF is the ungrouped base32 strin
   read-back with a specific message.
 - **Printable card:** the GUI gets *Print recovery card* — a print-styled view (vault name, date,
   the 24 numbered words, "keep this on paper away from the computer; anyone holding it can open
-  the vault") rendered client-side from the phrase already on screen; it exists only during the
-  show-once step. The CLI `--save` file (U1) becomes the same card in text; the U1 rules apply
+  the vault") rendered client-side from the phrase already on screen; **Ordering (C6):** the card printed during the show-once step (before the read-back
+  commits) is stamped **DRAFT — not confirmed until you complete the read-back; destroy this card
+  if you cancel**, and after `handleRecoveryCommit` succeeds a *Print confirmed card* action
+  re-renders the same words without the stamp (the phrase is retained in memory only until the
+  panel is closed). The CLI `--save` file (U1) becomes the same card in text; the U1 rules apply
   (0600, refused inside the vault dir, warned under a synced folder).
 
 ### 2.6 Friendly recovery-key labels (A2 backlog) — device-local by constraint
@@ -98,9 +116,11 @@ config**: `vault.json` is shared by mixed 0.17/0.18 fleets and the ConfigMAC can
 config struct, so a field a 0.17 client does not know would make it compute a different tag and
 refuse the vault as tampered (the A2 mixed-fleet guarantee). Therefore labels live in the app-
 data profile store (`profile` package, per device): `{entryID: {label, created, device}}` written
-at generate time; the list shows *Recovery key 2 — created 2026-09-07 on alex-laptop* when a
-local record exists and *Recovery key 2* (ordinal by config order, plus the first four hex
-characters) otherwise. A test proves the config bytes are byte-identical before and after
+at generate time; every entry carries a **stable handle** — the first four hex characters of its entry ID —
+shown on the printable card AND in the list on EVERY device (C4), so a targeted revoke can never
+retire the wrong key even after earlier revokes renumber ordinals; the list shows *Recovery key
+#ad82 — created 2026-09-07 on alex-laptop* when a local record exists and *Recovery key #ad82*
+otherwise. A test proves the config bytes are byte-identical before and after
 labeling. Redeem/revoke keep using the entry ID; the label is display-only.
 
 ### 2.7 Last-key warning and GUI accept-rollback (A2 backlog)
@@ -118,12 +138,19 @@ untouched.
 
 ### 3.1 `--help` that teaches (A2 backlog, U1 ADM-6)
 
+**Exit-code contract (C7):** an explicit `--help` or a bare group invocation prints help and exits
+0 (a documented change from today's error exit, noted in the changelog); an UNKNOWN subcommand
+still exits non-zero so error-guarding scripts detect typos.
+
 Every registered subcommand gets a one-line synopsis and a usage line with **double-dash** flags
 matching the README; group-level help (`seavault password --help`, `recovery`, `vault`,
 `keychain`, `rclone`, `rsync`, `remote`, `ssh-key`, `profile`) lists its subcommands with their
 synopses instead of erroring. Implemented as one command registry table
 (`cmd/seavault/commands.go`: name, group, synopsis, usage, handler) that `usage()` and each
-`--help` render from — so a test can iterate every row.
+`--help` render from — so a test can iterate every row. **Completeness (C3):** `main()` dispatches FROM the registry (one
+shared table), and a test asserts registry-names == dispatchable-names in both directions; the
+already-known omissions become its first red-first rows (rclone `version`/`path`, remote
+`sync`/`config`, which `usage()` does not advertise today).
 
 ### 3.2 The Type III sweep (U1 friction, 25 rows) and A2 doc items
 
@@ -156,7 +183,7 @@ generate` is interactive-only.
   non-interactive path and `checkFreshness` are untouched (`rollback_test.go` unmodified).
 - **I-U6** Runtimes on demand reuse the existing install endpoint and consent; no new download
   path; the Advanced panels remain.
-- **I-U7** The printable card exists only during the show-once step and is rendered client-side
+- **I-U7** The printable card is rendered client-side from the phrase already displayed, stamped DRAFT before commit and re-rendered clean only after commit (C6); it is never served again once the panel closes, and it is rendered client-side
   from the phrase already displayed; the CLI card file follows the U1 save rules.
 - **I-U8** Track C is text-only: no behaviour change outside the listed message fixes; the
   unfiltered suite stays green with no test edited.
@@ -167,9 +194,9 @@ generate` is interactive-only.
 
 | ID | Proves | How |
 |---|---|---|
-| G1 | §2.1 | the page renders exactly four destinations; every pre-U2 panel id appears under exactly one; Advanced is `hidden` by default; the toggle reveals it |
-| G2 | §2.2 | profiles exist + none open → *Welcome back* view; none exist → stepper; open → Files |
-| G3 | §2.3 | with a fake runtime seam reporting "missing", the Cloud flow presents the consent step and calls the existing install endpoint only after consent |
+| G1 | §2.1 | the server-rendered page has exactly four destination controls; every pre-U2 panel id appears under exactly one; the Advanced container carries `hidden` by default and the toggle's source is present (the harness has no JS engine — client behaviour is not claimed, C8) |
+| G2 | §2.2 | no vault open + profiles → *Welcome back* with the list; no vault open + zero profiles → *Welcome back* with the folder picker and the Create button (no automatic stepper, C5); the Create button reaches the stepper; open → Files |
+| G3 | §2.3 | the status/install endpoint contract: `/api/rclone/status` reports missing; `/api/rclone/install` is the only install route and is unchanged; the consent-gating source is present in the page (C8) |
 | G4 | §2.4 | change-password success body/text contains no `{` and the plain sentence; panel header names the vault |
 | W1 | I-U2 | 1,000 random secrets: words → decode == secret; canonicalRecovery(words) == canonicalRecovery(base32) |
 | W2 | I-U2 | strict-decode table (unknown word, 23/25 words, bad checksum, mixed case/whitespace) → the typed error per row, no panic |
@@ -178,10 +205,15 @@ generate` is interactive-only.
 | W5 | I-U3 | config bytes identical before/after labeling; label store keyed by entry ID; listing shows the label |
 | S1 | I-U4 | revoke-last confirms (GUI 409 without confirm, 200 with; CLI refuses without `--yes` non-interactively) |
 | S2 | I-U5 | rolled-back config: GUI open payload carries `canAcceptRollback`; `/api/open` with `acceptRollback` + password opens; without the password → 400; `rollback_test.go` unchanged |
-| S3 | I-U7 | the card view is absent after commit/cancel; CLI card file 0600 and refused in-vault |
+| S3 | I-U7 | the server never re-serves the phrase after commit or cancel; the pre-commit card source carries the DRAFT stamp and the post-commit render does not; CLI card file 0600, DRAFT line rewritten on commit, refused in-vault (C6/C8) |
 | H1 | §3.1 | table over the command registry: every row's `--help` prints a non-empty synopsis and double-dash usage; every group help lists its subcommands |
 | H2 | §3.2 | each message fix asserted (caveat once, no doubled Note, leftovers remedy, profile remove output, keyless-open reminder, recovery password note) |
 | H3 | docs | README provider list matches the catalog with OS qualification (drift guard extended); THIRD_PARTY_NOTICES carries the wordlist license |
+| W6 | C1 | a 24-token phrase with one bad word at GUI read-back AND at redeem yields the typed word/checksum message, never the wrong-secret error |
+| W7 | C2 | the BIP-39 golden vector decodes to its known secret; the wordlist SHA-256 equals the pinned constant |
+| H4 | C3 | registry-names == dispatchable-names both directions (rclone version/path, remote sync/config included) |
+| H5 | C7 | `--help`/bare-group exits 0; unknown subcommand exits non-zero |
+| M1 | C9 | each message asserted: the checksum \"usability aid, not a security control\" GUI copy; the humanize() recovery-saved and keychain-unavailable sentences; the revoke-last 409 body contains \"no recovery path\"; `--no-open` under `--preset` is inert |
 | Z1 | I-U1, I-U8 | `git diff --stat` against the branch base shows no deleted/edited pre-U2 test; the unfiltered race suite is green |
 
 ## 6. Failure and coexistence
@@ -190,8 +222,8 @@ A 0.17 client on the same vault sees no config change (I-U2/I-U3). A user who wr
 phrase in 0.17 redeems it in 0.18 unchanged; a user who writes down 24 words in 0.18 can redeem
 in 0.17 only via the compact form shown beneath the words (stated in the GUI copy and README).
 The label store is per device; a missing record degrades to the ordinal label, never an error.
-`localStorage` failures degrade to "advanced hidden". Every message change is covered by a test
-so a future wording edit is a visible diff, not a silent regression.
+`localStorage` failures degrade to "advanced hidden". Every message change LISTED IN THE MATRIX (§5, incl. M1) is covered by a test so a future wording
+edit is a visible diff, not a silent regression (C9).
 
 ## 7. Build order
 
@@ -199,3 +231,18 @@ W (vault words + labels core, THIRD_PARTY_NOTICES) → G1 (restructure, returnin
 toggle, plain messages) → G2 (recovery UX: words, card, labels, last-key, accept-rollback,
 runtimes on demand) → C1 (command registry, synopses, group help, double-dash) → C2 (Type III
 sweep + docs) → final verification. Each slice: builder, independent verifier, one fix cycle.
+
+## 8. Revision 2 — how each review condition was applied
+
+| Cond | Applied as |
+|---|---|
+| C1 | §2.5 discriminator rule; word-shaped failures return typed word errors on GUI read-back AND redeem, never base32 fall-through; W6 |
+| C2 | §2.5 wordlist pinned by golden vector + SHA-256 constant outside the vendored file; W7 |
+| C3 | §3.1 one shared table drives dispatch; registry==dispatch equivalence test with the known omissions as first rows; H4 |
+| C4 | §2.6 stable 4-hex handle on card and list on every device |
+| C5 | §2.2 Welcome-back whenever no vault is open, with "I already have a vault" picker and "Create a new vault" → stepper |
+| C6 | §2.5 pre-commit card stamped DRAFT, confirmed reprint after commit; CLI --save rewritten on commit; S3 |
+| C7 | §3.1 exit-code contract: help exits 0, unknown subcommand non-zero; H5; changelog note |
+| C8 | G1/G3/S3 reworded to what a Go httptest harness proves (no client-behaviour claims) |
+| C9 | M1 row for every message change; §6 narrowed to the matrix |
+
