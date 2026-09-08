@@ -1270,11 +1270,39 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	// it flips a per-session flag so the full page renders now and on every later
 	// reload for this session (design §3.4). The full page's "Back to guided
 	// setup" link (GUI-4) lands as /?guided=1 and clears that flag, so the
-	// stepper renders again while the first-run trigger still holds.
-	if r.URL.Query().Get("guided") == "1" {
+	// stepper renders again while the first-run trigger still holds. The
+	// Welcome-back "Go to the full app" link (/?app=1) also sticks the app view.
+	q := r.URL.Query()
+	if q.Get("guided") == "1" {
 		s.clearSetupSkipped(r)
-	} else if r.URL.Query().Get("advanced") == "1" {
+	} else if q.Get("advanced") == "1" || q.Get("app") == "1" {
 		s.markSetupSkipped(r)
+	}
+	s.mu.Lock()
+	vaultOpen := s.vault != nil
+	vaultPath := s.vaultPath
+	s.mu.Unlock()
+	vaultName := ""
+	if vaultOpen {
+		vaultName = filepath.Base(vaultPath)
+	}
+	setupSkipped := s.setupSkippedFor(r)
+	// The landing view (design U2 §2.1/§2.2). Whenever no vault is open the index
+	// lands on the Welcome-back view (review C5) — the stepper is NO LONGER the
+	// automatic landing for zero profiles; it is reached through the Create button
+	// (/?create=1) or the Back-to-guided link (/?guided=1). Skip-to-advanced
+	// (/?advanced=1) and "Go to the full app" (/?app=1) both set setupSkipped and
+	// land on the app; a vault open lands on the app (Files). The data-first-run
+	// attribute (below) is UNCHANGED: it still marks the raw first-run trigger, so
+	// the stepper markup is served and reachable on a fresh install.
+	view := "welcome"
+	switch {
+	case vaultOpen:
+		view = "app"
+	case q.Get("create") == "1" || q.Get("guided") == "1":
+		view = "stepper"
+	case setupSkipped:
+		view = "app"
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = page.Execute(w, struct {
@@ -1285,7 +1313,11 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		AuthEnabled     bool
 		FirstRun        bool
 		SkippedFirstRun bool
-	}{Token: s.token, InitialPath: s.vaultPath, SuggestedPaths: userpath.SuggestedVaultPaths(), RsyncHint: rsyncput.DefaultBinaryHint(), AuthEnabled: s.guiAuthEnabled(), FirstRun: s.firstRun(r), SkippedFirstRun: s.skippedFirstRun(r)})
+		View            string
+		VaultOpen       bool
+		VaultName       string
+		ShowAdvanced    bool
+	}{Token: s.token, InitialPath: s.vaultPath, SuggestedPaths: userpath.SuggestedVaultPaths(), RsyncHint: rsyncput.DefaultBinaryHint(), AuthEnabled: s.guiAuthEnabled(), FirstRun: s.firstRun(r), SkippedFirstRun: s.skippedFirstRun(r), View: view, VaultOpen: vaultOpen, VaultName: vaultName, ShowAdvanced: q.Get("advanced") == "1"})
 }
 
 // firstRun reports whether the GUI should render the first-run stepper instead
@@ -1623,7 +1655,9 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.refreshVaultKeychain(v.ID(), req.NewPassword)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "formatEpoch": v.Config.FormatEpoch})
+	// passwordChanged drives the plain-language humanize() sentence (design U2
+	// §2.4) so the GUI never renders the raw JSON body as the success message.
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "passwordChanged": true, "formatEpoch": v.Config.FormatEpoch})
 }
 
 type recoveryEntryDTO struct {
@@ -1714,7 +1748,8 @@ func (s *Server) handleRecoveryCommit(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.pendingRecovery = nil
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	// recoverySaved drives the plain-language humanize() sentence (design U2 §2.4).
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "recoverySaved": true})
 }
 
 type recoveryRedeemRequest struct {
@@ -3522,7 +3557,12 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
+// keychainUnavailableMessage renders the keychain-unavailable message with a
+// plain lead line BEFORE the technical detail (design U2 §2.4): a non-technical
+// owner reads what it means for them first, then the backend detail follows for
+// anyone who needs it. The lead line names no secret.
 func keychainUnavailableMessage(st keychain.Status) string {
+	const lead = "This computer's keychain isn't available right now, so open-seavault-rclone can't save or read your vault password automatically. You can still open the vault by typing its password."
 	msg := st.Summary
 	if msg == "" {
 		msg = "OS keychain unavailable"
@@ -3537,7 +3577,7 @@ func keychainUnavailableMessage(st keychain.Status) string {
 		msg += " Missing: " + strings.Join(st.Missing, ", ") + "."
 	}
 	msg += " Enter the vault password manually, or set SEAVAULT_PASSWORD before launching open-seavault-rclone."
-	return msg
+	return lead + " " + msg
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -4084,13 +4124,32 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
   .checkline { width: 100%; }
   table { min-width: 620px; }
 }
-/* First-run stepper (design §3.4): shown only when the server renders the page
-   in first-run mode; it replaces the full 22-panel page until the user finishes
-   setup or follows "Skip to advanced". */
-#setup-stepper { display: none; }
-body.first-run #setup-stepper { display: block; }
-body.first-run > header .jump-links { display: none; }
-body.first-run .app-shell > .content > section:not(#setup-stepper) { display: none; }
+/* Four-destination shell (design U2 §2.1). The index renders one of three
+   server-chosen views (view-welcome / view-stepper / view-app) via the body
+   class; within the app view a single destination shows at a time (JS toggles
+   .active). The Welcome-back and stepper markup and every destination stay in
+   the DOM in all views so element ids never disappear (I-U1) — the view class
+   only chooses what is visible. */
+.destination-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+.destinations { display: flex; flex-wrap: wrap; gap: 8px; }
+.destination-tab { border: 1px solid var(--button-border); background: var(--panel); color: var(--fg); border-radius: 999px; padding: 8px 16px; font: inherit; cursor: pointer; }
+.destination-tab.active { background: var(--button); border-color: var(--focus); font-weight: 600; }
+.advanced-toggle-row { margin: 0; }
+.section-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 4px; }
+.section-list a { color: var(--focus); text-decoration: none; padding: 4px 0; }
+.section-list a:hover { text-decoration: underline; }
+.field-note { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; }
+.field-note.field-alert { color: var(--danger, #b00020); }
+.destination { display: none; gap: 16px; grid-template-columns: 1fr; }
+.destination.active { display: grid; }
+#welcome-back, #setup-stepper { display: none; }
+body.view-welcome #welcome-back { display: block; }
+body.view-stepper #setup-stepper { display: block; }
+/* In the welcome and stepper views the destination shell (bar + panels) and the
+   result rail are hidden; the app view hides welcome-back and the stepper. */
+body.view-welcome .destination-bar, body.view-welcome .destination,
+body.view-stepper .destination-bar, body.view-stepper .destination { display: none; }
+body.view-welcome .result-panel, body.view-stepper .result-panel { display: none; }
 #setup-stepper .step { display: none; }
 #setup-stepper .step.active { display: block; }
 #setup-stepper .step-dots { display: flex; gap: 8px; margin: 6px 0 14px; flex-wrap: wrap; }
@@ -4104,7 +4163,7 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
 #setup-stepper .field-error.field-ok { color: var(--muted); }
 </style>
 </head>
-<body data-first-run="{{if .FirstRun}}true{{else}}false{{end}}" class="{{if .FirstRun}}first-run{{end}}">
+<body data-first-run="{{if .FirstRun}}true{{else}}false{{end}}" class="view-{{.View}}{{if eq .View "stepper"}} first-run{{end}}{{if .ShowAdvanced}} show-advanced{{end}}">
 <header>
   <div class="header-row">
     <div class="header-main">
@@ -4119,18 +4178,6 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
     </div>
     <div class="header-actions"><a class="settings-button" href="/help">Help</a><a class="settings-button" href="#settings-panel">Settings</a>{{if .AuthEnabled}}<a class="settings-button" href="/logout">Logout</a>{{end}}</div>
   </div>
-  <nav class="jump-links" aria-label="Page sections">
-    <a href="#files-panel">WebDAV files</a>
-    <a href="#vault-panel">Vault</a>
-    <a href="#upload-panel">Upload</a>
-    <a href="#move-panel">Move vault</a>
-    <a href="#export-panel">Export</a>
-    <a href="#remote-panel">Remote</a>
-    <a href="#settings-panel">Settings</a>
-    <a href="/help">Help</a>
-    <a href="#managed-tools-panel">Managed tools</a>
-    <a href="#keys-panel">SSH keys</a>
-  </nav>
   <div id="compatWarning" class="compat-warning" role="alert"></div>
   {{if .SkippedFirstRun}}<div id="backToGuided" class="notice-banner" role="status"><span class="notice-title">Guided setup</span> You skipped the first-run wizard. <a href="/?guided=1">Back to guided setup</a> &mdash; available until you create your first vault.</div>{{end}}
   <div id="recoveryReminder" class="notice-banner" role="status" hidden><button class="notice-dismiss" type="button" aria-label="Dismiss" onclick="dismissRecoveryReminder()">x</button><span class="notice-title">No recovery key</span> This vault has no recovery key. Without one, a forgotten password means the vault cannot be opened. Create one from the Password &amp; recovery panel with &ldquo;Generate recovery key&rdquo;.</div>
@@ -4138,6 +4185,37 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
 </header>
 <main class="app-shell">
 <div class="content">
+<div class="destination-bar">
+  <nav class="destinations" aria-label="Destinations">
+    <button type="button" class="destination-tab active" data-destination="files" onclick="showDestination('files')">Files</button>
+    <button type="button" class="destination-tab" data-destination="cloud" onclick="showDestination('cloud')">Cloud sync</button>
+    <button type="button" class="destination-tab" data-destination="security" onclick="showDestination('security')">Security</button>
+    <button type="button" class="destination-tab" data-destination="advanced" onclick="showDestination('advanced')">Advanced</button>
+  </nav>
+  <p class="advanced-toggle-row"><button type="button" id="showAdvancedToggle" onclick="toggleAdvanced()">Show advanced</button></p>
+</div>
+
+<section id="welcome-back" aria-label="Welcome back">
+  <h2>Welcome back</h2>
+  <p class="hint">Open one of your saved vaults, point open-seavault-rclone at a vault folder you already have, or create a new vault.</p>
+  <div id="welcomeVaultList" class="table-wrap"><p class="hint">Loading your saved vaults&hellip;</p></div>
+  <div class="form-grid">
+    <label>I already have a vault &mdash; choose its folder
+      <input id="welcomeVaultPath" placeholder="~/Nextcloud/seavault" autocomplete="off">
+      <small>Point to a vault folder you already have, for example one your sync client restored on this device. This opens it with the existing vault; nothing is created.</small>
+    </label>
+    <label>Password
+      <input id="welcomePassword" type="password" autocomplete="current-password">
+      <small>Leave blank only when this vault's password is saved in this computer's OS keychain.</small>
+    </label>
+  </div>
+  <p class="row-actions">
+    <button type="button" class="operation" onclick="welcomeOpen()">Open</button>
+    <a class="settings-button" href="/?create=1">Create a new vault</a>
+    <a class="settings-button" href="/?app=1">Go to the full app</a>
+  </p>
+</section>
+
 <section id="setup-stepper" aria-label="First-run setup">
   <a class="skip-advanced" href="/?advanced=1">Skip to advanced view</a>
   <h2>Set up your encrypted vault</h2>
@@ -4238,45 +4316,14 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
   </div>
 </section>
 
-<section id="files-panel">
-  <h2>WebDAV file manager</h2>
-  <p class="hint">This is open-seavault-rclone's built-in WebDAV client. It talks to the local same-origin WebDAV endpoint and does not depend on Finder, Windows Explorer, GNOME Files, KDE Dolphin, davfs2, WinFsp, macFUSE, or FUSE.</p>
-  <p class="row-actions">
-    <button class="operation" onclick="refreshDavFiles()">Refresh folder</button>
-    <button class="secondary operation" onclick="closeVaultFromWebDAV()">Close vault</button>
-    <button class="operation" onclick="createDavFolder()">New folder</button>
-    <button class="operation" onclick="downloadSelectedDav()">Download selected file</button>
-    <button class="operation" onclick="downloadSelectedDavZip()">Download selected folder as ZIP</button>
-    <button class="operation" onclick="renameSelectedDav()">Rename/move</button>
-    <button class="operation" onclick="copySelectedDav()">Copy</button>
-    <button class="danger operation" onclick="deleteSelectedDav()">Delete</button>
-    <button class="secondary" onclick="copyDavURL()">Copy WebDAV URL</button>
-    <label class="checkline"><input id="webdavReadOnly" type="checkbox" onchange="toggleWebDAVReadOnly()"> Read-only WebDAV mode</label>
-  </p>
-  <div class="form-grid">
-    <label>Upload files through WebDAV
-      <input id="davFileInput" type="file" multiple>
-      <small>Files upload into the current WebDAV folder.</small>
-    </label>
-    <label>Upload folder through WebDAV
-      <input id="davFolderInput" type="file" webkitdirectory directory multiple>
-      <small>Folder uploads preserve browser-provided relative paths.</small>
-    </label>
-  </div>
-  <div id="davDropZone" class="drop-zone">Drop files here to upload into the current folder.</div>
-  <div class="file-manager-grid">
-    <div class="folder-tree">
-      <strong>Folder tree</strong>
-      <div id="davTree"><p class="hint">Open a vault, then refresh.</p></div>
-    </div>
-    <div class="file-browser">
-      <div id="davBreadcrumb" class="breadcrumb"></div>
-      <div id="davTable" class="table-wrap"><p class="hint">Open a vault to browse files.</p></div>
-    </div>
-  </div>
-</section>
-
-
+<div class="destination active" id="dest-files" data-destination="files" aria-label="Files">
+  <nav class="section-list" aria-label="Files sections">
+    <a href="#vault-panel">Your vault</a>
+    <a href="#saved-vaults-panel">Switch vault</a>
+    <a href="#upload-panel">Add files</a>
+    <a href="#export-panel">Get files out</a>
+    <a href="#files-panel">Browse files</a>
+  </nav>
 <section id="vault-panel">
   <h2>Open or create vault</h2>
   <div class="form-grid">
@@ -4321,6 +4368,13 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
     <label class="checkline"><input id="savePassword" type="checkbox"> Save password in OS keychain</label>
   </p>
   <p class="hint">Saved vault locations are stored in the app profile list. Passwords are stored separately in the OS keychain by vault ID. The encrypted vault folder can still be moved by your sync client.</p>
+</section>
+
+<section id="saved-vaults-panel">
+  <h2>Saved vault locations</h2>
+  <p class="hint">These locations appear in the vault dropdown. Passwords are only stored when you save them to the OS keychain.</p>
+  <p><button onclick="refreshStatus()">Refresh saved vaults</button></p>
+  <div id="profiles" class="table-wrap"></div>
 </section>
 
 <section id="upload-panel">
@@ -4374,48 +4428,132 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
   </p>
 </section>
 
-
-<section id="move-panel">
-  <h2>Move vault location</h2>
-  <p class="hint">Move the encrypted vault folder to another local disk or sync-client folder. The OS keychain entry is kept because it is tied to the vault ID, not the path. Saved vault and matching remote profiles are updated after a successful move.</p>
+<section id="export-panel">
+  <h2>Export plaintext from vault</h2>
+  <p class="hint">Exports decrypt files from the open vault to a local destination. The destination is never inside .seavault unless you explicitly type that path, which is not recommended.</p>
   <div class="form-grid">
-    <label>Saved vault to move
-      <select id="moveProfile" onchange="fillMoveFromProfile()">
-        <option value="">Use active/manual source path</option>
+    <label>Selected virtual folder or file
+      <input id="exportPath" placeholder="projects/site or . for all files" autocomplete="off">
+      <small>Use . to export the entire vault. Use a folder prefix to export that directory.</small>
+    </label>
+    <label>Destination local folder or ZIP path
+      <input id="exportDest" placeholder="~/Desktop/seavault-export" autocomplete="off">
+      <small>For ZIP export, enter a folder or a .zip path.</small>
+    </label>
+    <label>Overwrite policy
+      <select id="exportOverwrite">
+        <option value="fail">fail if destination exists</option>
+        <option value="skip">skip existing files</option>
+        <option value="replace">replace existing files</option>
       </select>
-      <small>Select a saved vault, or leave blank to move the active/manual source path.</small>
     </label>
-    <label>Source vault path
-      <input id="moveSource" placeholder="active vault or saved profile path" autocomplete="off">
-      <small>Leave blank to move the active open vault, or enter a vault path/profile.</small>
-    </label>
-    <label>New vault location
-      <input id="moveDest" placeholder="~/Nextcloud/seavault-new" autocomplete="off">
-      <small>Choose the new encrypted vault folder location. Do not choose a folder inside the existing vault.</small>
-    </label>
-    <label>Move options
-      <span class="checkline"><input id="moveUpdateRemotes" type="checkbox" checked> Update matching remote profiles</span>
-      <span class="checkline"><input id="moveReplace" type="checkbox"> Replace existing destination if present</span>
-      <small>Replace removes the destination path first. Use it only when you are certain it does not contain needed data.</small>
+    <label>ZIP option
+      <span class="checkline"><input id="exportZip" type="checkbox"> Create ZIP archive instead of folders/files</span>
+      <small>ZIP exports are written by the local GUI server.</small>
     </label>
   </div>
   <p class="row-actions">
-    <button class="operation" onclick="moveVaultLocation()">Move vault location</button>
-    <button class="secondary" onclick="prefillMoveFromActive()">Use active vault as source</button>
+    <button class="operation" onclick="exportVault(false, false)">Export selected folder/file</button>
+    <button class="operation" onclick="exportVault(true, false)">Dry-run selected export</button>
+    <button class="operation" onclick="exportVault(false, true)">Export entire vault</button>
+    <button class="operation" onclick="exportVault(true, true)">Dry-run entire vault</button>
   </p>
 </section>
 
+<section id="files-panel">
+  <h2>WebDAV file manager</h2>
+  <p class="hint">This is open-seavault-rclone's built-in WebDAV client. It talks to the local same-origin WebDAV endpoint and does not depend on Finder, Windows Explorer, GNOME Files, KDE Dolphin, davfs2, WinFsp, macFUSE, or FUSE.</p>
+  <p class="row-actions">
+    <button class="operation" onclick="refreshDavFiles()">Refresh folder</button>
+    <button class="secondary operation" onclick="closeVaultFromWebDAV()">Close vault</button>
+    <button class="operation" onclick="createDavFolder()">New folder</button>
+    <button class="operation" onclick="downloadSelectedDav()">Download selected file</button>
+    <button class="operation" onclick="downloadSelectedDavZip()">Download selected folder as ZIP</button>
+    <button class="operation" onclick="renameSelectedDav()">Rename/move</button>
+    <button class="operation" onclick="copySelectedDav()">Copy</button>
+    <button class="danger operation" onclick="deleteSelectedDav()">Delete</button>
+    <button class="secondary" onclick="copyDavURL()">Copy WebDAV URL</button>
+    <label class="checkline"><input id="webdavReadOnly" type="checkbox" onchange="toggleWebDAVReadOnly()"> Read-only WebDAV mode</label>
+  </p>
+  <div class="form-grid">
+    <label>Upload files through WebDAV
+      <input id="davFileInput" type="file" multiple>
+      <small>Files upload into the current WebDAV folder.</small>
+    </label>
+    <label>Upload folder through WebDAV
+      <input id="davFolderInput" type="file" webkitdirectory directory multiple>
+      <small>Folder uploads preserve browser-provided relative paths.</small>
+    </label>
+  </div>
+  <div id="davDropZone" class="drop-zone">Drop files here to upload into the current folder.</div>
+  <div class="file-manager-grid">
+    <div class="folder-tree">
+      <strong>Folder tree</strong>
+      <div id="davTree"><p class="hint">Open a vault, then refresh.</p></div>
+    </div>
+    <div class="file-browser">
+      <div id="davBreadcrumb" class="breadcrumb"></div>
+      <div id="davTable" class="table-wrap"><p class="hint">Open a vault to browse files.</p></div>
+    </div>
+  </div>
+</section>
+</div>
+
+<div class="destination" id="dest-cloud" data-destination="cloud" aria-label="Cloud sync">
+  <nav class="section-list" aria-label="Cloud sync sections">
+    <a href="#remote-panel">Cloud sync</a>
+    <a href="#keys-panel">SFTP keys</a>
+  </nav>
+<section id="remote-panel">
+  <h2>Remote repositories</h2>
+  <div class="form-grid">
+    <label>Name <input id="remoteName" placeholder="research-b2-ca" autocomplete="off"></label>
+    <label>Type <select id="remoteType"><option value="rclone">rclone</option><option value="local">local folder copy</option></select></label>
+    <label>Vault path/profile <input id="remoteVault" placeholder="leave blank to use open vault" autocomplete="off"></label>
+    <label>Remote path <input id="remotePath" placeholder="remote:bucket/path or ~/Backup/seavault" autocomplete="off"><small>For rclone, enter the provider path. The app transfers only .seavault.</small></label>
+    <label>Backend label <input id="remoteBackend" value="local" placeholder="local, sftp, s3, b2, onedrive, webdav" autocomplete="off"></label>
+    <label>Transfers <input id="remoteTransfers" type="number" value="8"></label>
+    <label>Checkers <input id="remoteCheckers" type="number" value="16"></label>
+    <label>Bandwidth limit <input id="remoteBandwidth" placeholder="optional, e.g. 10M" autocomplete="off"></label>
+  </div>
+  <p class="row-actions">
+    <label class="checkline"><input id="remoteFastList" type="checkbox" checked> Use fast-list when supported</label>
+    <button onclick="saveRemote()">Save remote profile</button>
+    <button onclick="loadRemotes()">Refresh remotes</button>
+  </p>
+  <div id="remotes" class="table-wrap"></div>
+  <pre id="remoteOutput">No remote action has run.</pre>
+</section>
+
+<section id="keys-panel">
+  <h2>SSH keys for rclone SFTP</h2>
+  <div class="form-grid">
+    <label>Managed key name <input id="sshKeyName" placeholder="research-sftp" autocomplete="off"></label>
+    <label>Import existing private key path <input id="sshKeyPath" placeholder="optional path to import" autocomplete="off"></label>
+  </div>
+  <p class="row-actions"><button onclick="generateSSHKey()">Generate/import key</button><button onclick="loadSSHKeys()">Refresh keys</button></p>
+  <div id="sshKeys" class="table-wrap"></div>
+</section>
+</div>
+
+<div class="destination" id="dest-security" data-destination="security" aria-label="Security">
+  <nav class="section-list" aria-label="Security sections">
+    <a href="#password-recovery-panel">Password and recovery key</a>
+    <a href="#health-panel">Check vault health</a>
+  </nav>
 <section id="password-recovery-panel">
-  <h2>Password &amp; recovery</h2>
+  <h2 id="passwordRecoveryHeader">Password and recovery key{{if .VaultOpen}} &mdash; {{.VaultName}}{{end}}</h2>
   <p class="hint">Change the vault password or manage recovery keys for the open vault. Rotations rewrap the keys only &mdash; no file is re-encrypted &mdash; and update the OS keychain entry when one exists. Do a rotation on ONE device and let it sync before changing it elsewhere.</p>
   <div class="form-grid">
     <label>Change password &mdash; new password
       <input id="pwNew" type="password" autocomplete="new-password" placeholder="new vault password">
+      <small id="pwStrengthHint" class="field-note" role="status"></small>
     </label>
     <label>Confirm new password
       <input id="pwNewConfirm" type="password" autocomplete="new-password" placeholder="re-enter the new password">
     </label>
   </div>
+  <small id="pwNewConfirmError" class="field-note field-alert" role="alert" hidden></small>
   <p class="row-actions"><button class="operation" onclick="changeVaultPassword()">Change password</button></p>
 
   <h3>Recovery keys</h3>
@@ -4464,53 +4602,58 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
   <p class="row-actions"><button class="operation" onclick="redeemRecovery()">Redeem recovery key</button></p>
 </section>
 
-<section id="export-panel">
-  <h2>Export plaintext from vault</h2>
-  <p class="hint">Exports decrypt files from the open vault to a local destination. The destination is never inside .seavault unless you explicitly type that path, which is not recommended.</p>
-  <div class="form-grid">
-    <label>Selected virtual folder or file
-      <input id="exportPath" placeholder="projects/site or . for all files" autocomplete="off">
-      <small>Use . to export the entire vault. Use a folder prefix to export that directory.</small>
-    </label>
-    <label>Destination local folder or ZIP path
-      <input id="exportDest" placeholder="~/Desktop/seavault-export" autocomplete="off">
-      <small>For ZIP export, enter a folder or a .zip path.</small>
-    </label>
-    <label>Overwrite policy
-      <select id="exportOverwrite">
-        <option value="fail">fail if destination exists</option>
-        <option value="skip">skip existing files</option>
-        <option value="replace">replace existing files</option>
-      </select>
-    </label>
-    <label>ZIP option
-      <span class="checkline"><input id="exportZip" type="checkbox"> Create ZIP archive instead of folders/files</span>
-      <small>ZIP exports are written by the local GUI server.</small>
-    </label>
-  </div>
-  <p class="row-actions">
-    <button class="operation" onclick="exportVault(false, false)">Export selected folder/file</button>
-    <button class="operation" onclick="exportVault(true, false)">Dry-run selected export</button>
-    <button class="operation" onclick="exportVault(false, true)">Export entire vault</button>
-    <button class="operation" onclick="exportVault(true, true)">Dry-run entire vault</button>
-  </p>
+<section id="health-panel">
+  <h2>Check vault health</h2>
+  <p class="hint">Verify decrypts and re-checks every referenced chunk. Reclaim space frees storage taken by unreferenced data, in two fenced steps so other devices can object first. Tidy conflicts only reconciles conflicting edits and stale records &mdash; it frees no space.</p>
+  <p class="row-actions"><button class="operation" onclick="verifyVault()">Verify</button><button class="operation" onclick="reclaimSpacePreview()">Reclaim space</button><button class="operation" onclick="compactVault()">Tidy conflicts</button></p>
+  <div id="gcPreview" class="gc-preview" hidden></div>
 </section>
+</div>
 
-
+<div class="destination" id="dest-advanced" data-destination="advanced" aria-label="Advanced" hidden>
+  <nav class="section-list" aria-label="Advanced sections">
+    <a href="#legacy-files-panel">Advanced raw file list</a>
+    <a href="#move-panel">Move vault location</a>
+    <a href="#managed-tools-panel">Managed rsync runtime</a>
+    <a href="#rclone-runtime-panel">Rclone runtime</a>
+    <a href="#settings-panel">Settings</a>
+    <a href="/help">Help</a>
+  </nav>
 <section id="legacy-files-panel">
   <h2>Advanced raw file list</h2>
   <p class="hint">Debug view of virtual paths and chunk counts. Use the WebDAV file manager above for normal file browsing.</p>
-  <p class="row-actions"><button onclick="refreshFiles()">Refresh raw list</button><button class="operation" onclick="verifyVault()">Verify</button><button class="operation" onclick="reclaimSpacePreview()">Reclaim space</button><button class="operation" onclick="compactVault()">Tidy conflicts</button><button onclick="loadStats()">Stats</button></p>
-  <p class="hint">Reclaim space frees storage taken by unreferenced data, in two fenced steps so other devices can object first. Tidy conflicts only reconciles conflicting edits and stale records — it frees no space.</p>
-  <div id="gcPreview" class="gc-preview" hidden></div>
+  <p class="row-actions"><button onclick="refreshFiles()">Refresh raw list</button><button onclick="loadStats()">Stats</button></p>
   <div id="files" class="table-wrap"></div>
 </section>
 
-<section>
-  <h2>Saved vault locations</h2>
-  <p class="hint">These locations appear in the vault dropdown. Passwords are only stored when you save them to the OS keychain.</p>
-  <p><button onclick="refreshStatus()">Refresh saved vaults</button></p>
-  <div id="profiles" class="table-wrap"></div>
+<section id="move-panel">
+  <h2>Move vault location</h2>
+  <p class="hint">Move the encrypted vault folder to another local disk or sync-client folder. The OS keychain entry is kept because it is tied to the vault ID, not the path. Saved vault and matching remote profiles are updated after a successful move.</p>
+  <div class="form-grid">
+    <label>Saved vault to move
+      <select id="moveProfile" onchange="fillMoveFromProfile()">
+        <option value="">Use active/manual source path</option>
+      </select>
+      <small>Select a saved vault, or leave blank to move the active/manual source path.</small>
+    </label>
+    <label>Source vault path
+      <input id="moveSource" placeholder="active vault or saved profile path" autocomplete="off">
+      <small>Leave blank to move the active open vault, or enter a vault path/profile.</small>
+    </label>
+    <label>New vault location
+      <input id="moveDest" placeholder="~/Nextcloud/seavault-new" autocomplete="off">
+      <small>Choose the new encrypted vault folder location. Do not choose a folder inside the existing vault.</small>
+    </label>
+    <label>Move options
+      <span class="checkline"><input id="moveUpdateRemotes" type="checkbox" checked> Update matching remote profiles</span>
+      <span class="checkline"><input id="moveReplace" type="checkbox"> Replace existing destination if present</span>
+      <small>Replace removes the destination path first. Use it only when you are certain it does not contain needed data.</small>
+    </label>
+  </div>
+  <p class="row-actions">
+    <button class="operation" onclick="moveVaultLocation()">Move vault location</button>
+    <button class="secondary" onclick="prefillMoveFromActive()">Use active vault as source</button>
+  </p>
 </section>
 
 <section id="managed-tools-panel">
@@ -4543,7 +4686,7 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
   <pre id="rsyncStatus">No managed rsync status loaded.</pre>
 </section>
 
-<section>
+<section id="rclone-runtime-panel">
   <h2>Rclone runtime</h2>
   <p class="hint">This app uses an app-managed rclone executable for remote transport. It does not require system rclone.</p>
   <div class="form-grid">
@@ -4572,36 +4715,6 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
   <pre id="rcloneStatus">No runtime status loaded.</pre>
 </section>
 
-<section id="remote-panel">
-  <h2>Remote repositories</h2>
-  <div class="form-grid">
-    <label>Name <input id="remoteName" placeholder="research-b2-ca" autocomplete="off"></label>
-    <label>Type <select id="remoteType"><option value="rclone">rclone</option><option value="local">local folder copy</option></select></label>
-    <label>Vault path/profile <input id="remoteVault" placeholder="leave blank to use open vault" autocomplete="off"></label>
-    <label>Remote path <input id="remotePath" placeholder="remote:bucket/path or ~/Backup/seavault" autocomplete="off"><small>For rclone, enter the provider path. The app transfers only .seavault.</small></label>
-    <label>Backend label <input id="remoteBackend" value="local" placeholder="local, sftp, s3, b2, onedrive, webdav" autocomplete="off"></label>
-    <label>Transfers <input id="remoteTransfers" type="number" value="8"></label>
-    <label>Checkers <input id="remoteCheckers" type="number" value="16"></label>
-    <label>Bandwidth limit <input id="remoteBandwidth" placeholder="optional, e.g. 10M" autocomplete="off"></label>
-  </div>
-  <p class="row-actions">
-    <label class="checkline"><input id="remoteFastList" type="checkbox" checked> Use fast-list when supported</label>
-    <button onclick="saveRemote()">Save remote profile</button>
-    <button onclick="loadRemotes()">Refresh remotes</button>
-  </p>
-  <div id="remotes" class="table-wrap"></div>
-  <pre id="remoteOutput">No remote action has run.</pre>
-</section>
-
-<section id="keys-panel">
-  <h2>SSH keys for rclone SFTP</h2>
-  <div class="form-grid">
-    <label>Managed key name <input id="sshKeyName" placeholder="research-sftp" autocomplete="off"></label>
-    <label>Import existing private key path <input id="sshKeyPath" placeholder="optional path to import" autocomplete="off"></label>
-  </div>
-  <p class="row-actions"><button onclick="generateSSHKey()">Generate/import key</button><button onclick="loadSSHKeys()">Refresh keys</button></p>
-  <div id="sshKeys" class="table-wrap"></div>
-</section>
 <section id="settings-panel">
   <h2>Settings</h2>
   <p class="hint">Application settings are saved locally. Changing HTTP/HTTPS or certificate settings requires restarting the GUI.</p>
@@ -4659,6 +4772,7 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
   <h3>Application log</h3>
   <pre id="status" class="log-view">Loading...</pre>
 </section>
+</div>
 
 </div>
 
@@ -4817,6 +4931,11 @@ function humanize(obj){
     return (obj.open ? 'Vault is open.' : 'No vault is open.') + (obj.vaultPath ? '\nVault path: ' + obj.vaultPath : '') + '\n\n' + JSON.stringify(obj, null, 2);
   }
   if(obj.move){ return 'Vault move complete.\nFrom: ' + obj.move.sourcePath + '\nTo: ' + obj.move.destinationPath + '\nUpdated saved vault locations: ' + (obj.move.updatedProfiles||0) + '\nUpdated remote profiles: ' + (obj.move.updatedRemotes||0) + (obj.reopened ? '\nVault reopened from OS keychain.' : (obj.closedActive ? '\nVault was moved and closed. Reopen it with a saved keychain password or typed password.' : '')) + ((obj.move.warnings||[]).length ? '\nWarnings: ' + obj.move.warnings.join('; ') : '') + '\n\n' + JSON.stringify(obj, null, 2); }
+  // Plain-language, JSON-free success sentences (design U2 §2.4). These branches
+  // sit BEFORE the generic obj.ok branch so a password-change / recovery-commit
+  // response never renders as a raw JSON dump.
+  if(obj.passwordChanged){ return 'Password changed. The old password no longer opens this vault. Other devices will need the new password after vault.json syncs.'; }
+  if(obj.recoverySaved){ return 'Recovery key saved' + (obj.label ? ' and labeled ' + obj.label : '') + '. Keep the recovery phrase on paper, away from this computer.'; }
   if(obj.ok){ return 'Operation completed successfully.\n\n' + JSON.stringify(obj, null, 2); }
   return JSON.stringify(obj, null, 2);
 }
@@ -4868,13 +4987,49 @@ async function moveVaultLocation(){
   } catch(e){ showError('Vault move failed', e.message); activeController=null; setBusy(false); }
 }
 
+// pwFieldNote writes an inline note beside a change-password field (design U2
+// §2.4). alert=true styles it as an error; false as a neutral hint.
+function pwFieldNote(id, text, alert){
+  const el = $(id);
+  if(!el) return;
+  el.textContent = text || '';
+  el.className = 'field-note' + (alert ? ' field-alert' : '');
+  el.hidden = !text;
+}
+// pwStrengthHint is a LIGHT strength hint — not a policy gate. The empty-password
+// guard in changeVaultPassword is unchanged; this only nudges toward a longer
+// passphrase (design U2 §2.4).
+function pwStrengthHint(pw){
+  if(!pw) return '';
+  if(pw.length < 8) return 'Short password. A longer passphrase is much harder to guess.';
+  if(pw.length < 12) return 'Reasonable length. A few more words makes it stronger.';
+  return 'Good length.';
+}
+// pwLiveMatch gives inline mismatch validation beside the confirm field as the
+// owner types (design U2 §2.4), mirroring the stepper's setupLiveMatch.
+function pwLiveMatch(){
+  const p1 = ($('pwNew') && $('pwNew').value) || '';
+  const p2 = ($('pwNewConfirm') && $('pwNewConfirm').value) || '';
+  pwFieldNote('pwStrengthHint', pwStrengthHint(p1), false);
+  if(!p2){ pwFieldNote('pwNewConfirmError', ''); return; }
+  if(p1 === p2){ pwFieldNote('pwNewConfirmError', 'Passwords match.', false); }
+  else { pwFieldNote('pwNewConfirmError', 'The new password and its confirmation do not match.', true); }
+}
 async function changeVaultPassword(){
   try {
     const p1 = $('pwNew').value, p2 = $('pwNewConfirm').value;
-    if(!p1){ showError('New password required', 'Enter a new vault password.'); return; }
-    if(p1 !== p2){ showError('Passwords do not match', 'The new password and its confirmation differ.'); return; }
+    if(!p1){ pwFieldNote('pwNewConfirmError', ''); showError('New password required', 'Enter a new vault password.'); return; }
+    if(p1 !== p2){
+      // Render the mismatch beside the confirm field, not only in the top banner.
+      pwFieldNote('pwNewConfirmError', 'The new password and its confirmation do not match.', true);
+      showError('Passwords do not match', 'The new password and its confirmation differ.');
+      const c = $('pwNewConfirm'); if(c) c.focus();
+      return;
+    }
+    pwFieldNote('pwNewConfirmError', '');
     const res = await api('/api/password-change',{method:'POST',headers:jsonHeaders,body:JSON.stringify({newPassword:p1})});
     $('pwNew').value=''; $('pwNewConfirm').value='';
+    pwFieldNote('pwStrengthHint', ''); pwFieldNote('pwNewConfirmError', '');
     showHuman('Password changed', res, 'success');
   } catch(e){ showError('Password change failed', e.message); }
 }
@@ -5090,6 +5245,76 @@ function scrollToCreateVault(){
   const el = $('vault-panel');
   if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
 }
+// ---- Four-destination shell (design U2 §2.1/§2.2) -----------------------
+// showDestination shows exactly one destination at a time. Selecting Advanced
+// reveals its (default-hidden) container. The harness never runs this — it
+// asserts the server-rendered markup and this source, not the client behaviour.
+function showDestination(name){
+  document.querySelectorAll('.destination').forEach(d => d.classList.toggle('active', d.dataset.destination === name));
+  document.querySelectorAll('.destination-tab').forEach(t => t.classList.toggle('active', t.dataset.destination === name));
+  if(name === 'advanced') revealAdvanced();
+  try { window.scrollTo({top:0, behavior:'smooth'}); } catch(_){}
+}
+// revealAdvanced un-hides the Advanced destination and remembers the choice
+// per-browser (localStorage, guarded), so it stays revealed on the next load.
+function revealAdvanced(){
+  const adv = document.getElementById('dest-advanced');
+  if(adv) adv.hidden = false;
+  try { localStorage.setItem('sv_show_advanced', '1'); } catch(_){}
+}
+// toggleAdvanced is the "Show advanced" control: reveal-and-open when hidden,
+// collapse (and fall back to Files if it was the active destination) when shown.
+function toggleAdvanced(){
+  const adv = document.getElementById('dest-advanced');
+  if(!adv) return;
+  if(adv.hidden){ showDestination('advanced'); }
+  else {
+    adv.hidden = true;
+    try { localStorage.removeItem('sv_show_advanced'); } catch(_){}
+    if(adv.classList.contains('active')) showDestination('files');
+  }
+}
+// destinationInit restores the per-browser "advanced revealed" state on load and
+// honours the stepper's Skip-to-advanced (body.show-advanced) which lands on
+// Files with Advanced shown. Files stays the active destination either way.
+function destinationInit(){
+  let show = false;
+  try { show = localStorage.getItem('sv_show_advanced') === '1'; } catch(_){}
+  if(document.body.classList.contains('show-advanced')){ show = true; }
+  if(show){ const adv = document.getElementById('dest-advanced'); if(adv) adv.hidden = false; }
+}
+// welcomeOpen opens the vault named in the Welcome-back folder picker through the
+// EXISTING /api/open route (design U2 §2.2). No server change; a returning owner
+// on a second device (zero profiles) points at a synced vault folder and opens.
+async function welcomeOpen(){
+  try {
+    const path = ($('welcomeVaultPath') && $('welcomeVaultPath').value.trim()) || '';
+    const pw = ($('welcomePassword') && $('welcomePassword').value) || '';
+    if(!path){ showError('Vault folder required', 'Enter or choose the folder of the vault you want to open.'); return; }
+    await api('/api/open',{method:'POST',headers:jsonHeaders,body:JSON.stringify({vaultPath: path, password: pw, useKeychain: !pw})});
+    window.location.href = '/';
+  } catch(e){ showError('Could not open the vault', humanFetchError(e)); }
+}
+// renderWelcomeVaults fills the Welcome-back saved-vault list from /api/status.
+function renderWelcomeVaults(s){
+  const box = $('welcomeVaultList');
+  if(!box) return;
+  const rows = (s && s.availableVaults) || [];
+  if(rows.length === 0){ box.innerHTML = '<p class="hint">No saved vaults on this device yet. Point to a vault folder below, or create a new vault.</p>'; return; }
+  box.innerHTML = rows.map(v => {
+    const canKey = !!(v.keychain || v.keychainStatus === 'active' || v.keychainStatus === 'available');
+    return '<article class="vault-card"><header><span class="vault-name">'+esc(v.name || v.vaultPath)+'</span><span class="pill">'+esc(v.status || 'saved')+'</span></header><div class="vault-path">'+esc(v.vaultPath)+'</div><p class="row-actions"><button type="button" data-name="'+esc(v.name || '')+'" data-path="'+esc(v.vaultPath || '')+'" data-keychain="'+(canKey?'1':'0')+'" onclick="quickOpenVault(this)">Open</button></p></article>';
+  }).join('');
+}
+// updatePasswordRecoveryHeader keeps the Security panel header naming the open
+// vault after an in-page open, matching the server-rendered header (design §2.4).
+function updatePasswordRecoveryHeader(s){
+  const h = $('passwordRecoveryHeader');
+  if(!h) return;
+  const open = !!(s && s.open);
+  const name = open ? String((s.vaultPath || '').split('/').pop().split('\\').pop() || '') : '';
+  h.textContent = 'Password and recovery key' + (open && name ? ' — ' + name : '');
+}
 async function quickOpenVault(btn){
   const name = btn.dataset.name || '';
   const path = btn.dataset.path || '';
@@ -5184,7 +5409,7 @@ async function refreshStatus(){
     const s = await api('/api/status');
     if(s.browserToken) updateSessionToken(s.browserToken);
     lastStatus = s;
-    renderVaultSelector(s); renderAvailableVaults(s); renderTopVaultStrip(s); renderKeychainStatus(s); renderDependencies(s); renderWebDAVStatus(s); renderWebDAVQuick(s); renderAppConfig(s);
+    renderVaultSelector(s); renderAvailableVaults(s); renderTopVaultStrip(s); renderKeychainStatus(s); renderDependencies(s); renderWebDAVStatus(s); renderWebDAVQuick(s); renderAppConfig(s); renderWelcomeVaults(s); updatePasswordRecoveryHeader(s);
     if(!s.open) clearWebDAVUI('Open a vault to browse files.');
     showHuman('Status refreshed', s);
     const backgroundTasks = s.open ? [refreshFiles(), refreshDavFiles(), loadProfiles()] : [loadProfiles()];
@@ -5199,7 +5424,7 @@ async function refreshStatusFast(){
     const s = await api('/api/status');
     if(s.browserToken) updateSessionToken(s.browserToken);
     lastStatus = s;
-    renderVaultSelector(s); renderAvailableVaults(s); renderTopVaultStrip(s); renderKeychainStatus(s); renderDependencies(s); renderWebDAVStatus(s); renderWebDAVQuick(s); renderAppConfig(s);
+    renderVaultSelector(s); renderAvailableVaults(s); renderTopVaultStrip(s); renderKeychainStatus(s); renderDependencies(s); renderWebDAVStatus(s); renderWebDAVQuick(s); renderAppConfig(s); renderWelcomeVaults(s); updatePasswordRecoveryHeader(s);
     if(!s.open) clearWebDAVUI('Open a vault to browse files.');
     showHuman('Saved vaults refreshed', s, 'success');
   } catch(e){ showError('Could not refresh saved vaults', e.message); }
@@ -6184,6 +6409,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   updateUploadSelectionSummaries();
   setupStepperInit();
+  destinationInit();
+  ['pwNew', 'pwNewConfirm'].forEach(id => { const el = $(id); if(el) el.addEventListener('input', pwLiveMatch); });
 });
 document.addEventListener('keydown', ev => {
   const modal = $('vaultPasswordModal');
