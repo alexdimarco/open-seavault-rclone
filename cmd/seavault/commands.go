@@ -289,6 +289,7 @@ func init() {
 		{name: "rsync", synopsis: "Manage the bundled rsync runtime.", handler: cmdRsync},
 		{name: "remote", synopsis: "Configure and drive rclone/local remote profiles.", handler: cmdRemote},
 		{name: "ssh-key", synopsis: "Generate and manage SSH keys for SFTP remotes.", handler: cmdSSHKey},
+		{name: "tls", synopsis: "Manage TLS certificates for the GUI and WebDAV (U3).", handler: cmdTLS},
 
 		// profile subcommands.
 		{group: "profile", name: "add", synopsis: "Save a vault location under a name.", usage: "seavault profile add [--save-password] NAME VAULT_DIR"},
@@ -353,6 +354,14 @@ func init() {
 		{group: "ssh-key", name: "import", synopsis: "Import an existing private key under a name.", usage: "seavault ssh-key import NAME PRIVATE_KEY"},
 		{group: "ssh-key", name: "public", synopsis: "Print the public key for a stored or given key.", usage: "seavault ssh-key public PRIVATE_KEY_OR_NAME"},
 		{group: "ssh-key", name: "list", synopsis: "List managed SSH keys.", usage: "seavault ssh-key list"},
+
+		// tls subcommands (U3). Double-dash usage lines so H1/H4 cover them like
+		// every other group; execTLS is the leaf dispatcher H4 diffs against.
+		{group: "tls", name: "setup", synopsis: "Interactive wizard to serve the GUI/WebDAV over HTTPS.", usage: "seavault tls setup"},
+		{group: "tls", name: "use", synopsis: "Validate and adopt a certificate/key pair for TLS.", usage: "seavault tls use --cert PATH --key PATH [--allow-host NAME]"},
+		{group: "tls", name: "status", synopsis: "Report the configured certificate, expiry, and Host allowlist.", usage: "seavault tls status"},
+		{group: "tls", name: "check", synopsis: "Validate the configured certificate; non-zero on any error.", usage: "seavault tls check"},
+		{group: "tls", name: "reset", synopsis: "Return to the default: HTTP on loopback, no certificate.", usage: "seavault tls reset"},
 	}
 }
 

@@ -65,6 +65,18 @@ type Server struct {
 	// "localhost") that ServeHTTP and the embedded localdav server accept. Set
 	// by cmd gui from the bind host and any --allow-host values. See.
 	AllowedHosts []string
+	// TLSActive records that the GUI is serving over a resolved TLS certificate
+	// (the tlsconfig precedence chain returned a source other than none). cmd gui
+	// sets it before serving so the session cookie's Secure attribute follows the
+	// resolved TLS state rather than the persisted gui.protocol field (C2), even
+	// when gui.protocol is still http because the certificate came from a flag or
+	// the shared tls section.
+	TLSActive bool
+	// LoginHintURL, when set, is the example launch URL shown on the no-session
+	// page instead of the hardcoded loopback link, so a network-facing TLS
+	// listener does not tell a remote visitor to open http://127.0.0.1 (C1). cmd
+	// gui sets it to scheme://<launch-host>:<port>/?launch=… (no real secret).
+	LoginHintURL string
 	// authSessions maps a session cookie value to its state. A session is created
 	// only by redeeming the launch secret (see handleLaunch); its TTL slides 12h
 	// on every request that passes the session check. See.
@@ -763,7 +775,10 @@ func (s *Server) serveNoSession(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusForbidden)
-		_ = noSessionPage.Execute(w, struct{ CookieBlocked bool }{CookieBlocked: r.URL.Query().Get("redeemed") == "1"})
+		_ = noSessionPage.Execute(w, struct {
+			CookieBlocked bool
+			LaunchExample string
+		}{CookieBlocked: r.URL.Query().Get("redeemed") == "1", LaunchExample: s.LoginHintURL})
 		return
 	}
 	if strings.HasPrefix(p, "/api/") {
@@ -1002,6 +1017,19 @@ func (s *Server) LaunchURL(base string) string {
 	return base + "/?launch=" + s.launchSecret
 }
 
+// cookieSecure reports whether the session cookie must carry the Secure
+// attribute: true when the GUI is serving over a resolved TLS certificate
+// (TLSActive) OR the persisted protocol is https. Coupling it to the resolved
+// TLS state (not the persisted field) means a certificate supplied by --tls-cert
+// or the shared tls section marks the cookie Secure even when gui.protocol is
+// still http (C2).
+func (s *Server) cookieSecure() bool {
+	if s.TLSActive {
+		return true
+	}
+	return strings.EqualFold(s.currentConfig().GUI.Protocol, "https")
+}
+
 // sessionOf returns the session named by the request's cookie, sliding its TTL
 // forward on success. It returns false when the cookie is missing, unknown, or
 // expired. See.
@@ -1048,7 +1076,7 @@ func (s *Server) refreshSessionCookie(w http.ResponseWriter, r *http.Request, se
 	s.authSessions[c.Value] = stored
 	expires := stored.expires
 	s.mu.Unlock()
-	secure := strings.EqualFold(s.currentConfig().GUI.Protocol, "https")
+	secure := s.cookieSecure()
 	http.SetCookie(w, &http.Cookie{Name: guiSessionCookie, Value: c.Value, Path: "/", Expires: expires, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secure})
 }
 
@@ -1094,7 +1122,7 @@ func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
 	s.sweepExpiredLocked(now)
 	s.authSessions[id] = session{expires: expires, loggedIn: loggedIn, cookieIssued: now}
 	s.mu.Unlock()
-	secure := strings.EqualFold(s.currentConfig().GUI.Protocol, "https")
+	secure := s.cookieSecure()
 	http.SetCookie(w, &http.Cookie{Name: guiSessionCookie, Value: id, Path: "/", Expires: expires, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secure})
 	http.Redirect(w, r, "/?redeemed=1", http.StatusFound)
 }
@@ -3350,6 +3378,25 @@ func (s *Server) currentConfig() appconfig.Config {
 	return s.config
 }
 
+// diskConfig re-reads the app config from disk and refreshes s.config so the
+// running GUI reflects out-of-band CLI changes — chiefly `seavault tls use` /
+// `tls reset` writing tls.* underneath a long-lived GUI (config-precedence-1,
+// C3). The on-disk read, not the stale in-memory snapshot, is the settings
+// handler's reconciliation baseline and the source of the tls.* / legacy
+// gui.certFile / gui.protocol fields it preserves, so a GUI Save can neither wipe
+// a CLI-added certificate nor resurrect a CLI-removed one. On a load error it
+// leaves s.config untouched and returns the last-known config.
+func (s *Server) diskConfig() appconfig.Config {
+	cfg, err := appconfig.Load()
+	if err != nil {
+		return s.currentConfig()
+	}
+	s.mu.Lock()
+	s.config = cfg
+	s.mu.Unlock()
+	return cfg
+}
+
 func (s *Server) handleDependencies(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -3361,14 +3408,38 @@ func (s *Server) handleDependencies(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"config": s.currentConfig(), "path": mustConfigPath()})
+		// Read from disk so the toggle's managed/live state reflects an out-of-band
+		// `seavault tls use`/`reset` (config-precedence-1).
+		cfg := s.diskConfig()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"config":         cfg,
+			"path":           mustConfigPath(),
+			"tlsManaged":     tlsSectionConfigured(cfg),
+			"tlsManagedHint": tlsManagedHint,
+		})
 	case http.MethodPost:
 		var req appConfigRequest
 		if !decodeJSON(w, r, &req) {
 			return
 		}
 		cfg := appconfig.Normalize(req.Config)
-		if strings.EqualFold(cfg.GUI.Protocol, "https") {
+		// Reconcile against the on-disk config, not the in-memory snapshot, so a
+		// CLI change made since this GUI started is honoured (config-precedence-1).
+		previousCfg := s.diskConfig()
+		// TLS reconciliation (C3): once the shared tls.* section is configured it
+		// is managed by `seavault tls setup`, so the in-app http/https toggle no
+		// longer governs TLS. The save handler neither runs the self-signed
+		// generator nor lets the form touch the tls section, the legacy
+		// gui.certFile/keyFile, or the protocol — so a wizard-cleared legacy field
+		// is never resurrected and the toggle is inert. With tls.* empty it behaves
+		// exactly as before: an https toggle materializes the self-signed floor.
+		if tlsSectionConfigured(previousCfg) {
+			cfg.TLS = previousCfg.TLS
+			cfg.GUI.CertFile = previousCfg.GUI.CertFile
+			cfg.GUI.KeyFile = previousCfg.GUI.KeyFile
+			cfg.GUI.SelfSigned = previousCfg.GUI.SelfSigned
+			cfg.GUI.Protocol = previousCfg.GUI.Protocol
+		} else if strings.EqualFold(cfg.GUI.Protocol, "https") {
 			host := r.Host
 			if h, _, err := net.SplitHostPort(r.Host); err == nil {
 				host = h
@@ -3380,7 +3451,6 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		previousCfg := s.currentConfig()
 		if strings.TrimSpace(req.GUIPassword) == "" && strings.TrimSpace(cfg.GUI.PasswordHash) == "" && strings.TrimSpace(previousCfg.GUI.Username) == strings.TrimSpace(cfg.GUI.Username) {
 			cfg.GUI.PasswordHash = previousCfg.GUI.PasswordHash
 		}
@@ -3415,10 +3485,21 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.config = cfg
 		s.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": cfg, "path": mustConfigPath(), "restartRequired": true})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": cfg, "path": mustConfigPath(), "restartRequired": true, "tlsManaged": tlsSectionConfigured(cfg), "tlsManagedHint": tlsManagedHint})
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+// tlsManagedHint is the message the GUI shows in place of the http/https toggle
+// once the shared tls.* section governs TLS (C3).
+const tlsManagedHint = "managed by `seavault tls setup` — run `seavault tls reset` to change"
+
+// tlsSectionConfigured reports whether the shared tls.* section carries a full
+// certificate pair, in which case TLS is managed by the wizard and the in-app
+// toggle is inert.
+func tlsSectionConfigured(cfg appconfig.Config) bool {
+	return strings.TrimSpace(cfg.TLS.CertFile) != "" && strings.TrimSpace(cfg.TLS.KeyFile) != ""
 }
 
 func (s *Server) handleSaveLog(w http.ResponseWriter, r *http.Request) {
@@ -3874,7 +3955,7 @@ small { color:var(--muted); }
   <p>Your browser is <strong>not storing</strong> the open-seavault-rclone session cookie for <code>127.0.0.1</code>/<code>localhost</code>. Allow cookies for this address, then open the launch link again.</p>
   <p><small>Private-mode or cookie-blocking settings for local addresses prevent the GUI from keeping you signed in.</small></p>
 {{else}}
-  <p>This page is only reachable through the launch link that <code>seavault gui</code> prints when it starts. Open that link (it looks like <code>http://127.0.0.1:8787/?launch=&hellip;</code>) to start a session.</p>
+  <p>This page is only reachable through the launch link that <code>seavault gui</code> prints when it starts. Open that link (it looks like <code>{{if .LaunchExample}}{{.LaunchExample}}{{else}}http://127.0.0.1:8787/?launch=&hellip;{{end}}</code>) to start a session.</p>
   <p>Close this tab and start open-seavault-rclone again; it will open the app for you.</p>
   <p><small>The launch link is printed to the terminal on every start; bookmarks to the bare address no longer open the app by design.</small></p>
 {{end}}
