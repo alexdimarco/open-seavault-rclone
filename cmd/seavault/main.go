@@ -1431,19 +1431,25 @@ func allowedHostsForBind(addr string, extra, tlsAllowHosts []string) []string {
 }
 
 // firstConfirmedName returns the name a cross-device launch link should use for
-// a non-loopback TLS bind: the first --allow-host value the operator confirmed,
-// or, failing that, the certificate's first DNS SAN (an IP SAN is skipped — a
-// launch link wants a name). It returns "" when neither is available.
+// a non-loopback TLS bind: the first confirmed name (a --allow-host value or a
+// tls.allowHosts entry the operator merged in), or, failing that, the
+// certificate's first DNS SAN. A wildcard entry is skipped in BOTH lists so the
+// first CONCRETE name wins — https://*.example.com is not a URL a person can open
+// (launch-allowlist-1, C1) — and an IP SAN is skipped because a launch link wants
+// a name. It returns "" when no concrete name is available, so launchAddrForBind
+// falls back to the bind address.
 func firstConfirmedName(allowHosts, certNames []string) string {
 	for _, h := range allowHosts {
-		if h = strings.TrimSpace(h); h != "" {
-			return h
+		h = strings.TrimSpace(h)
+		if h == "" || strings.Contains(h, "*") {
+			continue // a wildcard is not an openable launch-link name
 		}
+		return h
 	}
 	for _, n := range certNames {
 		n = strings.TrimSpace(n)
-		if n == "" {
-			continue
+		if n == "" || strings.Contains(n, "*") {
+			continue // a wildcard SAN is not an openable launch-link name
 		}
 		if net.ParseIP(n) != nil {
 			continue // an IP SAN is not a launch-link name
@@ -1455,10 +1461,11 @@ func firstConfirmedName(allowHosts, certNames []string) string {
 
 // launchAddrForBind returns the host:port the printed launch link and login
 // hint should carry (C1). A loopback bind keeps its own address (127.0.0.1). A
-// non-loopback TLS bind swaps the bind host for the first confirmed --allow-host
-// name (or the certificate's first DNS SAN), so the URL a person opens from
-// another device is a name the certificate is valid for; when no such name is
-// available it falls back to the bind address.
+// non-loopback TLS bind swaps the bind host for the first confirmed CONCRETE name
+// (a --allow-host / tls.allowHosts entry, or the certificate's first DNS SAN),
+// skipping wildcards, so the URL a person opens from another device is a name the
+// certificate is valid for; when no such name is available it falls back to the
+// bind address (never a wildcard, launch-allowlist-1).
 func launchAddrForBind(addr string, tlsOn bool, allowHosts, certNames []string) string {
 	host := hostOf(addr)
 	if !tlsOn || isLoopbackOrLocalhost(host) {
@@ -1541,9 +1548,18 @@ func logTLSStartup(out io.Writer, purpose string, resolved *tlsconfig.Resolved, 
 		if net.ParseIP(strings.TrimSpace(n)) != nil {
 			continue // an IP SAN is checked by the guard's loopback/allow rules
 		}
-		if !hostInAllowlist(n, allowedHosts) {
-			fmt.Fprintf(out, "%s TLS: warning: certificate name %q is not in the Host allowlist; requests with that Host will be refused — add it with --allow-host or tls.allowHosts\n", purpose, n)
+		if hostInAllowlist(n, allowedHosts) {
+			continue
 		}
+		if strings.Contains(n, "*") {
+			// A wildcard SAN can never itself be an allowlist entry: the exact-match
+			// rebinding guard drops wildcards (C5), so telling the operator to "add
+			// it with --allow-host" would be a dead end (launch-allowlist-1). Point
+			// them at the concrete names the wildcard covers instead.
+			fmt.Fprintf(out, "%s TLS: warning: certificate name %q is a wildcard; the Host allowlist matches exact names only — add each concrete name a device will use (e.g. host%s) with --allow-host or tls.allowHosts\n", purpose, n, strings.TrimPrefix(strings.TrimSpace(n), "*"))
+			continue
+		}
+		fmt.Fprintf(out, "%s TLS: warning: certificate name %q is not in the Host allowlist; requests with that Host will be refused — add it with --allow-host or tls.allowHosts\n", purpose, n)
 	}
 }
 
@@ -1910,15 +1926,21 @@ func cmdGUI(args []string) error {
 	if tlsOn {
 		scheme = "https"
 	}
-	// Launch-link identity (C1): a non-loopback TLS bind advertises the confirmed
-	// --allow-host name (or the certificate's first DNS SAN), so the link a person
-	// opens from another device is a name the certificate is valid for; loopback
-	// keeps its own address.
-	launchAddr := launchAddrForBind(*addr, tlsOn, allowHost, resolved.Names)
+	// Launch-link identity (C1, launch-allowlist-1): a non-loopback TLS bind
+	// advertises the first confirmed CONCRETE name, so the link a person opens
+	// from another device is a name the certificate is valid for and never a
+	// wildcard. The confirmed names are the CLI --allow-host values merged with the
+	// persisted tls.allowHosts — the concrete name the wizard recorded is used even
+	// when this `gui` run passes no --allow-host of its own; loopback keeps its own
+	// address.
+	launchNames := append(append([]string{}, allowHost...), cfg.TLS.AllowHosts...)
+	launchAddr := launchAddrForBind(*addr, tlsOn, launchNames, resolved.Names)
 	launchURL := s.LaunchURL(scheme + "://" + launchAddr)
-	if scheme == "https" {
-		s.LoginHintURL = scheme + "://" + launchAddr + "/?launch=…"
-	}
+	// The no-session login hint carries the resolved launch address for BOTH
+	// schemes (launch-hint-loopback-1): a plaintext listener on a non-default port
+	// or a non-loopback interface must not tell the visitor to open the hardcoded
+	// http://127.0.0.1:8787 — the hint is the address this server actually serves.
+	s.LoginHintURL = scheme + "://" + launchAddr + "/?launch=…"
 	fmt.Printf("serving local GUI at %s\n", launchURL)
 	fmt.Println("open this exact launch link; a bare " + scheme + "://" + launchAddr + "/ no longer shows the app, and the launch secret rotates each launch, so bookmarks break by design")
 	fmt.Println("bind is local by default; do not expose this listener on an untrusted network")

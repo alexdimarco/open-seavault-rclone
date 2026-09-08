@@ -3378,6 +3378,25 @@ func (s *Server) currentConfig() appconfig.Config {
 	return s.config
 }
 
+// diskConfig re-reads the app config from disk and refreshes s.config so the
+// running GUI reflects out-of-band CLI changes — chiefly `seavault tls use` /
+// `tls reset` writing tls.* underneath a long-lived GUI (config-precedence-1,
+// C3). The on-disk read, not the stale in-memory snapshot, is the settings
+// handler's reconciliation baseline and the source of the tls.* / legacy
+// gui.certFile / gui.protocol fields it preserves, so a GUI Save can neither wipe
+// a CLI-added certificate nor resurrect a CLI-removed one. On a load error it
+// leaves s.config untouched and returns the last-known config.
+func (s *Server) diskConfig() appconfig.Config {
+	cfg, err := appconfig.Load()
+	if err != nil {
+		return s.currentConfig()
+	}
+	s.mu.Lock()
+	s.config = cfg
+	s.mu.Unlock()
+	return cfg
+}
+
 func (s *Server) handleDependencies(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -3389,7 +3408,9 @@ func (s *Server) handleDependencies(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		cfg := s.currentConfig()
+		// Read from disk so the toggle's managed/live state reflects an out-of-band
+		// `seavault tls use`/`reset` (config-precedence-1).
+		cfg := s.diskConfig()
 		writeJSON(w, http.StatusOK, map[string]any{
 			"config":         cfg,
 			"path":           mustConfigPath(),
@@ -3402,7 +3423,9 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg := appconfig.Normalize(req.Config)
-		previousCfg := s.currentConfig()
+		// Reconcile against the on-disk config, not the in-memory snapshot, so a
+		// CLI change made since this GUI started is honoured (config-precedence-1).
+		previousCfg := s.diskConfig()
 		// TLS reconciliation (C3): once the shared tls.* section is configured it
 		// is managed by `seavault tls setup`, so the in-app http/https toggle no
 		// longer governs TLS. The save handler neither runs the self-signed
