@@ -71,7 +71,38 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 
 Vendored and bundled third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The GPL does not grant trademark rights: the **open-seavault-rclone** and **Crescendum** names, logos, icons, favicons, wordmarks, and visual identity remain reserved &mdash; see [TRADEMARKS.md](TRADEMARKS.md).
 
-## What changed in v0.19 (four-destination GUI, word recovery phrases, TLS certificates, operability polish)
+## What changed in v0.20 (TLS certificates for the GUI and WebDAV)
+
+Phase U3 lets the GUI and WebDAV endpoint serve a CA-trusted certificate so other devices can
+connect without trust prompts. A user who does nothing sees no change.
+
+- **Bring your own certificate.** `seavault gui` and `seavault serve` can now serve
+  over HTTPS with a CA-trusted certificate so other devices on a LAN or VPN connect
+  without a browser trust prompt — and so Windows Explorer's WebDAV client, which
+  refuses self-signed HTTPS, can map the drive at all. A resolved certificate is the
+  only thing that relaxes the non-loopback bind guard; plaintext still never reaches a
+  non-loopback address without the explicit `--insecure-bind` override. A user who
+  does nothing sees no change: the GUI stays HTTP on loopback and WebDAV stays
+  plaintext loopback.
+- **`seavault tls setup`** — an interactive wizard that guides the whole procedure:
+  who needs to connect, the certificate route (Tailscale, Let's Encrypt via DNS-01
+  with `lego` or `certbot`, bring-your-own, or keep self-signed), validation, the Host
+  allowlist, where to listen, and the renewal recipe. It stores no DNS-provider token
+  and never prompts for one; the only tool it runs is `tailscale cert`. Companions:
+  `seavault tls use --cert PATH --key PATH [--allow-host NAME]`, `seavault tls status`,
+  `seavault tls check`, and `seavault tls reset`.
+- **`--tls-cert` / `--tls-key`** on `seavault gui` and `seavault serve` (and `--tls`
+  on `serve` to use the configured `tls` section). A shared `tls` app-config section
+  (`certFile`, `keyFile`, `allowHosts`) with legacy `gui.certFile` compatibility.
+- **Hot-reload.** A renewed certificate is picked up within 30 seconds with no
+  restart; the reloader never swaps in an invalid pair and never downgrades a valid
+  live certificate, and it surfaces a `< 14 days left` staleness warning so a silently
+  disabled renewal timer is visible at runtime.
+- New guide: [docs/tls-and-certificates.md](docs/tls-and-certificates.md), and a
+  "Network-exposed mode" section in [SECURITY.md](SECURITY.md) stating the guarantees
+  (I-T1..I-T6) and residuals.
+
+## What changed in v0.19 (four-destination GUI, word recovery phrases, operability polish)
 
 Phase U2 makes the product usable every day without hiding anything from an expert. It is pure
 UX/legibility over the unchanged v0.17 security mechanisms — no vault-format change, no change to
@@ -130,33 +161,6 @@ the recovery read-back ceremony, the strict rollback gate, or the config-tamper/
   keychain-store failure is a plain one-liner (the raw error only under `--debug`), `profile remove`
   says what it removed, `--no-open` is inert under `--preset` and the "open the app" trailer is
   dropped for fleets, and the exit-code contract is documented in `setup --help`.
-### TLS certificates for the GUI and WebDAV
-
-- **Bring your own certificate.** `seavault gui` and `seavault serve` can now serve
-  over HTTPS with a CA-trusted certificate so other devices on a LAN or VPN connect
-  without a browser trust prompt — and so Windows Explorer's WebDAV client, which
-  refuses self-signed HTTPS, can map the drive at all. A resolved certificate is the
-  only thing that relaxes the non-loopback bind guard; plaintext still never reaches a
-  non-loopback address without the explicit `--insecure-bind` override. A user who
-  does nothing sees no change: the GUI stays HTTP on loopback and WebDAV stays
-  plaintext loopback.
-- **`seavault tls setup`** — an interactive wizard that guides the whole procedure:
-  who needs to connect, the certificate route (Tailscale, Let's Encrypt via DNS-01
-  with `lego` or `certbot`, bring-your-own, or keep self-signed), validation, the Host
-  allowlist, where to listen, and the renewal recipe. It stores no DNS-provider token
-  and never prompts for one; the only tool it runs is `tailscale cert`. Companions:
-  `seavault tls use --cert PATH --key PATH [--allow-host NAME]`, `seavault tls status`,
-  `seavault tls check`, and `seavault tls reset`.
-- **`--tls-cert` / `--tls-key`** on `seavault gui` and `seavault serve` (and `--tls`
-  on `serve` to use the configured `tls` section). A shared `tls` app-config section
-  (`certFile`, `keyFile`, `allowHosts`) with legacy `gui.certFile` compatibility.
-- **Hot-reload.** A renewed certificate is picked up within 30 seconds with no
-  restart; the reloader never swaps in an invalid pair and never downgrades a valid
-  live certificate, and it surfaces a `< 14 days left` staleness warning so a silently
-  disabled renewal timer is visible at runtime.
-- New guide: [docs/tls-and-certificates.md](docs/tls-and-certificates.md), and a
-  "Network-exposed mode" section in [SECURITY.md](SECURITY.md) stating the guarantees
-  (I-T1..I-T6) and residuals.
 
 ## What changed in v0.18 (setup wizard)
 
