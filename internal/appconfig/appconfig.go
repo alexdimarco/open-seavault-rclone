@@ -27,8 +27,22 @@ const Version = 1
 type Config struct {
 	Version        int            `json:"version"`
 	GUI            GUIConfig      `json:"gui"`
+	TLS            TLSSection     `json:"tls"`
 	Log            LogConfig      `json:"log"`
 	RuntimeSources RuntimeSources `json:"runtimeSources"`
+}
+
+// TLSSection is the shared, purpose-neutral certificate configuration introduced
+// in U3. It supersedes the legacy gui.certFile/keyFile fields (which stay
+// readable for compatibility and are cleared by the wizard when it writes this
+// section). CertFile/KeyFile point at a PEM chain (leaf first) and its matching
+// private key; AllowHosts lists the exact DNS names the Host-header rebinding
+// guard should additionally admit when binding beyond loopback. It never holds
+// private key material — only paths and names.
+type TLSSection struct {
+	CertFile   string   `json:"certFile"`
+	KeyFile    string   `json:"keyFile"`
+	AllowHosts []string `json:"allowHosts,omitempty"`
 }
 
 type GUIConfig struct {
@@ -110,6 +124,7 @@ func Normalize(cfg Config) Config {
 	}
 	cfg.GUI.CertFile = strings.TrimSpace(cfg.GUI.CertFile)
 	cfg.GUI.KeyFile = strings.TrimSpace(cfg.GUI.KeyFile)
+	cfg.TLS = normalizeTLS(cfg.TLS)
 	cfg.GUI.Username = strings.TrimSpace(cfg.GUI.Username)
 	cfg.GUI.PasswordHash = strings.TrimSpace(cfg.GUI.PasswordHash)
 	if cfg.GUI.PasswordHash != "" {
@@ -143,6 +158,37 @@ func Normalize(cfg Config) Config {
 		cfg.RuntimeSources.WSLInstallSource = def.RuntimeSources.WSLInstallSource
 	}
 	return cfg
+}
+
+// normalizeTLS trims the shared TLS paths and cleans the allow-host list: each
+// entry is trimmed, empty entries are dropped, and duplicates are removed while
+// preserving first-seen order. The Host allowlist matches exact names only, so
+// no case folding or wildcard expansion happens here.
+func normalizeTLS(t TLSSection) TLSSection {
+	t.CertFile = strings.TrimSpace(t.CertFile)
+	t.KeyFile = strings.TrimSpace(t.KeyFile)
+	if len(t.AllowHosts) == 0 {
+		t.AllowHosts = nil
+		return t
+	}
+	seen := make(map[string]struct{}, len(t.AllowHosts))
+	cleaned := make([]string, 0, len(t.AllowHosts))
+	for _, h := range t.AllowHosts {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		if _, dup := seen[h]; dup {
+			continue
+		}
+		seen[h] = struct{}{}
+		cleaned = append(cleaned, h)
+	}
+	if len(cleaned) == 0 {
+		cleaned = nil
+	}
+	t.AllowHosts = cleaned
+	return t
 }
 
 func EnsureSelfSignedCertificate(cfg Config, host string) (Config, error) {
