@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	localtransport "github.com/alexdimarco/open-seavault-rclone/internal/transport/local"
 	rclonetransport "github.com/alexdimarco/open-seavault-rclone/internal/transport/rclone"
@@ -80,7 +81,14 @@ type Result struct {
 	RecoveryNote  string
 	CloudNote     string
 	PreflightNote string
-	FailedStep    string
+	// CaveatNote carries the placement caveat for the sync provider the vault
+	// landed inside (on-demand/online-only eviction guidance), when the vault
+	// is a SyncedFolder with a known provider — including a custom path or a
+	// --preset synced-folder run that resolved to a detected root (CLI-3/DOC-4).
+	// It is empty for local/rclone/manual outcomes. Callers surface it in the
+	// summary; it carries no secret.
+	CaveatNote string
+	FailedStep string
 }
 
 // DefaultDeps returns the real, side-effecting Deps. The CLI and GUI start from
@@ -159,6 +167,24 @@ func Execute(p Plan, password string, deps Deps) (Result, error) {
 	vaultDir := filepath.Clean(p.VaultDir)
 	res := Result{VaultDir: vaultDir, ProfileName: p.ResolvedProfileName()}
 
+	// Profile-name collision is checked FIRST, before ANY side effect — no
+	// vault, no temp sibling, no keychain entry (profile-collision-orphan). A
+	// name that already points at a different vault must never leave an
+	// orphaned, unreferenced vault (and, formerly, an orphaned keychain
+	// password) on disk. Validate ran the same check against the real store;
+	// this repeats it through the Deps seam so the refusal holds even when the
+	// caller injected a store, and closes the gap before the create. Because it
+	// is pre-create, res.VaultID stays empty here: the caller sees that nothing
+	// was built.
+	name := res.ProfileName
+	if existingPath, found, err := deps.ProfileLookup(name); err != nil {
+		res.FailedStep = StepProfile
+		return res, err
+	} else if found && filepath.Clean(existingPath) != vaultDir {
+		res.FailedStep = StepProfile
+		return res, fmt.Errorf("%w: profile %q points at %s", ErrProfileNameInUse, name, existingPath)
+	}
+
 	// Authoritative pre-build check (Validate ran earlier but this closes the
 	// TOCTOU window): refuse an existing vault or interrupted-setup leftovers.
 	if err := vaultDirState(vaultDir); err != nil {
@@ -210,29 +236,36 @@ func Execute(p Plan, password string, deps Deps) (Result, error) {
 	}
 	res.VaultID = cfg.VaultID
 
-	// Keychain: an explicit, visible choice (I-S4). A failure is a warning
-	// naming the remedy, never a hard failure — the vault still exists.
-	if p.SaveKeychain {
-		if err := deps.KeychainSet(cfg.VaultID, password); err != nil {
-			res.KeychainSaved = false
-			res.KeychainNote = fmt.Sprintf("could not save the password to the OS keychain: %v. The vault still opens with the password you typed or via SEAVAULT_PASSWORD; store it later with `seavault keychain store`.", err)
-		} else {
-			res.KeychainSaved = true
-		}
-	}
-
-	// Profile: never silently repoint an existing same-name profile (C3).
-	name := res.ProfileName
+	// Profile: re-check the collision now that the vault exists, to catch a
+	// racing Add that appeared between the pre-create check and here (TOCTOU).
+	// If it did, the vault is already built — so report what exists (VaultID and
+	// dir are set) and name the created vault in the error, rather than silently
+	// orphaning it (profile-collision-orphan, I-S5/§6). Never silently repoint
+	// an existing same-name profile (C3).
 	if existingPath, found, err := deps.ProfileLookup(name); err != nil {
 		res.FailedStep = StepProfile
 		return res, err
 	} else if found && filepath.Clean(existingPath) != vaultDir {
 		res.FailedStep = StepProfile
-		return res, fmt.Errorf("%w: profile %q points at %s", ErrProfileNameInUse, name, existingPath)
+		res.CloudNote = fmt.Sprintf("a vault was created at %s but its profile name %q is now taken by %s; open it with a different --profile name (nothing was removed).", vaultDir, name, existingPath)
+		return res, fmt.Errorf("%w: profile %q points at %s (a vault was already created at %s)", ErrProfileNameInUse, name, existingPath, vaultDir)
 	}
 	if err := deps.ProfileAdd(name, vaultDir); err != nil {
 		res.FailedStep = StepProfile
 		return res, err
+	}
+
+	// Keychain: an explicit, visible choice (I-S4), written only AFTER a
+	// successful ProfileAdd (profile-collision-orphan) so a password entry is
+	// never orphaned by a profile step that later fails. A keychain failure is a
+	// warning naming the remedy, never a hard failure — the vault still exists.
+	if p.SaveKeychain {
+		if err := deps.KeychainSet(cfg.VaultID, password); err != nil {
+			res.KeychainSaved = false
+			res.KeychainNote = fmt.Sprintf("could not save the password to the OS keychain: %v. The vault still opens with the password you typed or via SEAVAULT_PASSWORD; store it later with `seavault keychain store %s`.", err, shellQuote(name))
+		} else {
+			res.KeychainSaved = true
+		}
 	}
 
 	// Preflight/compatibility note when the vault sits under a sync-client folder
@@ -246,6 +279,13 @@ func Execute(p Plan, password string, deps Deps) (Result, error) {
 		// No transport. Never assert "synced" (C2): report placement and ask the
 		// user to confirm the sync client shows it uploaded.
 		res.CloudNote = fmt.Sprintf("placed inside %s — check that your sync client shows it as uploaded. Nothing else is needed; any sync client that watches this folder moves the encrypted vault.", vaultDir)
+		// Surface the provider placement caveat (on-demand/online-only eviction)
+		// whenever the synced folder has a known provider — a custom path under a
+		// detected root or a --preset synced-folder run resolves it here too
+		// (CLI-3/DOC-4), not only the "picked from the list" path.
+		if cav := Caveat(c.Provider); cav != "" {
+			res.CaveatNote = cav
+		}
 	case LocalOnly, nil:
 		res.CloudNote = "local / external-drive only — no cloud sync was configured."
 	case RcloneRemote:
@@ -288,4 +328,34 @@ func dirNonEmpty(path string) (bool, error) {
 		return false, nil
 	}
 	return len(names) > 0, nil
+}
+
+// shellQuote renders s so it survives a copy-paste into a POSIX shell as a
+// single argument (preset-noninteractive-2). A profile name is the basename of
+// the vault dir, so it can contain spaces or shell metacharacters ("My Vault");
+// interpolating it raw into a printed remedy command produces a line that splits
+// into two arguments when pasted. A name of only safe characters is returned
+// unchanged; anything else is wrapped in single quotes with embedded single
+// quotes escaped the POSIX way ('\”). It is display-only — nothing here is
+// executed — and never carries a secret.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	safe := true
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_' || r == '-' || r == '.' || r == '/' || r == '@' || r == '%' || r == '+' || r == ':' || r == ',':
+		default:
+			safe = false
+		}
+		if !safe {
+			break
+		}
+	}
+	if safe {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

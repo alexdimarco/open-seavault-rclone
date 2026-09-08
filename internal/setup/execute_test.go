@@ -315,10 +315,15 @@ func TestExecuteProfileCollision(t *testing.T) {
 				if addCalls != 0 {
 					t.Fatal("ProfileAdd must NOT be called on a collision (the original stays untouched)")
 				}
-				// The vault is built before the profile step, so it exists; the
-				// user is offered a suffixed name, not a lost vault.
-				if !vaultExists(vaultDir) {
-					t.Fatal("the vault is created before the profile step and must exist")
+				// profile-collision-orphan: a pure name collision is caught BEFORE
+				// any side effect, so no vault (and no keychain entry) is orphaned
+				// on disk, and Result reports that nothing was built. The user
+				// retries with a suffixed name against a clean slate.
+				if vaultExists(vaultDir) {
+					t.Fatal("a pre-create profile collision must not leave an orphaned vault")
+				}
+				if res.VaultID != "" {
+					t.Fatalf("no vault was built on a pre-create collision, so Result.VaultID must be empty; got %q", res.VaultID)
 				}
 			} else {
 				if err != nil {
@@ -382,6 +387,177 @@ func TestExecuteBranchedRemedy(t *testing.T) {
 				if strings.Contains(res.CloudNote, no) {
 					t.Fatalf("CloudNote must NOT contain %q; got %q", no, res.CloudNote)
 				}
+			}
+		})
+	}
+}
+
+// profile-collision-orphan: a same-name-different-path profile collision is
+// caught BEFORE any side effect — no vault, no temp sibling, no keychain entry
+// is created. The old order committed the vault (and keychain password) first
+// and only then discovered the name was taken, orphaning both.
+func TestExecuteProfileCollisionLeavesNoOrphan(t *testing.T) {
+	vaultDir := filepath.Join(t.TempDir(), "vault")
+	deps := testDeps()
+	var createCalls, keychainCalls, addCalls int
+	deps.CreateVault = func(dir, pw string, opts vault.CreateOptions) error {
+		createCalls++
+		return testDeps().CreateVault(dir, pw, opts)
+	}
+	deps.KeychainSet = func(string, string) error { keychainCalls++; return nil }
+	deps.ProfileAdd = func(string, string) error { addCalls++; return nil }
+	deps.ProfileLookup = func(string) (string, bool, error) { return "/some/other/vault", true, nil }
+
+	res, err := Execute(Plan{VaultDir: vaultDir, SaveKeychain: true, Cloud: LocalOnly{}}, testPassword, deps)
+	if !errors.Is(err, ErrProfileNameInUse) {
+		t.Fatalf("a different-path collision must return ErrProfileNameInUse; got %v", err)
+	}
+	if createCalls != 0 {
+		t.Fatalf("CreateVault must not run when the profile name already collides; calls=%d", createCalls)
+	}
+	if keychainCalls != 0 {
+		t.Fatalf("no keychain password may be written on a pre-create collision; calls=%d", keychainCalls)
+	}
+	if addCalls != 0 {
+		t.Fatalf("ProfileAdd must not run on a collision; calls=%d", addCalls)
+	}
+	if vaultExists(vaultDir) || res.VaultID != "" {
+		t.Fatalf("no vault may be orphaned on a pre-create collision; exists=%v vaultID=%q", vaultExists(vaultDir), res.VaultID)
+	}
+	// The temp parent holds no leftover sibling either.
+	if entries, rerr := os.ReadDir(filepath.Dir(vaultDir)); rerr == nil && len(entries) != 0 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("no temp sibling may be left behind; parent holds %v", names)
+	}
+}
+
+// profile-collision-orphan: the keychain password is written only AFTER a
+// successful ProfileAdd. If the profile step fails, no keychain entry is left
+// behind. The old order wrote the keychain first.
+func TestExecuteKeychainWrittenAfterProfile(t *testing.T) {
+	vaultDir := filepath.Join(t.TempDir(), "vault")
+	deps := testDeps()
+	var keychainCalls int
+	keychainAt := -1
+	profileAt := -1
+	step := 0
+	deps.KeychainSet = func(string, string) error { keychainCalls++; keychainAt = step; step++; return nil }
+	deps.ProfileAdd = func(string, string) error { profileAt = step; step++; return errors.New("profile store is read-only") }
+
+	res, err := Execute(Plan{VaultDir: vaultDir, SaveKeychain: true, Cloud: LocalOnly{}}, testPassword, deps)
+	if err == nil {
+		t.Fatal("a failing ProfileAdd must surface an error")
+	}
+	if res.FailedStep != StepProfile {
+		t.Fatalf("FailedStep=%q; want %q", res.FailedStep, StepProfile)
+	}
+	if keychainCalls != 0 {
+		t.Fatalf("the keychain must NOT be written when ProfileAdd fails (it runs only after a successful ProfileAdd); calls=%d (keychainAt=%d, profileAt=%d)", keychainCalls, keychainAt, profileAt)
+	}
+}
+
+// profile-collision-orphan: a collision that only appears AFTER the vault is
+// built (a racing Add between the pre-create check and the commit) is reported
+// honestly — the Result names the created vault (VaultID set, CloudNote points
+// at it), rather than silently orphaning it.
+func TestExecuteProfileCollisionTOCTOUReportsCreatedVault(t *testing.T) {
+	vaultDir := filepath.Join(t.TempDir(), "vault")
+	deps := testDeps()
+	calls := 0
+	deps.ProfileLookup = func(string) (string, bool, error) {
+		calls++
+		if calls == 1 {
+			return "", false, nil // pre-create: clear
+		}
+		return "/raced/in/vault", true, nil // post-create: a collision appeared
+	}
+	res, err := Execute(Plan{VaultDir: vaultDir, Cloud: LocalOnly{}}, testPassword, deps)
+	if !errors.Is(err, ErrProfileNameInUse) {
+		t.Fatalf("a post-create collision must still return ErrProfileNameInUse; got %v", err)
+	}
+	if res.FailedStep != StepProfile {
+		t.Fatalf("FailedStep=%q; want %q", res.FailedStep, StepProfile)
+	}
+	// The vault WAS built (the race happened after create), so the Result must
+	// say so — the caller can print what exists (I-S5/§6).
+	if res.VaultID == "" || !vaultExists(vaultDir) {
+		t.Fatalf("a post-create collision leaves a real vault; VaultID=%q exists=%v", res.VaultID, vaultExists(vaultDir))
+	}
+	if !strings.Contains(res.CloudNote, vaultDir) {
+		t.Fatalf("the Result must name the created vault so the caller can report it; CloudNote=%q", res.CloudNote)
+	}
+}
+
+// CLI-3/DOC-4: a SyncedFolder outcome with a known provider surfaces that
+// provider's placement caveat in Result.CaveatNote (so the summary and the GUI
+// can show it), while a manual/unknown-provider synced folder and the
+// local/rclone outcomes carry none.
+func TestExecuteSyncedFolderSurfacesCaveat(t *testing.T) {
+	rows := []struct {
+		name     string
+		cloud    CloudChoice
+		wantCav  string
+		wantNone bool
+	}{
+		{"known provider carries its caveat", SyncedFolder{Provider: ProviderDropbox}, Caveat(ProviderDropbox), false},
+		{"manual synced folder carries none", SyncedFolder{Provider: ""}, "", true},
+		{"local only carries none", LocalOnly{}, "", true},
+	}
+	if len(rows) == 0 {
+		t.Fatal("caveat table is empty; the test would exercise nothing")
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			vaultDir := filepath.Join(t.TempDir(), "vault")
+			res, err := Execute(Plan{VaultDir: vaultDir, Cloud: row.cloud}, testPassword, testDeps())
+			if err != nil {
+				t.Fatalf("Execute must succeed; got %v", err)
+			}
+			if row.wantNone {
+				if res.CaveatNote != "" {
+					t.Fatalf("this outcome must carry no caveat; got %q", res.CaveatNote)
+				}
+				return
+			}
+			if strings.TrimSpace(res.CaveatNote) == "" {
+				t.Fatal("a known-provider synced folder must surface a non-empty caveat in Result")
+			}
+			if res.CaveatNote != row.wantCav {
+				t.Fatalf("CaveatNote must be the provider's catalog caveat; got %q want %q", res.CaveatNote, row.wantCav)
+			}
+		})
+	}
+}
+
+// preset-noninteractive-2 (execute.go half): the keychain-store remedy names the
+// profile and shell-quotes it, so a profile name with a space ("My Vault") is
+// pasteable as a single argument rather than splitting into two.
+func TestExecuteKeychainRemedyShellQuotesProfileName(t *testing.T) {
+	rows := []struct {
+		name    string
+		profile string
+		want    string
+	}{
+		{"name with a space is quoted", "My Vault", "seavault keychain store 'My Vault'"},
+		{"plain name is unquoted", "MyVault", "seavault keychain store MyVault"},
+	}
+	if len(rows) == 0 {
+		t.Fatal("remedy table is empty; the test would exercise nothing")
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			deps := testDeps()
+			deps.KeychainSet = func(string, string) error { return errors.New("no desktop keyring") }
+			plan := Plan{VaultDir: filepath.Join(t.TempDir(), "vault"), ProfileName: row.profile, SaveKeychain: true, Cloud: LocalOnly{}}
+			res, err := Execute(plan, testPassword, deps)
+			if err != nil {
+				t.Fatalf("a keychain failure must not fail Execute; got %v", err)
+			}
+			if !strings.Contains(res.KeychainNote, row.want) {
+				t.Fatalf("the keychain remedy must contain a pasteable %q; got %q", row.want, res.KeychainNote)
 			}
 		})
 	}

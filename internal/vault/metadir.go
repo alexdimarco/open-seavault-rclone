@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/alexdimarco/open-seavault-rclone/internal/userpath"
 )
 
 // MetadataDirNames are the directory names, preferred first, under which a vault
@@ -58,34 +60,47 @@ func isMetadataDirName(segment string) bool {
 	return false
 }
 
-// syncClientFolderNames are the local sync-client folder names whose presence in
-// a vault root's path triggers the preflight note. There is deliberately no
-// bare "Sync" token (too generic).
-var syncClientFolderNames = []string{"Nextcloud", "ownCloud", "OneDrive", "Dropbox", "Google Drive", "iCloud Drive", "Syncthing"}
+// extraSyncClientAliases are human-recognisable sync-client folder names that
+// the single detector (userpath.DetectSyncRoots / SyncFolderSegmentNames) does
+// not itself build a path from, but which a hand-typed vault path may still sit
+// under. They broaden the create-time preflight note without affecting
+// detection, so an operator who keeps a vault under, say, an ownCloud or a
+// spelled-out "Syncthing" folder still sees the compatibility guidance.
+var extraSyncClientAliases = []string{"ownCloud", "iCloud Drive", "Syncthing"}
 
-// orgSuffixedSyncPrefixes are the stems of the macOS Library/CloudStorage
-// folder names, which the sync clients suffix with the account/organization
-// (e.g. "OneDrive-Personal", "GoogleDrive-you@example.com", "Box-Acme"). A path
-// segment that begins with one of these stems (followed by the "-" separator)
-// is a sync-client folder, so the preflight note fires for exactly the
-// org-suffixed folders the setup wizard recommends (C4).
-var orgSuffixedSyncPrefixes = []string{"OneDrive-", "GoogleDrive-", "Box-"}
+// extraOrgSuffixedSyncPrefixes carries org-suffixed CloudStorage stems beyond
+// the detector's own (userpath.SyncFolderSegmentPrefixes) — Box has the macOS
+// "Box-<org>" CloudStorage shape but is not in U1's detector enum (C7), yet a
+// path under it should still get the note.
+var extraOrgSuffixedSyncPrefixes = []string{"Box-"}
 
 // hasSyncClientSegment reports whether any path SEGMENT of root equals a known
 // sync-client folder name (case-insensitively), OR begins with one of the
-// org-suffixed CloudStorage stems (C4). The matcher shape is reused from
-// userpath's segment-wise comparison.
+// org-suffixed CloudStorage stems (C4). The folder-name and prefix sources are
+// the SAME ones the single detector builds its paths from
+// (userpath.SyncFolderSegmentNames / SyncFolderSegmentPrefixes), so the note
+// fires for every path DetectSyncRoots can return — including the iCloud
+// (com~apple~CloudDocs / iCloudDrive), Syncthing (~/Sync) and G:\My Drive forms
+// the pre-refactor list silently missed (detection-preflight-1). A small set of
+// human-friendly aliases is added on top.
 func hasSyncClientSegment(root string) bool {
+	names := make([]string, 0, len(userpath.SyncFolderSegmentNames)+len(extraSyncClientAliases))
+	names = append(names, userpath.SyncFolderSegmentNames...)
+	names = append(names, extraSyncClientAliases...)
+	prefixes := make([]string, 0, len(userpath.SyncFolderSegmentPrefixes)+len(extraOrgSuffixedSyncPrefixes))
+	prefixes = append(prefixes, userpath.SyncFolderSegmentPrefixes...)
+	prefixes = append(prefixes, extraOrgSuffixedSyncPrefixes...)
+
 	for _, seg := range strings.Split(filepath.ToSlash(root), "/") {
 		if seg == "" {
 			continue
 		}
-		for _, name := range syncClientFolderNames {
+		for _, name := range names {
 			if strings.EqualFold(seg, name) {
 				return true
 			}
 		}
-		for _, prefix := range orgSuffixedSyncPrefixes {
+		for _, prefix := range prefixes {
 			// Require a real suffix after the stem: the bare "OneDrive" form is
 			// already covered by the exact-match list above, so a prefix hit only
 			// adds the org-suffixed "OneDrive-Personal" shape.

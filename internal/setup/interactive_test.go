@@ -4,6 +4,8 @@
 package setup
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alexdimarco/open-seavault-rclone/internal/rclonebin"
 	"github.com/alexdimarco/open-seavault-rclone/internal/vault"
 )
 
@@ -577,5 +580,223 @@ func TestRunInteractiveRecoverySaveToFileBranch(t *testing.T) {
 	// is a foot-gun.
 	if !pr.shownContains("sensitive") {
 		t.Fatalf("the save confirmation must tell the user the file is sensitive; shown=%v", pr.shown)
+	}
+}
+
+// createRealVaultForCeremony builds a real, fast-KDF vault at dir so the recovery
+// ceremony can Open it and mint a real phrase (no stubs on the crypto path).
+func createRealVaultForCeremony(t *testing.T, dir string) {
+	t.Helper()
+	if err := vault.CreateWithOptions(dir, testPassword, vault.CreateOptions{Chunk: vault.DefaultChunkParams(), KDF: vault.FastKDFConfigForTests()}); err != nil {
+		t.Fatalf("create vault for ceremony: %v", err)
+	}
+}
+
+// CLI-1/DOC-1: when no provider is detected and the user just accepts the cloud
+// step default (empty select -> the offered default), the outcome is
+// LOCAL-ONLY, never the "already watched by my sync client" synced outcome. A
+// user with no sync client must not be told to check one.
+func TestRunInteractiveNoProviderDefaultsToLocalOnly(t *testing.T) {
+	home := t.TempDir() // no provider folders
+	vaultDir := filepath.Join(home, "plain", "MyVault")
+	pr := &scriptPrompter{
+		t:       t,
+		texts:   []string{vaultDir},
+		secrets: []string{testPassword, testPassword},
+		// NoKeychain, NoOpen. Confirm order: recovery-decision=defer. The cloud
+		// step is left to its DEFAULT (empty selects -> the offered default idx).
+		confirms: []bool{false},
+	}
+	res, err := RunInteractive(pr, testDeps(), RunOptions{Home: home, GOOS: "linux", NoKeychain: true, NoOpen: true})
+	if err != nil {
+		t.Fatalf("the no-provider default flow must succeed; got %v", err)
+	}
+	if !pr.selectTitlePresented("how does the vault reach your cloud") {
+		t.Fatalf("step 4 must be asked when no provider is detected; select titles=%v", pr.selectTitles)
+	}
+	if strings.TrimSpace(res.CloudNote) == "" {
+		t.Fatal("the cloud outcome must set a CloudNote")
+	}
+	// The default must be the local-only outcome, NOT the synced wording.
+	if strings.Contains(strings.ToLower(res.CloudNote), "check that your sync client") {
+		t.Fatalf("defaulting the cloud step with no detected provider must NOT route into the synced outcome; got %q", res.CloudNote)
+	}
+	if !strings.Contains(strings.ToLower(res.CloudNote), "local") {
+		t.Fatalf("the default cloud outcome must be local-only; got %q", res.CloudNote)
+	}
+}
+
+// CLI-3/DOC-4: a custom vault path typed UNDER a detected provider root surfaces
+// that provider's placement caveat — shown inline at the choice AND carried in
+// Result.CaveatNote so the summary/GUI can render it.
+func TestRunInteractiveCustomPathUnderProviderSurfacesCaveat(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "Dropbox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	custom := filepath.Join(home, "Dropbox", "nested", "MyOwnVault")
+	pr := &scriptPrompter{
+		t:       t,
+		selects: []int{1}, // [provider, custom] -> custom
+		texts:   []string{custom},
+		secrets: []string{testPassword, testPassword},
+		// recovery-decision=defer, synced-upload-check=yes.
+		confirms: []bool{false, true},
+	}
+	res, err := RunInteractive(pr, testDeps(), RunOptions{Home: home, GOOS: "linux", NoKeychain: true, NoOpen: true})
+	if err != nil {
+		t.Fatalf("a custom path under a provider root must succeed; got %v", err)
+	}
+	if !pr.shownContains("Make available offline") {
+		t.Fatalf("a custom path under Dropbox must surface the Dropbox caveat inline; shown=%v", pr.shown)
+	}
+	if strings.TrimSpace(res.CaveatNote) == "" {
+		t.Fatal("a custom path under a provider root must set Result.CaveatNote")
+	}
+	if res.CaveatNote != Caveat(ProviderDropbox) {
+		t.Fatalf("CaveatNote must be the Dropbox catalog caveat; got %q", res.CaveatNote)
+	}
+}
+
+// rclone-ensure-1: an EOF/blank answer at the rclone download consent must
+// DECLINE (default No). An EOF-driven interactive rclone setup must therefore
+// never invoke the installer.
+func TestRunInteractiveRcloneConsentEOFDeclines(t *testing.T) {
+	restore := swapRcloneSeams(rclonebin.Status{Installed: false, RuntimeOK: false})
+	defer restore()
+	rcloneInstall = func(context.Context) error {
+		t.Fatal("an EOF/blank download consent must DECLINE, so the installer must never run")
+		return nil
+	}
+
+	home := t.TempDir() // no providers -> step 4 asks
+	vaultDir := filepath.Join(home, "MyVault")
+	pr := &scriptPrompter{
+		t:       t,
+		texts:   []string{vaultDir, "myremote", "myremote:vaults/MyVault"},
+		selects: []int{1}, // step 4: use an existing rclone remote
+		secrets: []string{testPassword, testPassword},
+		// recovery-decision=defer. The consent Confirm is left EXHAUSTED so it
+		// falls through to its default (which must be No after the fix).
+		confirms: []bool{false},
+	}
+	res, err := RunInteractive(pr, testDeps(), RunOptions{Home: home, GOOS: "linux", NoKeychain: true, NoOpen: true})
+	if !errors.Is(err, ErrDownloadRefused) {
+		t.Fatalf("a declined (EOF) rclone download must surface ErrDownloadRefused; got %v", err)
+	}
+	// The vault + profile were created before the cloud step (soft failure).
+	if res.VaultID == "" || !vaultExists(res.VaultDir) {
+		t.Fatalf("the vault should exist despite the declined download; VaultID=%q exists=%v", res.VaultID, vaultExists(res.VaultDir))
+	}
+	if res.FailedStep != StepRcloneEnsure {
+		t.Fatalf("FailedStep=%q; want %q", res.FailedStep, StepRcloneEnsure)
+	}
+}
+
+// recovery-integration-1: the recovery save-to-file branch REFUSES a path inside
+// the vault directory outright (the master secret must never ride the synced
+// vault folder to the untrusted remote), and the ceremony still completes.
+func TestRecoveryCeremonyRefusesInVaultSavePath(t *testing.T) {
+	home := t.TempDir()
+	vaultDir := filepath.Join(home, "Dropbox", "MyVault")
+	createRealVaultForCeremony(t, vaultDir)
+	inVaultPath := filepath.Join(vaultDir, "recovery.txt")
+
+	pr := &scriptPrompter{
+		t:     t,
+		texts: []string{inVaultPath},
+		// recoveryReType nil -> reflect the shown phrase (a match) -> commit.
+	}
+	note := runRecoveryCeremony(pr, vaultDir, home, "linux", testPassword)
+
+	if _, err := os.Stat(inVaultPath); !os.IsNotExist(err) {
+		t.Fatalf("the recovery phrase must NOT be written inside the vault dir; stat=%v", err)
+	}
+	if !pr.shownContains("inside the vault folder") {
+		t.Fatalf("the in-vault refusal must be explained; shown=%v", pr.shown)
+	}
+	if !strings.Contains(note, "recovery key was created") {
+		t.Fatalf("the ceremony must still commit a key after refusing the unsafe save; note=%q", note)
+	}
+}
+
+// recovery-integration-1: a save path under a detected provider root (but NOT in
+// the vault) is allowed only after an explicit second confirmation naming the
+// upload risk; declining does not write, accepting does.
+func TestRecoveryCeremonyWarnsInProviderSavePath(t *testing.T) {
+	rows := []struct {
+		name      string
+		confirm   bool
+		wantWrite bool
+	}{
+		{"decline does not write", false, false},
+		{"accept writes", true, true},
+	}
+	if len(rows) == 0 {
+		t.Fatal("in-provider table is empty; the test would exercise nothing")
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			home := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(home, "Dropbox"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			vaultDir := filepath.Join(home, "vaults", "MyVault") // NOT under Dropbox
+			createRealVaultForCeremony(t, vaultDir)
+			inProviderPath := filepath.Join(home, "Dropbox", "recovery.txt")
+
+			pr := &scriptPrompter{
+				t:        t,
+				texts:    []string{inProviderPath},
+				confirms: []bool{row.confirm}, // the in-provider warn confirm
+				// recoveryReType nil -> match -> commit.
+			}
+			note := runRecoveryCeremony(pr, vaultDir, home, "linux", testPassword)
+
+			if !pr.confirmPresented("uploaded to your cloud") {
+				t.Fatalf("a second confirmation naming the upload risk must be presented; confirms=%+v", pr.confirmCalls)
+			}
+			_, statErr := os.Stat(inProviderPath)
+			wrote := statErr == nil
+			if wrote != row.wantWrite {
+				t.Fatalf("wrote=%v; want %v (confirm=%v)", wrote, row.wantWrite, row.confirm)
+			}
+			if !strings.Contains(note, "recovery key was created") {
+				t.Fatalf("the ceremony must still commit; note=%q", note)
+			}
+		})
+	}
+}
+
+// recovery-integration-2: a phrase file written before the re-type gate, when
+// the ceremony then does NOT commit (a mismatch defer), is offered for deletion
+// and removed on yes — no secret-shaped file is left behind with no committed
+// key.
+func TestRecoveryCeremonyCleansUpAbandonedPhraseOnDefer(t *testing.T) {
+	home := t.TempDir()
+	vaultDir := filepath.Join(home, "vaults", "MyVault")
+	createRealVaultForCeremony(t, vaultDir)
+	savePath := filepath.Join(t.TempDir(), "phrase.txt") // safe location
+
+	pr := &scriptPrompter{
+		t:              t,
+		texts:          []string{savePath},
+		recoveryReType: func(string) string { return "these are not the right recovery words at all" },
+		// retry-again=No (defer), then cleanup-delete=Yes.
+		confirms: []bool{false, true},
+	}
+	note := runRecoveryCeremony(pr, vaultDir, home, "linux", testPassword)
+
+	if !pr.confirmPresented("before the phrase was confirmed") {
+		t.Fatalf("a cleanup offer naming the abandoned file must be presented; confirms=%+v", pr.confirmCalls)
+	}
+	if _, err := os.Stat(savePath); !os.IsNotExist(err) {
+		t.Fatalf("the abandoned phrase file must be deleted on yes; stat=%v", err)
+	}
+	if !strings.Contains(note, "No recovery key was set up") {
+		t.Fatalf("a mismatch must defer recovery; note=%q", note)
+	}
+	if n := countRecoveryEntries(t, vaultDir); n != 0 {
+		t.Fatalf("a mismatch must commit no recovery entry; got %d", n)
 	}
 }

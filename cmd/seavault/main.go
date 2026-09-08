@@ -222,7 +222,16 @@ func runSetupPreset(a setupPresetArgs) error {
 	var cloud setup.CloudChoice
 	switch a.preset {
 	case "synced-folder":
-		cloud = setup.SyncedFolder{}
+		// Resolve the provider when the vault sits under a detected sync root so
+		// Execute can surface that provider's placement caveat in the summary
+		// (DOC-4). An unknown/undetected root leaves Provider empty (no caveat).
+		prov := setup.Provider("")
+		if home, herr := os.UserHomeDir(); herr == nil {
+			if p, ok := setup.ProviderRootFor(vaultPath, home, runtime.GOOS); ok {
+				prov = p
+			}
+		}
+		cloud = setup.SyncedFolder{Provider: prov}
 	case "local":
 		cloud = setup.LocalOnly{}
 	case "rclone":

@@ -53,24 +53,43 @@ func DetectSyncFolders(home string, goos string) []SyncFolder {
 // are returned when vaultDir is under no detected root.
 func ProviderRootFor(vaultDir, home, goos string) (Provider, bool) {
 	target := filepath.Clean(vaultDir)
+	fold := caseInsensitiveFS(goos)
 	for _, f := range DetectSyncFolders(home, goos) {
-		if pathWithin(target, filepath.Clean(f.Path)) {
+		if pathWithin(target, filepath.Clean(f.Path), fold) {
 			return f.Provider, true
 		}
 	}
 	return "", false
 }
 
+// caseInsensitiveFS reports whether the given OS has a case-insensitive
+// filesystem by default (Windows NTFS, macOS APFS/HFS+). On those, a custom
+// vault path typed with different case than the detected root still sits under
+// it, so the "already synced" pre-answer must not be skipped just because the
+// case differs (detection-preflight-5). Linux is case-sensitive.
+func caseInsensitiveFS(goos string) bool {
+	return goos == "windows" || goos == "darwin"
+}
+
 // pathWithin reports whether target is root itself or a descendant of root,
 // compared segment-wise so a sibling with a shared prefix ("/a/bc" vs "/a/b")
-// is not a false positive.
-func pathWithin(target, root string) bool {
-	if target == root {
+// is not a false positive. When fold is true the comparison is case-insensitive,
+// matching a case-insensitive host filesystem; it mirrors the EqualFold matching
+// the vault preflight segment matcher already uses.
+func pathWithin(target, root string, fold bool) bool {
+	if fold {
+		if strings.EqualFold(target, root) {
+			return true
+		}
+	} else if target == root {
 		return true
 	}
 	rootSlash := root
 	if !strings.HasSuffix(rootSlash, string(filepath.Separator)) {
 		rootSlash += string(filepath.Separator)
+	}
+	if fold {
+		return len(target) >= len(rootSlash) && strings.EqualFold(target[:len(rootSlash)], rootSlash)
 	}
 	return strings.HasPrefix(target, rootSlash)
 }

@@ -9,8 +9,23 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/alexdimarco/open-seavault-rclone/internal/profile"
 	"github.com/alexdimarco/open-seavault-rclone/internal/vault"
 )
+
+// profileLookup is the side-effect-free profile resolver Plan.Validate uses to
+// catch a same-name collision BEFORE Execute builds anything
+// (profile-collision-orphan): reading the profile store is a pure read, so
+// /api/setup/validate can refuse a colliding plan with zero side effects. It is
+// a package variable only so tests can present a controlled store; production
+// resolves the real one.
+var profileLookup = func(name string) (path string, found bool, err error) {
+	e, ok, err := profile.Resolve(name)
+	if err != nil {
+		return "", false, err
+	}
+	return e.VaultPath, ok, nil
+}
 
 // Typed plan/execute errors (design §3.1). Callers branch on these with
 // errors.Is to render the right remedy; the wrapped message names the specifics.
@@ -147,7 +162,44 @@ func (p Plan) Validate() error {
 			return err
 		}
 	}
+
+	// Profile name: reject a syntactically invalid name, then refuse a name that
+	// already points at a DIFFERENT vault (C3, profile-collision-orphan). Both
+	// are side-effect-free (a store read), so /api/setup/validate catches the
+	// collision here — before Execute builds a vault that would otherwise be
+	// orphaned by a name it could never register.
+	name := p.ResolvedProfileName()
+	if err := validateProfileName(name); err != nil {
+		return err
+	}
+	if existing, found, err := profileLookup(name); err != nil {
+		return err
+	} else if found && !sameVaultPath(existing, p.VaultDir) {
+		return fmt.Errorf("%w: profile %q points at %s", ErrProfileNameInUse, name, existing)
+	}
 	return nil
+}
+
+// validateProfileName rejects an empty name or one carrying a path separator, so
+// a profile name can never smuggle a path segment into the store (mirrors
+// profile.Add's own guard, checked early so Validate reports it before Execute).
+func validateProfileName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return errors.New("profile name must not be empty")
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return errors.New("profile name must not contain path separators")
+	}
+	return nil
+}
+
+// sameVaultPath reports whether two vault paths refer to the same location,
+// comparing cleaned absolute forms so a trailing slash or a relative spelling
+// does not read as a collision. It is deliberately tolerant: on any resolution
+// error it falls back to a cleaned-string compare rather than reporting a
+// spurious collision.
+func sameVaultPath(a, b string) bool {
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 // vaultDirState classifies the target directory: nil when it is absent or empty

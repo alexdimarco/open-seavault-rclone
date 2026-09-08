@@ -47,8 +47,9 @@ var caveats = map[Provider]string{
 		"Right-click the vault folder and choose \"Make available offline\" so every encrypted chunk stays on disk; otherwise the vault may fail to open when you are offline.",
 	ProviderOneDrive: "OneDrive's Files On-Demand can make the vault's chunks online-only placeholders. " +
 		"Right-click the vault folder and choose \"Always keep on this device\" so the encrypted data is present locally.",
-	ProviderICloud: "iCloud Drive's \"Optimize Mac Storage\" can evict local copies of files you have not opened recently. " +
-		"Keep the vault folder downloaded (turn Optimize Storage off, or open the folder to re-download it) so its chunks are not offloaded.",
+	ProviderICloud: "iCloud Drive can offload local copies of files you have not opened recently to free space " +
+		"(macOS \"Optimize Mac Storage\"; on Windows the iCloud client streams files on demand). " +
+		"Keep the vault folder downloaded — turn Optimize Storage off or open the folder to re-download it on macOS, and \"Always Keep on This Device\" / Keep Downloaded on Windows — so its encrypted chunks are not evicted.",
 	ProviderGoogleDrive: "Google Drive for desktop streams files by default instead of mirroring them. " +
 		"Set the vault folder to \"Available offline\" (or use Mirror mode) so the encrypted data stays on local disk.",
 	ProviderNextcloud: "Nextcloud's virtual-files (on-demand) mode can leave the vault's chunks online-only. " +

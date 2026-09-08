@@ -175,7 +175,7 @@ func RunInteractive(pr Prompter, deps Deps, opts RunOptions) (Result, error) {
 	// path on the just-created vault (I-S3). A failure to run it never costs the
 	// user the vault; it downgrades to a "set it up later" note.
 	if recoveryNow {
-		res.RecoveryNote = runRecoveryCeremony(pr, res.VaultDir, password)
+		res.RecoveryNote = runRecoveryCeremony(pr, res.VaultDir, home, goos, password)
 	} else {
 		res.RecoveryNote = recoveryDeferNote(res.ProfileName)
 	}
@@ -228,7 +228,7 @@ func stepVaultLocation(pr Prompter, home, goos string) (string, CloudChoice, err
 		if path == "" {
 			path = def
 		}
-		return resolveCustomLocation(filepath.Clean(path), home, goos)
+		return resolveCustomLocation(pr, filepath.Clean(path), home, goos)
 	}
 
 	options := make([]Option, 0, len(detected)+1)
@@ -263,15 +263,20 @@ func stepVaultLocation(pr Prompter, home, goos string) (string, CloudChoice, err
 	if path == "" {
 		path = def
 	}
-	return resolveCustomLocation(filepath.Clean(path), home, goos)
+	return resolveCustomLocation(pr, filepath.Clean(path), home, goos)
 }
 
 // resolveCustomLocation classifies a typed vault path: when it sits under a
 // detected provider root, the cloud step is pre-answered SyncedFolder for that
-// provider (C5) and its caveat is shown; otherwise the cloud choice is left nil
-// so step 4 asks.
-func resolveCustomLocation(path, home, goos string) (string, CloudChoice, error) {
+// provider (C5) and its caveat is shown inline (CLI-3 — a typed path under a
+// provider folder is exactly as exposed to on-demand eviction as one picked
+// from the list, so it must be warned the same way); otherwise the cloud choice
+// is left nil so step 4 asks.
+func resolveCustomLocation(pr Prompter, path, home, goos string) (string, CloudChoice, error) {
 	if prov, ok := ProviderRootFor(path, home, goos); ok {
+		if cav := Caveat(prov); cav != "" {
+			pr.Show(cav)
+		}
 		return path, SyncedFolder{Provider: prov}, nil
 	}
 	return path, nil, nil
@@ -310,13 +315,20 @@ func stepPassword(pr Prompter) (string, error) {
 // remote (binding a download-consent decision onto deps.RcloneEnsure before
 // Execute reaches it, C11), or local-only (design §3.3 step 4). deps is mutated
 // in place so Execute uses the consent the user just gave.
+//
+// The DEFAULT is "local / external drive only" (CLI-1/DOC-1): reaching this step
+// at all means detection found no provider AND the chosen path sits under no
+// detected root, so a user who just presses Enter must NOT be told to check a
+// sync client they may not have. The safe, honest default is local-only; the
+// "already watched" choice is opt-in.
 func stepCloud(pr Prompter, deps *Deps) (CloudChoice, error) {
 	options := []Option{
 		{Label: "This folder is already watched by my own sync client (Dropbox, OneDrive, Nextcloud, ...)"},
 		{Label: "Use an existing rclone remote"},
 		{Label: "Local or external drive only (no cloud sync)"},
 	}
-	idx, err := pr.Select("How does the vault reach your cloud?", options, 0)
+	const localOnlyIdx = 2
+	idx, err := pr.Select("How does the vault reach your cloud?", options, localOnlyIdx)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +344,12 @@ func stepCloud(pr Prompter, deps *Deps) (CloudChoice, error) {
 		if err != nil {
 			return nil, err
 		}
-		consent, err := pr.Confirm("If the rclone runtime is missing, download and install it now? (fetches from downloads.rclone.org)", true)
+		// Default NO for the network-download consent (rclone-ensure-1): this is a
+		// consequential action (fetches ~15MB from downloads.rclone.org), so an
+		// EOF/blank answer on a closed stdin must DECLINE, not silently download —
+		// matching the repo's destructive-action prompt convention. A user who
+		// wants the download types "y".
+		consent, err := pr.Confirm("If the rclone runtime is missing, download and install it now? (fetches from downloads.rclone.org)", false)
 		if err != nil {
 			return nil, err
 		}
@@ -413,14 +430,24 @@ func promptInt(pr Prompter, label string, def int) int {
 // nothing is written and the user is offered retry-or-defer; on defer, or any
 // setup error, recovery is left for later and a reminder is returned. It returns
 // the RecoveryNote to place in the summary and never returns the phrase.
-func runRecoveryCeremony(pr Prompter, vaultDir, password string) string {
+//
+// home/goos drive the save-path safety guards (recovery-integration-1): the
+// plaintext recovery phrase is the master secret, so it must never be written
+// inside the vault directory (it would be encrypted-then-uploaded alongside the
+// vault, but the plaintext copy would ride the same synced folder to the
+// untrusted remote), and writing it under any OTHER detected provider root needs
+// an explicit second confirmation. A file that IS written but the ceremony then
+// does not commit (defer/mismatch/commit error) is offered for deletion
+// (recovery-integration-2).
+func runRecoveryCeremony(pr Prompter, vaultDir, home, goos, password string) string {
+	remedy := shellQuote(vaultDir)
 	v, err := vault.Open(vaultDir, password)
 	if err != nil {
-		return fmt.Sprintf("the vault was created, but the recovery key could not be set up now (%v); set one up later with `seavault recovery generate %s`.", err, vaultDir)
+		return fmt.Sprintf("the vault was created, but the recovery key could not be set up now (%v); set one up later with `seavault recovery generate %s`.", err, remedy)
 	}
 	phrase, commit, err := v.PrepareRecovery()
 	if err != nil {
-		return fmt.Sprintf("the vault was created, but the recovery key could not be set up now (%v); set one up later with `seavault recovery generate %s`.", err, vaultDir)
+		return fmt.Sprintf("the vault was created, but the recovery key could not be set up now (%v); set one up later with `seavault recovery generate %s`.", err, remedy)
 	}
 
 	pr.Show("Your recovery phrase — write it down or print it and store it safely. It is shown once and never stored:")
@@ -429,26 +456,42 @@ func runRecoveryCeremony(pr Prompter, vaultDir, password string) string {
 	// Let the user save the shown phrase before the re-type gate (C6). A blank
 	// answer skips saving; the re-type still verifies whatever they wrote down.
 	// The file is a plaintext recovery phrase, so it is written owner-only
-	// (0600) and the confirmation LABELS it as sensitive — anyone who can read
-	// it can unlock the vault (C6).
+	// (0600), the destination is validated against the vault dir and detected
+	// provider roots (recovery-integration-1), and the confirmation LABELS it as
+	// sensitive AND as written-before-confirmation (C6, recovery-integration-2).
+	savedPath := ""
 	if path, terr := pr.Text("Optional: a file to save the phrase to now (leave blank to skip)", ""); terr == nil {
 		if path = strings.TrimSpace(path); path != "" {
-			if werr := os.WriteFile(path, []byte(phrase+"\n"), 0o600); werr != nil {
-				pr.Show(fmt.Sprintf("could not save the phrase to %s: %v", path, werr))
-			} else {
-				pr.Show(fmt.Sprintf("saved the recovery phrase to %s — this file is sensitive: it holds the plaintext recovery phrase, so anyone who can read it can unlock the vault. It is written owner-only; keep it that way, and delete it once the phrase is stored somewhere safe.", path))
+			target := filepath.Clean(path)
+			if allowRecoverySavePath(pr, target, vaultDir, home, goos) {
+				if werr := os.WriteFile(target, []byte(phrase+"\n"), 0o600); werr != nil {
+					pr.Show(fmt.Sprintf("could not save the phrase to %s: %v", target, werr))
+				} else {
+					savedPath = target
+					pr.Show(fmt.Sprintf("saved the recovery phrase to %s — this file is sensitive: it holds the plaintext recovery phrase, so anyone who can read it can unlock the vault, and it was written now, BEFORE you confirm the phrase below. It is written owner-only; keep it that way, and delete it once the phrase is stored somewhere safe.", target))
+				}
 			}
 		}
+	}
+
+	// noCommitExit runs on every path that leaves WITHOUT committing a recovery
+	// key: it offers to delete a phrase file that was written before the gate
+	// (recovery-integration-2), then returns the caller's note.
+	noCommitExit := func(note string) string {
+		if savedPath != "" {
+			offerDeleteAbandonedPhrase(pr, savedPath)
+		}
+		return note
 	}
 
 	for try := 1; try <= maxRecoveryTries; try++ {
 		readback, err := pr.Secret("Re-type the recovery phrase to confirm")
 		if err != nil {
-			return recoveryDeferNote(vaultDir)
+			return noCommitExit(recoveryDeferNote(vaultDir))
 		}
 		if vault.RecoveryPhraseMatches(phrase, readback) {
 			if cerr := commit(); cerr != nil {
-				return fmt.Sprintf("the recovery phrase matched but could not be saved (%v); set one up later with `seavault recovery generate %s`.", cerr, vaultDir)
+				return noCommitExit(fmt.Sprintf("the recovery phrase matched but could not be saved (%v); set one up later with `seavault recovery generate %s`.", cerr, remedy))
 			}
 			return "A recovery key was created. Keep the phrase safe: it is the only way back into the vault if you forget the password."
 		}
@@ -457,16 +500,62 @@ func runRecoveryCeremony(pr Prompter, vaultDir, password string) string {
 		}
 		again, cerr := pr.Confirm("That did not match the phrase shown. Try entering it again? (choosing No sets up recovery later)", true)
 		if cerr != nil || !again {
-			return recoveryDeferNote(vaultDir)
+			return noCommitExit(recoveryDeferNote(vaultDir))
 		}
 	}
-	return recoveryDeferNote(vaultDir)
+	return noCommitExit(recoveryDeferNote(vaultDir))
+}
+
+// allowRecoverySavePath decides whether the plaintext recovery phrase may be
+// written to target (recovery-integration-1). A path inside the vault directory
+// is REFUSED outright — the master recovery secret must never live inside the
+// synced vault folder, where it would be uploaded to the untrusted remote and
+// defeat the zero-knowledge model. A path under any OTHER detected provider root
+// is allowed only after an explicit second confirmation naming the risk. Any
+// other path is allowed. It shows the reason on a refusal and never writes.
+func allowRecoverySavePath(pr Prompter, target, vaultDir, home, goos string) bool {
+	fold := caseInsensitiveFS(goos)
+	if pathWithin(target, filepath.Clean(vaultDir), fold) {
+		pr.Show(fmt.Sprintf("refusing to save the recovery phrase to %s: that path is inside the vault folder. The recovery phrase is the master key — a plaintext copy inside the vault folder would be uploaded to your cloud/remote, defeating the encryption. Choose a location OUTSIDE the vault (a password manager, a USB key, or print it).", target))
+		return false
+	}
+	if prov, ok := ProviderRootFor(target, home, goos); ok {
+		ok2, err := pr.Confirm(fmt.Sprintf("that path is inside your %s folder, so the plaintext recovery phrase would be UPLOADED to your cloud in the clear — anyone with access to that cloud could unlock the vault. Save it there anyway?", DisplayName(prov)), false)
+		if err != nil || !ok2 {
+			pr.Show("did not save the recovery phrase there. Choose a location outside your sync folders (a password manager, a USB key, or print it).")
+			return false
+		}
+	}
+	return true
+}
+
+// offerDeleteAbandonedPhrase offers to delete a recovery-phrase file that was
+// written before the re-type gate when the ceremony did NOT commit a key
+// (recovery-integration-2): the file is a secret-shaped artefact with no
+// matching recovery entry, so deletion is the default. It never returns the
+// phrase and reads no secret.
+func offerDeleteAbandonedPhrase(pr Prompter, path string) {
+	del, err := pr.Confirm(fmt.Sprintf("A recovery-phrase file was written to %s before the phrase was confirmed, but NO recovery key was set up. It holds the plaintext phrase. Delete that file now?", path), true)
+	if err != nil {
+		return
+	}
+	if del {
+		if rerr := os.Remove(path); rerr != nil {
+			pr.Show(fmt.Sprintf("could not delete %s: %v — remove it by hand; it holds the plaintext recovery phrase.", path, rerr))
+		} else {
+			pr.Show(fmt.Sprintf("deleted the abandoned recovery-phrase file %s.", path))
+		}
+	} else {
+		pr.Show(fmt.Sprintf("kept %s — it holds the plaintext recovery phrase and was written before confirmation; delete it by hand once you no longer need it.", path))
+	}
 }
 
 // recoveryDeferNote is the one-line reminder shown when recovery is deferred or
-// left unset (design §3.3 step 3 / §6). It never asserts a key exists.
+// left unset (design §3.3 step 3 / §6). It never asserts a key exists. The
+// remedy names the vault/profile shell-quoted so it pastes cleanly when the name
+// contains spaces (preset-noninteractive-2).
 func recoveryDeferNote(profileOrDir string) string {
-	return fmt.Sprintf("No recovery key was set up. Without one, a forgotten password means the vault cannot be opened — set one up any time with `seavault recovery generate %s`.", profileOrDir)
+	return fmt.Sprintf("No recovery key was set up. Without one, a forgotten password means the vault cannot be opened — set one up any time with `seavault recovery generate %s`.", shellQuote(profileOrDir))
 }
 
 // SummaryLines renders the plain-language success summary (design §3.3): what was
@@ -491,6 +580,13 @@ func SummaryLines(res Result, opened bool) []string {
 	}
 	if res.CloudNote != "" {
 		lines = append(lines, "  Cloud:    "+res.CloudNote)
+	}
+	if res.CaveatNote != "" {
+		// The provider placement caveat (on-demand/online-only eviction). Shown
+		// in the summary so a custom-path or --preset synced-folder run under a
+		// detected root surfaces it even though no inline step displayed it
+		// (CLI-3/DOC-4).
+		lines = append(lines, "  Sync tip: "+res.CaveatNote)
 	}
 	if res.PreflightNote != "" {
 		lines = append(lines, "  Note:     "+res.PreflightNote)

@@ -178,6 +178,51 @@ type SyncRoot struct {
 	Path     string
 }
 
+// SyncFolderSegmentNames are the exact folder-name segments DetectSyncRoots
+// builds its per-provider sync-root paths from. It is the SINGLE source the
+// vault package's create-time preflight matcher consumes (hasSyncClientSegment),
+// so the compatibility note fires for every path the detector can return — no
+// segment the detector knows can be silently unknown to the matcher
+// (detection-preflight-1). The setup package's preflight T-row enforces this by
+// asserting a non-empty note for every DetectSyncRoots hit across the goos
+// table. Keep this list and the addDir/addGlob calls below in lock-step.
+var SyncFolderSegmentNames = []string{
+	"Dropbox",             // dropbox
+	"Nextcloud",           // nextcloud
+	"Sync",                // syncthing (marker-gated; see hasSyncthingMarker)
+	"OneDrive",            // onedrive (plain)
+	"com~apple~CloudDocs", // icloud (macOS Mobile Documents)
+	"iCloudDrive",         // icloud (Windows)
+	"Google Drive",        // googledrive (Windows home-relative)
+	"My Drive",            // googledrive (Windows G:\My Drive and macOS GoogleDrive-*/My Drive)
+}
+
+// SyncFolderSegmentPrefixes are the stems of the org-suffixed macOS
+// Library/CloudStorage folders (OneDrive-Personal, GoogleDrive-you@example.com);
+// a path segment beginning with one of these (followed by the account suffix) is
+// a sync-client folder. Consumed by the vault preflight matcher alongside
+// SyncFolderSegmentNames.
+var SyncFolderSegmentPrefixes = []string{"OneDrive-", "GoogleDrive-"}
+
+// syncthingMarkers are the files/directories Syncthing places inside every
+// folder it manages. A bare ~/Sync is a common, generic directory name (a
+// scratch folder, a project subdir), so it is reported as a Syncthing root ONLY
+// when one of these markers is present (detection-preflight-2). This stops the
+// wizard from auto-answering the cloud step "already synced" for a directory
+// that merely happens to be named Sync, while still recognising a real
+// Syncthing default folder.
+var syncthingMarkers = []string{".stfolder", ".stignore", ".stversions"}
+
+// hasSyncthingMarker reports whether dir carries a Syncthing folder marker.
+func hasSyncthingMarker(dir string) bool {
+	for _, m := range syncthingMarkers {
+		if _, err := os.Stat(filepath.Join(dir, m)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // DetectSyncRoots is the SINGLE OS-path sync-folder detector (design §4, C10):
 // internal/setup.DetectSyncFolders delegates to it (attaching the caveat from
 // its catalog) and SuggestedVaultPaths is built from it, so the two never
@@ -226,7 +271,13 @@ func DetectSyncRoots(home, goos string) []SyncRoot {
 	// Common to every platform: the vendor's default home-relative folder name.
 	addDir("dropbox", filepath.Join(home, "Dropbox"))
 	addDir("nextcloud", filepath.Join(home, "Nextcloud"))
-	addDir("syncthing", filepath.Join(home, "Sync"))
+	// Syncthing's default folder is the generic ~/Sync, so it is a root only
+	// when a Syncthing marker proves the directory really is a managed folder
+	// (detection-preflight-2) — a bare ~/Sync must not pre-answer "already
+	// synced".
+	if syncDir := filepath.Join(home, "Sync"); hasSyncthingMarker(syncDir) {
+		addDir("syncthing", syncDir)
+	}
 	addDir("onedrive", filepath.Join(home, "OneDrive"))
 
 	switch goos {

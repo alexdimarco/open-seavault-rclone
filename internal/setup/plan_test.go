@@ -5,12 +5,50 @@ package setup
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/alexdimarco/open-seavault-rclone/internal/vault"
 )
+
+// profile-collision-orphan: Plan.Validate catches a same-name-different-path
+// profile collision with ZERO side effects, so /api/setup/validate refuses a
+// plan that Execute would otherwise commit-then-fail on. A same-name profile at
+// the SAME path is not a collision, and a syntactically invalid profile name is
+// rejected up front.
+func TestPlanValidateProfileCollision(t *testing.T) {
+	orig := profileLookup
+	defer func() { profileLookup = orig }()
+
+	vaultDir := filepath.Join(t.TempDir(), "MyVault")
+
+	// A profile of the resolved name (basename "MyVault") points at a DIFFERENT
+	// vault: a collision, caught side-effect-free.
+	profileLookup = func(string) (string, bool, error) { return "/somewhere/else", true, nil }
+	if err := (Plan{VaultDir: vaultDir, Cloud: LocalOnly{}}).Validate(); !errors.Is(err, ErrProfileNameInUse) {
+		t.Fatalf("Validate must catch the collision with ErrProfileNameInUse; got %v", err)
+	}
+	if _, statErr := os.Stat(vaultDir); !os.IsNotExist(statErr) {
+		t.Fatalf("Validate must create nothing; stat err=%v", statErr)
+	}
+
+	// A same-name profile at the SAME path is idempotent, not a collision.
+	profileLookup = func(string) (string, bool, error) { return vaultDir, true, nil }
+	if err := (Plan{VaultDir: vaultDir, Cloud: LocalOnly{}}).Validate(); err != nil {
+		t.Fatalf("a same-name profile at the same path must not be a collision; got %v", err)
+	}
+
+	// A syntactically invalid profile name is rejected before any lookup.
+	profileLookup = func(string) (string, bool, error) {
+		t.Fatal("profileLookup must not run for a name that fails syntactic validation")
+		return "", false, nil
+	}
+	if err := (Plan{VaultDir: vaultDir, ProfileName: "a/b", Cloud: LocalOnly{}}).Validate(); err == nil {
+		t.Fatal("a profile name containing a path separator must be rejected")
+	}
+}
 
 // T4 (I-S2): --expert KDF choices are validated through the SAME floor cmdInit
 // enforces. A config below the floor is rejected with the exact error init
