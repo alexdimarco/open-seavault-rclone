@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alexdimarco/open-seavault-rclone/internal/authlimit"
 	"github.com/alexdimarco/open-seavault-rclone/internal/loopback"
 	"github.com/alexdimarco/open-seavault-rclone/internal/vault"
 )
@@ -55,6 +56,18 @@ type Server struct {
 	// Credentials, when non-nil, require HTTP Basic authentication on every
 	// request (OPTIONS included). See.
 	Credentials *BasicCredentials
+	// AuthLimiter, when non-nil (and Credentials is set), rate-limits and locks
+	// the Basic-auth surface (design-u4 §2.2, surface "basic"): a locked peer is
+	// denied BEFORE the constant-time compare with 429 + Retry-After and NO
+	// WWW-Authenticate (so a client stops re-prompting), a failed compare is
+	// throttled by FailureDelay and then answered 401 as before, and a match
+	// resets the peer. It is nil for the GUI's per-request /dav servers, which are
+	// session-gated rather than Basic-authenticated. See.
+	AuthLimiter *authlimit.Limiter
+	// AuthLogf, when non-nil, receives the one-line operator lock message when the
+	// Basic surface locks a peer (C6); it never carries a credential. cmd serve
+	// points it at the auth-limit log sink. Nil discards the line.
+	AuthLogf func(format string, args ...any)
 	// DropOSJunk, when true, makes the server silently no-op filesystem cruft
 	// (.DS_Store and friends) instead of storing it. See.
 	DropOSJunk bool
@@ -217,9 +230,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 
-	if s.Credentials != nil && !s.credentialsMatch(r) {
-		w.Header().Set("WWW-Authenticate", `Basic realm="open-seavault-rclone", charset="UTF-8"`)
-		http.Error(w, "authentication required", http.StatusUnauthorized)
+	if s.Credentials != nil && !s.authorizeBasic(w, r) {
 		return
 	}
 
@@ -272,6 +283,73 @@ func hostForbiddenBody(rawHost string, extra []string) string {
 		allowed += ", " + strings.Join(extra, ", ")
 	}
 	return fmt.Sprintf("forbidden: unexpected Host header %q; allowed: %s; start with --allow-host NAME to add one", rawHost, allowed)
+}
+
+// authorizeBasic gates a Basic-authenticated request. It returns true when the
+// request may proceed and has already written the response otherwise.
+//
+// A request with NO Basic header is the client's first probe: it is answered
+// with the WWW-Authenticate challenge (401) and does NOT touch the limiter — the
+// challenge is a prompt, not a credential guess, so a well-behaved client's
+// initial unauthenticated request never burns a failure. Once credentials are
+// presented, the limiter (when configured) runs BEFORE the constant-time compare
+// (design-u4 §2.2, I-R1): a locked peer gets 429 + Retry-After with NO
+// WWW-Authenticate; a wrong credential is throttled by FailureDelay and then
+// answered 401 with the challenge as before; a match resets the peer.
+func (s *Server) authorizeBasic(w http.ResponseWriter, r *http.Request) bool {
+	user, _, ok := r.BasicAuth()
+	if !ok {
+		w.Header().Set("WWW-Authenticate", `Basic realm="open-seavault-rclone", charset="UTF-8"`)
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return false
+	}
+	if s.AuthLimiter == nil {
+		if s.credentialsMatch(r) {
+			return true
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="open-seavault-rclone", charset="UTF-8"`)
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return false
+	}
+	att, allowed, retryAfter := s.AuthLimiter.Attempt(authlimit.SurfaceBasic, r.RemoteAddr, user)
+	if !allowed {
+		// Locked: deny before the compare. No WWW-Authenticate (so the client
+		// stops re-prompting for a password it cannot currently use).
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(retryAfter)))
+		http.Error(w, "too many failed authentication attempts; retry after the lock expires", http.StatusTooManyRequests)
+		return false
+	}
+	if s.credentialsMatch(r) {
+		att.Success()
+		return true
+	}
+	att.Fail()
+	if s.AuthLogf != nil {
+		for _, line := range att.LockLines() {
+			s.AuthLogf("%s", line)
+		}
+	}
+	if d := s.AuthLimiter.FailureDelay(); d > 0 {
+		time.Sleep(d)
+	}
+	w.Header().Set("WWW-Authenticate", `Basic realm="open-seavault-rclone", charset="UTF-8"`)
+	http.Error(w, "authentication required", http.StatusUnauthorized)
+	return false
+}
+
+// retryAfterSeconds converts a lock/throttle duration to a whole-seconds
+// Retry-After value, rounding up so a sub-second remainder never truncates to 0
+// (a "retry in 0 seconds" would invite an immediate re-lock). A non-positive
+// duration yields 1.
+func retryAfterSeconds(d time.Duration) int {
+	if d <= 0 {
+		return 1
+	}
+	secs := int((d + time.Second - 1) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	return secs
 }
 
 // credentialsMatch compares the request's Basic credentials against the

@@ -146,6 +146,12 @@ func (l *Limiter) thresholdFor(k Key) int {
 	return l.policy.FailuresBeforeLock
 }
 
+// FailureDelay is the throttle sleep the wiring applies after a failed
+// verification (and on the throttle-only surfaces, launch and redeem, which
+// never lock). It exposes the normalized policy value so a caller need not carry
+// the Policy separately; it is a read-only accessor and touches no key state.
+func (l *Limiter) FailureDelay() time.Duration { return l.policy.FailureDelay }
+
 // getOrCreateLocked returns the state for k, creating it (and evicting the
 // oldest idle key when the map is at MaxKeys) if absent. The caller holds mu.
 func (l *Limiter) getOrCreateLocked(k Key, now time.Time) *state {
@@ -233,6 +239,15 @@ func (l *Limiter) Check(k Key) (allowed bool, retryAfter time.Duration) {
 // key, doubling the lock length on each further failure up to LockMax. It
 // returns whether the key is now locked and, if so, the lock duration.
 func (l *Limiter) Fail(k Key) (locked bool, retryAfter time.Duration) {
+	locked, retryAfter, _ = l.failReport(k)
+	return locked, retryAfter
+}
+
+// failReport is Fail plus the post-failure consecutive-failure count for k. The
+// Attempt bundle uses the count to compose the operator lock line (C6) for a key
+// that just locked. It is unexported: the count is a log detail, not part of the
+// stable Fail contract.
+func (l *Limiter) failReport(k Key) (locked bool, retryAfter time.Duration, failures int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.clock()
@@ -254,9 +269,9 @@ func (l *Limiter) Fail(k Key) (locked bool, retryAfter time.Duration) {
 			}
 		}
 		st.lockedUntil = now.Add(st.lockLen)
-		return true, st.lockLen
+		return true, st.lockLen, st.failures
 	}
-	return false, l.policy.FailureDelay
+	return false, l.policy.FailureDelay, st.failures
 }
 
 // Success is called AFTER a successful verification. It consumes one
@@ -302,8 +317,18 @@ func (l *Limiter) release(k Key) {
 // account is "". Call Attempt before verifying; on the returned handle call
 // Fail after a failed verification or Success after a good one.
 type Attempt struct {
-	l    *Limiter
-	keys []Key
+	l     *Limiter
+	keys  []Key
+	locks []lockRecord // keys that transitioned to locked during Fail (for LockLines)
+}
+
+// lockRecord captures what a single lock transition needs for its operator log
+// line (C6): the key that locked, the lock length, and the failure count. It
+// holds no credential.
+type lockRecord struct {
+	key      Key
+	duration time.Duration
+	failures int
 }
 
 // Attempt reserves an in-flight attempt on each consulted key and reports
@@ -338,15 +363,32 @@ func (l *Limiter) Attempt(surface Surface, remoteAddr, account string) (att *Att
 // any key is now locked and the longest lock duration.
 func (a *Attempt) Fail() (locked bool, retryAfter time.Duration) {
 	for _, k := range a.keys {
-		lk, ra := a.l.Fail(k)
+		lk, ra, failures := a.l.failReport(k)
 		if lk {
 			locked = true
+			a.locks = append(a.locks, lockRecord{key: k, duration: ra, failures: failures})
 		}
 		if ra > retryAfter {
 			retryAfter = ra
 		}
 	}
 	return locked, retryAfter
+}
+
+// LockLines returns the operator-facing log lines (C6) for every consulted key
+// that transitioned into a locked state during the preceding Fail — one line per
+// newly locked key, in operator words with minutes and the remedy, and never a
+// credential (I-R2). It is empty when nothing locked. Call it after Fail; a
+// denied Attempt (Fail is a no-op) yields no lines.
+func (a *Attempt) LockLines() []string {
+	if len(a.locks) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(a.locks))
+	for _, lr := range a.locks {
+		lines = append(lines, LockLine(lr.key, lr.duration, lr.failures))
+	}
+	return lines
 }
 
 // Success records a successful verification, clearing every consulted key.

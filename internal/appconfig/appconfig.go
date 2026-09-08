@@ -28,8 +28,75 @@ type Config struct {
 	Version        int            `json:"version"`
 	GUI            GUIConfig      `json:"gui"`
 	TLS            TLSSection     `json:"tls"`
+	Auth           AuthSection    `json:"auth"`
 	Log            LogConfig      `json:"log"`
 	RuntimeSources RuntimeSources `json:"runtimeSources"`
+}
+
+// AuthSection groups the authentication-surface policy. Today it carries only the
+// U4 rate-limit / lockout knobs (auth.limits); it is a section so future auth
+// policy has a home without another top-level field.
+type AuthSection struct {
+	Limits AuthLimits `json:"limits"`
+}
+
+// AuthLimits is the persisted configuration for the U4 authentication rate
+// limiter and lockout (design-u4 §2.1/§2.2). It never holds a credential — only
+// thresholds, durations (as human strings like "15m"/"250ms"), and the
+// emergency off switch. Enabled is a pointer so an absent field defaults to ON
+// (I-R4): a missing auth.limits section, or one without "enabled", is enabled,
+// and only an explicit `"enabled": false` disables. DisabledSince records when a
+// persisted (config-file) disable took effect, so `tls status`/the settings page
+// can say "OFF since <date>" and the running server can re-warn (C7); it is
+// meaningless — and cleared by Normalize — whenever the limiter is enabled.
+type AuthLimits struct {
+	Enabled                   *bool  `json:"enabled,omitempty"`
+	FailuresBeforeLock        int    `json:"failuresBeforeLock,omitempty"`
+	AccountFailuresBeforeLock int    `json:"accountFailuresBeforeLock,omitempty"`
+	Window                    string `json:"window,omitempty"`
+	LockStart                 string `json:"lockStart,omitempty"`
+	LockMax                   string `json:"lockMax,omitempty"`
+	FailureDelay              string `json:"failureDelay,omitempty"`
+	MaxKeys                   int    `json:"maxKeys,omitempty"`
+	DisabledSince             string `json:"disabledSince,omitempty"`
+}
+
+// DefaultAuthLimits returns the design's normalized auth-limit defaults (§2.1):
+// enabled, 5 failures before a peer lock, 20 for the per-account ceiling, a 15m
+// streak window, a 30s→15m doubling lock, a 250ms throttle, and a 10 000-key map
+// bound. Durations are the human strings a person edits.
+func DefaultAuthLimits() AuthLimits {
+	enabled := true
+	return AuthLimits{
+		Enabled:                   &enabled,
+		FailuresBeforeLock:        5,
+		AccountFailuresBeforeLock: 20,
+		Window:                    "15m",
+		LockStart:                 "30s",
+		LockMax:                   "15m",
+		FailureDelay:              "250ms",
+		MaxKeys:                   10000,
+	}
+}
+
+// IsEnabled reports whether the limiter is on. An absent Enabled pointer means
+// on (the default), so a config that never mentions auth.limits is protected.
+func (a AuthLimits) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
+
+// StatusLine renders the one-line operator-facing auth-limit status used by `tls
+// status`, the GUI settings surface, and the non-loopback startup exposure line
+// (C7 / §2.3). Enabled: the thresholds and the lock band. Disabled: the "OFF"
+// state, dated when a persisted disable recorded DisabledSince, always with the
+// re-enable remedy. Call it on a normalized AuthLimits (Load/Normalize fill the
+// values); it never emits a credential.
+func (a AuthLimits) StatusLine() string {
+	if a.IsEnabled() {
+		return fmt.Sprintf("auth limits: on (%d failures → %s…%s)", a.FailuresBeforeLock, a.LockStart, a.LockMax)
+	}
+	if strings.TrimSpace(a.DisabledSince) != "" {
+		return fmt.Sprintf("auth limits: OFF since %s — re-enable with --auth-limit on or auth.limits.enabled=true", a.DisabledSince)
+	}
+	return "auth limits: OFF — re-enable with --auth-limit on or auth.limits.enabled=true"
 }
 
 // TLSSection is the shared, purpose-neutral certificate configuration introduced
@@ -69,7 +136,7 @@ type RuntimeSources struct {
 }
 
 func Default() Config {
-	return Config{Version: Version, GUI: GUIConfig{Protocol: "http"}, Log: LogConfig{MaxEntries: 200}, RuntimeSources: RuntimeSources{RcloneChannel: "stable", RsyncSourceBaseURL: "https://download.samba.org/pub/rsync", RsyncRuntimeBaseURL: "", WSLInstallSource: "wsl.exe --install"}}
+	return Config{Version: Version, GUI: GUIConfig{Protocol: "http"}, Auth: AuthSection{Limits: DefaultAuthLimits()}, Log: LogConfig{MaxEntries: 200}, RuntimeSources: RuntimeSources{RcloneChannel: "stable", RsyncSourceBaseURL: "https://download.samba.org/pub/rsync", RsyncRuntimeBaseURL: "", WSLInstallSource: "wsl.exe --install"}}
 }
 
 func Path() (string, error) {
@@ -125,6 +192,7 @@ func Normalize(cfg Config) Config {
 	cfg.GUI.CertFile = strings.TrimSpace(cfg.GUI.CertFile)
 	cfg.GUI.KeyFile = strings.TrimSpace(cfg.GUI.KeyFile)
 	cfg.TLS = normalizeTLS(cfg.TLS)
+	cfg.Auth.Limits = normalizeAuthLimits(cfg.Auth.Limits)
 	cfg.GUI.Username = strings.TrimSpace(cfg.GUI.Username)
 	cfg.GUI.PasswordHash = strings.TrimSpace(cfg.GUI.PasswordHash)
 	if cfg.GUI.PasswordHash != "" {
@@ -189,6 +257,59 @@ func normalizeTLS(t TLSSection) TLSSection {
 	}
 	t.AllowHosts = cleaned
 	return t
+}
+
+// normalizeAuthLimits fills zero/blank/invalid auth-limit fields from the
+// defaults so a misconfigured file can never silently produce a lock-on-first-
+// attempt threshold, an unbounded map, or an unparsable duration. A blank or
+// invalid duration string falls back to its default; the human form of a valid
+// duration is preserved. When the limiter is enabled, DisabledSince is cleared
+// (it is meaningless), so re-enabling by flipping "enabled" back to true drops
+// the stale timestamp on the next save.
+func normalizeAuthLimits(a AuthLimits) AuthLimits {
+	d := DefaultAuthLimits()
+	if a.Enabled == nil {
+		enabled := true
+		a.Enabled = &enabled
+	}
+	if a.FailuresBeforeLock <= 0 {
+		a.FailuresBeforeLock = d.FailuresBeforeLock
+	}
+	if a.AccountFailuresBeforeLock <= 0 {
+		a.AccountFailuresBeforeLock = d.AccountFailuresBeforeLock
+	}
+	a.Window = normalizeDurationString(a.Window, d.Window, false)
+	a.LockStart = normalizeDurationString(a.LockStart, d.LockStart, false)
+	a.LockMax = normalizeDurationString(a.LockMax, d.LockMax, false)
+	a.FailureDelay = normalizeDurationString(a.FailureDelay, d.FailureDelay, true)
+	if a.MaxKeys <= 0 {
+		a.MaxKeys = d.MaxKeys
+	}
+	a.DisabledSince = strings.TrimSpace(a.DisabledSince)
+	if a.IsEnabled() {
+		a.DisabledSince = ""
+	}
+	return a
+}
+
+// normalizeDurationString trims s and returns it unchanged when it parses to a
+// valid duration; otherwise it returns def. When allowZero is false a
+// non-positive duration is treated as invalid (a zero window/lock would defeat
+// the limiter); FailureDelay passes allowZero=true because a zero throttle is a
+// legitimate choice (§2.1).
+func normalizeDurationString(s, def string, allowZero bool) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def
+	}
+	dur, err := time.ParseDuration(s)
+	if err != nil {
+		return def
+	}
+	if dur < 0 || (dur == 0 && !allowZero) {
+		return def
+	}
+	return s
 }
 
 func EnsureSelfSignedCertificate(cfg Config, host string) (Config, error) {

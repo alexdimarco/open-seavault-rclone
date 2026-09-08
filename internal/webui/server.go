@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/alexdimarco/open-seavault-rclone/internal/appconfig"
+	"github.com/alexdimarco/open-seavault-rclone/internal/authlimit"
 	"github.com/alexdimarco/open-seavault-rclone/internal/dependencies"
 	"github.com/alexdimarco/open-seavault-rclone/internal/importer"
 	"github.com/alexdimarco/open-seavault-rclone/internal/keychain"
@@ -77,6 +78,19 @@ type Server struct {
 	// listener does not tell a remote visitor to open http://127.0.0.1 (C1). cmd
 	// gui sets it to scheme://<launch-host>:<port>/?launch=… (no real secret).
 	LoginHintURL string
+	// AuthLimiter, when non-nil, rate-limits the GUI credential surfaces
+	// (design-u4 §2.2): the login form (locked → 429 re-render + Retry-After),
+	// /api/open (locked → 429 JSON + Retry-After), and — throttle-only, never
+	// locked (C1/C2) — launch redemption and /api/recovery/redeem. cmd gui sets it
+	// before serving; nil disables all limiting (the emergency off switch, I-R4).
+	AuthLimiter *authlimit.Limiter
+	// AuthLogf, when non-nil, receives the one-line operator lock message when a
+	// GUI surface locks a peer (C6); it never carries a credential. Nil discards.
+	AuthLogf func(format string, args ...any)
+	// AuthLimitStatus is the effective one-line auth-limit status (appconfig
+	// AuthLimits.StatusLine of the running state) cmd gui computes at startup and
+	// the settings surface reads back through /api/status (C7). Empty until set.
+	AuthLimitStatus string
 	// authSessions maps a session cookie value to its state. A session is created
 	// only by redeeming the launch secret (see handleLaunch); its TTL slides 12h
 	// on every request that passes the session check. See.
@@ -323,6 +337,10 @@ type statusResponse struct {
 	AppConfig       appconfig.Config    `json:"appConfig"`
 	Dependencies    dependencies.Report `json:"dependencies"`
 	AuthEnabled     bool                `json:"authEnabled"`
+	// AuthLimitStatus is the effective one-line auth-limit status the settings
+	// surface renders (C7): "auth limits: on (…)" or "auth limits: OFF since
+	// <date> — …". Empty when cmd did not set it (e.g. a bare NewWithConfig).
+	AuthLimitStatus string `json:"authLimitStatus,omitempty"`
 	// RecoveryMissing is true when a vault is open that holds no recovery-key
 	// entry, so the full page can surface a persistent "no recovery key" banner
 	// until one exists (recovery-integration-3, design §3.3 step 3). It is false
@@ -1107,6 +1125,11 @@ func (s *Server) sweepExpiredLocked(now time.Time) {
 func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
 	provided := r.URL.Query().Get("launch")
 	if subtle.ConstantTimeCompare([]byte(provided), []byte(s.launchSecret)) != 1 {
+		// Throttle only, never lock (C1/I-R9): the 256-bit launch secret is the
+		// defense, and a lock here would deny the only bootstrap path to a session.
+		// A wrong guess is delayed by FailureDelay, then answered 403 as before; the
+		// correct secret is never gated by the limiter and always redeems.
+		s.throttleAuthFailure()
 		http.Error(w, "forbidden: invalid launch secret", http.StatusForbidden)
 		return
 	}
@@ -1125,6 +1148,73 @@ func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
 	secure := s.cookieSecure()
 	http.SetCookie(w, &http.Cookie{Name: guiSessionCookie, Value: id, Path: "/", Expires: expires, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secure})
 	http.Redirect(w, r, "/?redeemed=1", http.StatusFound)
+}
+
+// throttleAuthFailure applies the limiter's FailureDelay sleep for the
+// throttle-only surfaces (launch, redeem) that never lock (C1/C2). It is a no-op
+// when the limiter is off or the configured delay is zero.
+func (s *Server) throttleAuthFailure() {
+	if s.AuthLimiter == nil {
+		return
+	}
+	if d := s.AuthLimiter.FailureDelay(); d > 0 {
+		time.Sleep(d)
+	}
+}
+
+// logAuthLocks writes the operator-facing lock line(s) a Fail produced (C6),
+// each already free of any credential (I-R2). A nil sink or an unlocked Fail
+// writes nothing.
+func (s *Server) logAuthLocks(att *authlimit.Attempt) {
+	if att == nil || s.AuthLogf == nil {
+		return
+	}
+	for _, line := range att.LockLines() {
+		s.AuthLogf("%s", line)
+	}
+}
+
+// authRetryAfterSeconds converts a lock/throttle duration to a whole-seconds
+// Retry-After value, rounding up so a sub-second remainder never truncates to 0.
+func authRetryAfterSeconds(d time.Duration) int {
+	if d <= 0 {
+		return 1
+	}
+	secs := int((d + time.Second - 1) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	return secs
+}
+
+// minutesCountdown renders d as whole minutes (rounded up, floored at one) for
+// an operator/end-user countdown, so a lock re-render never says "0 minutes".
+func minutesCountdown(d time.Duration) string {
+	m := int((d + time.Minute - 1) / time.Minute)
+	if m < 1 {
+		m = 1
+	}
+	if m == 1 {
+		return "1 minute"
+	}
+	return fmt.Sprintf("%d minutes", m)
+}
+
+// renderLoginLocked answers a locked GUI-login attempt (C6): it re-renders the
+// login template with a minutes countdown, a 429 status, and a Retry-After
+// header, so the browser shows why and for how long, and never with any
+// credential material.
+func (s *Server) renderLoginLocked(w http.ResponseWriter, r *http.Request, retryAfter time.Duration) {
+	if !s.guiAuthEnabled() {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Retry-After", fmt.Sprintf("%d", authRetryAfterSeconds(retryAfter)))
+	w.WriteHeader(http.StatusTooManyRequests)
+	msg := fmt.Sprintf("Too many failed login attempts; try again in %s.", minutesCountdown(retryAfter))
+	_ = loginPage.Execute(w, struct{ Message string }{Message: msg})
 }
 
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request, message string) {
@@ -1149,6 +1239,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	cfg := s.currentConfig()
 	username := strings.TrimSpace(r.FormValue("username"))
 	password := r.FormValue("password")
+	// design-u4 §2.2 surface "login": rate-limit BEFORE the argon2id verification
+	// (the cost). A locked peer/account is denied with a 429 re-render + Retry-After
+	// (C6); a wrong credential is throttled by FailureDelay then re-rendered as
+	// before; valid credentials reset the key.
+	var loginAttempt *authlimit.Attempt
+	if s.AuthLimiter != nil {
+		att, allowed, retryAfter := s.AuthLimiter.Attempt(authlimit.SurfaceLogin, r.RemoteAddr, username)
+		if !allowed {
+			s.renderLoginLocked(w, r, retryAfter)
+			return
+		}
+		loginAttempt = att
+	}
 	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(cfg.GUI.Username)) == 1
 	passOK := false
 	if strings.TrimSpace(cfg.GUI.PasswordHash) != "" {
@@ -1156,14 +1259,29 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	} else {
 		stored, err := keychain.Get(guiAuthAccount)
 		if err != nil {
+			// A keychain-read failure is not a credential guess: release the
+			// reservation without counting it, then re-render the remedy.
+			if loginAttempt != nil {
+				loginAttempt.Success()
+			}
 			s.handleLoginPage(w, r, "GUI login is using a legacy OS-keychain password, but open-seavault-rclone could not read it. Use Reset password and app configuration, then set the GUI login password again. Keychain detail: "+err.Error())
 			return
 		}
 		passOK = subtle.ConstantTimeCompare([]byte(password), []byte(stored)) == 1
 	}
 	if !userOK || !passOK {
+		if loginAttempt != nil {
+			loginAttempt.Fail()
+			s.logAuthLocks(loginAttempt)
+			s.throttleAuthFailure()
+		}
 		s.handleLoginPage(w, r, "Invalid open-seavault-rclone GUI username or password.")
 		return
+	}
+	// Credentials are valid: reset the limiter key now (a subsequent session-expiry
+	// re-render below is not a credential failure and must not accumulate).
+	if loginAttempt != nil {
+		loginAttempt.Success()
 	}
 	// Success sets loggedIn on the EXISTING session (created by the launch
 	// redemption); no new cookie is issued. step 5.
@@ -1460,7 +1578,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		recoveryMissing = !vaultHasRecoveryEntry(s.vault)
 	}
 	s.mu.Unlock()
-	resp := statusResponse{Open: open, BrowserToken: s.tokenValue(), WebDAV: s.webdavStatus(), VaultPath: vaultPath, VaultID: vaultID, Config: cfgDTO, Profiles: entries, AvailableVaults: s.availableVaultStatuses(entries), SuggestedPaths: userpath.SuggestedVaultPaths(), KeychainStatus: s.keychainStatus, AppConfig: s.currentConfig(), Dependencies: dependencies.Report{Keychain: s.keychainStatus}, AuthEnabled: s.guiAuthEnabled(), RecoveryMissing: recoveryMissing}
+	resp := statusResponse{Open: open, BrowserToken: s.tokenValue(), WebDAV: s.webdavStatus(), VaultPath: vaultPath, VaultID: vaultID, Config: cfgDTO, Profiles: entries, AvailableVaults: s.availableVaultStatuses(entries), SuggestedPaths: userpath.SuggestedVaultPaths(), KeychainStatus: s.keychainStatus, AppConfig: s.currentConfig(), Dependencies: dependencies.Report{Keychain: s.keychainStatus}, AuthEnabled: s.guiAuthEnabled(), AuthLimitStatus: s.AuthLimitStatus, RecoveryMissing: recoveryMissing}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1588,6 +1706,25 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "password is required unless the OS keychain has this vault"})
 		return
 	}
+	// design-u4 §2.2 surface "open": bound attempts against the vault-unwrap KDF
+	// (the main cost, 64 MiB per attempt). A locked peer is denied before the
+	// unwrap with 429 JSON {error, retryAfterSeconds} + Retry-After (C6); a wrong
+	// password is throttled by FailureDelay then answered as before; a successful
+	// unwrap resets the peer. No account: the vault password carries no username.
+	var openAttempt *authlimit.Attempt
+	if s.AuthLimiter != nil {
+		att, allowed, retryAfter := s.AuthLimiter.Attempt(authlimit.SurfaceOpen, r.RemoteAddr, "")
+		if !allowed {
+			secs := authRetryAfterSeconds(retryAfter)
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", secs))
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error":             fmt.Sprintf("too many failed open attempts; try again in %s", minutesCountdown(retryAfter)),
+				"retryAfterSeconds": secs,
+			})
+			return
+		}
+		openAttempt = att
+	}
 	var v *vault.Vault
 	if req.AcceptRollback {
 		// The operator has explicitly acknowledged a restore-from-backup: pass
@@ -1599,6 +1736,12 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		v, err = vault.Open(vaultPath, password)
 	}
 	if err != nil {
+		// A failed unwrap is a credential failure: throttle it (and log any lock).
+		if openAttempt != nil {
+			openAttempt.Fail()
+			s.logAuthLocks(openAttempt)
+			s.throttleAuthFailure()
+		}
 		// A rolled-back config surfaces the accept-rollback affordance: the page
 		// reads canAcceptRollback and offers "I restored this from a backup", which
 		// re-submits with acceptRollback:true AND the re-entered password (design
@@ -1609,6 +1752,9 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
+	}
+	if openAttempt != nil {
+		openAttempt.Success()
 	}
 	warnings := []string{}
 	// Config-MAC ratchet on the first write-capable GUI open (
@@ -1963,7 +2109,16 @@ func (s *Server) handleRecoveryRedeem(w http.ResponseWriter, r *http.Request) {
 	}
 	v, entryID, err := vault.OpenWithRecovery(vaultPath, req.Phrase, vault.OpenOptions{})
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		// design-u4 §2.2 surface "redeem": throttle only, NEVER lock (C2/I-R9) — a
+		// fumbled 24-word phrase must never lock the last-resort recovery path. The
+		// wrong phrase is delayed by FailureDelay and answered with the existing
+		// error carrying retryAfterSeconds; the correct phrase is never gated.
+		retryAfterSeconds := 0
+		if s.AuthLimiter != nil {
+			s.throttleAuthFailure()
+			retryAfterSeconds = authRetryAfterSeconds(s.AuthLimiter.FailureDelay())
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "retryAfterSeconds": retryAfterSeconds})
 		return
 	}
 	if err := v.RedeemRecovery(entryID, req.NewPassword); err != nil {
