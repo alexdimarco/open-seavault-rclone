@@ -109,6 +109,12 @@ type Server struct {
 	// phrase. A new generate replaces any prior pending one; open/close clear it.
 	// Guarded by mu.
 	pendingRecovery *pendingRecovery
+	// setupDeps overrides the setup.Deps handleSetupRun runs with. It is nil in
+	// production (setupDependencies falls back to setup.DefaultDeps()); a test
+	// sets it to inject a fault (e.g. a failing RcloneEnsure) so the post-create
+	// cloud-step soft-failure path (api-setup-1) is exercised deterministically
+	// without a real rclone runtime. Never a secret source.
+	setupDeps *setup.Deps
 }
 
 // pendingRecovery is a recovery-key generation waiting for the read-back
@@ -296,6 +302,11 @@ type statusResponse struct {
 	AppConfig       appconfig.Config    `json:"appConfig"`
 	Dependencies    dependencies.Report `json:"dependencies"`
 	AuthEnabled     bool                `json:"authEnabled"`
+	// RecoveryMissing is true when a vault is open that holds no recovery-key
+	// entry, so the full page can surface a persistent "no recovery key" banner
+	// until one exists (recovery-integration-3, design §3.3 step 3). It is false
+	// when no vault is open. Carries no secret.
+	RecoveryMissing bool `json:"recoveryMissing"`
 }
 
 type webdavStatusDTO struct {
@@ -1257,19 +1268,24 @@ func (s *Server) handleResetConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	// The first-run stepper's "Skip to advanced" link lands here as /?advanced=1;
 	// it flips a per-session flag so the full page renders now and on every later
-	// reload for this session (design §3.4).
-	if r.URL.Query().Get("advanced") == "1" {
+	// reload for this session (design §3.4). The full page's "Back to guided
+	// setup" link (GUI-4) lands as /?guided=1 and clears that flag, so the
+	// stepper renders again while the first-run trigger still holds.
+	if r.URL.Query().Get("guided") == "1" {
+		s.clearSetupSkipped(r)
+	} else if r.URL.Query().Get("advanced") == "1" {
 		s.markSetupSkipped(r)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = page.Execute(w, struct {
-		Token          string
-		InitialPath    string
-		SuggestedPaths []string
-		RsyncHint      string
-		AuthEnabled    bool
-		FirstRun       bool
-	}{Token: s.token, InitialPath: s.vaultPath, SuggestedPaths: userpath.SuggestedVaultPaths(), RsyncHint: rsyncput.DefaultBinaryHint(), AuthEnabled: s.guiAuthEnabled(), FirstRun: s.firstRun(r)})
+		Token           string
+		InitialPath     string
+		SuggestedPaths  []string
+		RsyncHint       string
+		AuthEnabled     bool
+		FirstRun        bool
+		SkippedFirstRun bool
+	}{Token: s.token, InitialPath: s.vaultPath, SuggestedPaths: userpath.SuggestedVaultPaths(), RsyncHint: rsyncput.DefaultBinaryHint(), AuthEnabled: s.guiAuthEnabled(), FirstRun: s.firstRun(r), SkippedFirstRun: s.skippedFirstRun(r)})
 }
 
 // firstRun reports whether the GUI should render the first-run stepper instead
@@ -1281,6 +1297,14 @@ func (s *Server) firstRun(r *http.Request) bool {
 	if s.setupSkippedFor(r) {
 		return false
 	}
+	return s.firstRunTrigger()
+}
+
+// firstRunTrigger reports the raw first-run condition independent of this
+// session's "Skip to advanced" choice: no profiles AND no vault open. A profile
+// store that cannot be read is treated as non-empty (fail toward the full page,
+// never trap an existing user behind a stepper).
+func (s *Server) firstRunTrigger() bool {
 	s.mu.Lock()
 	vaultOpen := s.vault != nil
 	s.mu.Unlock()
@@ -1294,6 +1318,15 @@ func (s *Server) firstRun(r *http.Request) bool {
 	return len(entries) == 0
 }
 
+// skippedFirstRun reports whether this session chose "Skip to advanced" while
+// the raw first-run trigger still holds. The full page renders a "Back to
+// guided setup" link (GUI-4) only then, so the skip is not a one-way door; once
+// a vault exists the trigger is gone and the link disappears (a returning user
+// is not first-run and gets the normal full page).
+func (s *Server) skippedFirstRun(r *http.Request) bool {
+	return s.setupSkippedFor(r) && s.firstRunTrigger()
+}
+
 // markSetupSkipped records on the request's session that the user chose to skip
 // the first-run stepper. A missing/unknown session is a no-op (the next
 // handleIndex simply re-renders the stepper).
@@ -1305,6 +1338,23 @@ func (s *Server) markSetupSkipped(r *http.Request) {
 	s.mu.Lock()
 	if sess, ok := s.authSessions[c.Value]; ok {
 		sess.setupSkipped = true
+		s.authSessions[c.Value] = sess
+	}
+	s.mu.Unlock()
+}
+
+// clearSetupSkipped clears the request session's "Skip to advanced" flag, so the
+// next handleIndex renders the first-run stepper again while the trigger holds
+// (GUI-4, the "Back to guided setup" return path). A missing/unknown session is
+// a no-op.
+func (s *Server) clearSetupSkipped(r *http.Request) {
+	c, err := r.Cookie(guiSessionCookie)
+	if err != nil || strings.TrimSpace(c.Value) == "" {
+		return
+	}
+	s.mu.Lock()
+	if sess, ok := s.authSessions[c.Value]; ok {
+		sess.setupSkipped = false
 		s.authSessions[c.Value] = sess
 	}
 	s.mu.Unlock()
@@ -1333,13 +1383,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	vaultPath := s.vaultPath
 	var vaultID string
 	var cfgDTO *vaultConfigDTO
+	var recoveryMissing bool
 	if s.vault != nil {
 		cfg := s.vault.Config
 		vaultID = s.vault.ID()
 		cfgDTO = &vaultConfigDTO{Version: cfg.Version, KDF: cfg.KDF, Crypto: cfg.Crypto, Chunk: cfg.Chunk, CreatedAt: cfg.CreatedAt, ManifestMode: cfg.Crypto.ManifestMode}
+		recoveryMissing = !vaultHasRecoveryEntry(s.vault)
 	}
 	s.mu.Unlock()
-	resp := statusResponse{Open: open, BrowserToken: s.tokenValue(), WebDAV: s.webdavStatus(), VaultPath: vaultPath, VaultID: vaultID, Config: cfgDTO, Profiles: entries, AvailableVaults: s.availableVaultStatuses(entries), SuggestedPaths: userpath.SuggestedVaultPaths(), KeychainStatus: s.keychainStatus, AppConfig: s.currentConfig(), Dependencies: dependencies.Report{Keychain: s.keychainStatus}, AuthEnabled: s.guiAuthEnabled()}
+	resp := statusResponse{Open: open, BrowserToken: s.tokenValue(), WebDAV: s.webdavStatus(), VaultPath: vaultPath, VaultID: vaultID, Config: cfgDTO, Profiles: entries, AvailableVaults: s.availableVaultStatuses(entries), SuggestedPaths: userpath.SuggestedVaultPaths(), KeychainStatus: s.keychainStatus, AppConfig: s.currentConfig(), Dependencies: dependencies.Report{Keychain: s.keychainStatus}, AuthEnabled: s.guiAuthEnabled(), RecoveryMissing: recoveryMissing}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1894,6 +1946,48 @@ func (s *Server) handleSetupValidate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "profileName": plan.ResolvedProfileName()})
 }
 
+// vaultHasRecoveryEntry reports whether the open vault holds at least one
+// recovery-key wrap entry. It is the signal for the persistent "no recovery
+// key" reminder banner (recovery-integration-3): the banner shows while this is
+// false and clears the moment a recovery entry exists, so a deferred recovery
+// key is re-surfaced without a separate persisted flag.
+func vaultHasRecoveryEntry(v *vault.Vault) bool {
+	if v == nil {
+		return false
+	}
+	for _, ref := range v.WrapEntryRefs() {
+		if ref.Type == vault.WrapTypeRecovery {
+			return true
+		}
+	}
+	return false
+}
+
+// setupDependencies returns the setup.Deps handleSetupRun runs with. Production
+// uses setup.DefaultDeps() (the network fetch stays denied, C11); a test may set
+// s.setupDeps to inject a fault so the cloud-step soft-failure path is exercised
+// deterministically. It never carries a secret.
+func (s *Server) setupDependencies() setup.Deps {
+	if s.setupDeps != nil {
+		return *s.setupDeps
+	}
+	return setup.DefaultDeps()
+}
+
+// isCloudStep reports whether a setup.Result.FailedStep names a post-create
+// cloud step (rclone install, remote add, remote test). A failure at one of
+// these leaves a fully-created, openable vault and profile behind, so it is a
+// soft failure surfaced as a warning with the vault opened (api-setup-1, §6/C9),
+// not the "could not create the vault" hard-failure path.
+func isCloudStep(step string) bool {
+	switch step {
+	case setup.StepRcloneEnsure, setup.StepRemoteAdd, setup.StepRemoteTest:
+		return true
+	default:
+		return false
+	}
+}
+
 // handleSetupRun serves POST /api/setup/run (design §3.4): it runs setup.Execute
 // (create + keychain + profile [+ rclone/remote]) and, on success, opens the new
 // vault into the session — the SAME session/vault wiring /api/init does. The
@@ -1920,8 +2014,36 @@ func (s *Server) handleSetupRun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
-	res, err := setup.Execute(plan, req.Password, setup.DefaultDeps())
+	res, err := setup.Execute(plan, req.Password, s.setupDependencies())
 	if err != nil {
+		// A post-create cloud-step soft failure (rclone install / remote add /
+		// remote test) leaves a fully-created, openable vault and profile behind:
+		// open it into the session and return 200 with the CloudNote as a warning
+		// so the stepper renders "the vault was created, but ..." instead of
+		// "Could not create the vault" (api-setup-1, §6/C9, I-S5). A create/profile
+		// failure keeps the 400 hard-failure path — nothing usable exists to open.
+		if res.VaultID != "" && isCloudStep(res.FailedStep) {
+			if v, oerr := vault.Open(res.VaultDir, req.Password); oerr == nil {
+				warnings := []string{}
+				if res.CloudNote != "" {
+					warnings = append(warnings, res.CloudNote)
+				}
+				if note := ratchetForWriteSession(v); note != "" {
+					warnings = append(warnings, note)
+				}
+				s.mu.Lock()
+				s.vaultPath = res.VaultDir
+				s.vault = v
+				s.pendingRecovery = nil
+				s.mu.Unlock()
+				// Secret-free body: the DTO and CloudNote never carry the password
+				// (Execute never puts it in Result; I-S1, T13).
+				writeJSON(w, http.StatusOK, map[string]any{"ok": true, "opened": true, "result": newSetupResultDTO(res), "warnings": warnings})
+				return
+			}
+			// If the created vault cannot be reopened, fall through to the honest
+			// error body (which still names what exists via the result DTO).
+		}
 		// Secret-free error body: Execute's error and the Result notes never
 		// carry the password (I-S1, proven by T13).
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error(), "result": newSetupResultDTO(res)})
@@ -3978,6 +4100,8 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
 #setup-stepper .caveat { color: var(--muted); font-size: 13px; margin-top: 4px; }
 #setup-stepper .skip-advanced { float: right; font-size: 13px; }
 #setup-stepper pre.phrase { white-space: pre-wrap; word-break: break-all; }
+#setup-stepper .field-error { display: block; margin: 4px 0 0; color: var(--danger, #b00020); font-size: 13px; }
+#setup-stepper .field-error.field-ok { color: var(--muted); }
 </style>
 </head>
 <body data-first-run="{{if .FirstRun}}true{{else}}false{{end}}" class="{{if .FirstRun}}first-run{{end}}">
@@ -4008,6 +4132,8 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
     <a href="#keys-panel">SSH keys</a>
   </nav>
   <div id="compatWarning" class="compat-warning" role="alert"></div>
+  {{if .SkippedFirstRun}}<div id="backToGuided" class="notice-banner" role="status"><span class="notice-title">Guided setup</span> You skipped the first-run wizard. <a href="/?guided=1">Back to guided setup</a> &mdash; available until you create your first vault.</div>{{end}}
+  <div id="recoveryReminder" class="notice-banner" role="status" hidden><button class="notice-dismiss" type="button" aria-label="Dismiss" onclick="dismissRecoveryReminder()">x</button><span class="notice-title">No recovery key</span> This vault has no recovery key. Without one, a forgotten password means the vault cannot be opened. Create one from the Password &amp; recovery panel with &ldquo;Generate recovery key&rdquo;.</div>
   <div id="noticeBanner" class="notice-banner" role="status" hidden></div>
 </header>
 <main class="app-shell">
@@ -4015,9 +4141,9 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
 <section id="setup-stepper" aria-label="First-run setup">
   <a class="skip-advanced" href="/?advanced=1">Skip to advanced view</a>
   <h2>Set up your encrypted vault</h2>
-  <p class="hint">Three steps: choose where the vault lives, pick a password, and create it. Every default is chosen for you; you can change anything later in the advanced view.</p>
+  <p class="hint">A few quick steps: choose where the vault lives and how it reaches the cloud, pick a password, create the vault, then set up a recovery key. Every default is chosen for you; you can change anything later in the advanced view.</p>
   <div class="step-dots">
-    <span class="step-dot" data-dot="0">1. Location</span>
+    <span class="step-dot" data-dot="0">1. Location &amp; cloud</span>
     <span class="step-dot" data-dot="1">2. Password</span>
     <span class="step-dot" data-dot="2">3. Create</span>
     <span class="step-dot" data-dot="3">4. Recovery key</span>
@@ -4059,6 +4185,7 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
     <label>Confirm password
       <input id="setupPassword2" type="password" autocomplete="new-password">
     </label>
+    <small id="setupPassword2Error" class="field-error" role="alert" hidden></small>
     <label class="checkline"><input id="setupKeychain" type="checkbox" checked> Remember it in this computer's OS keychain</label>
     <p class="row-actions"><button type="button" onclick="setupGo(0)">Back</button><button type="button" class="operation" onclick="setupNext(1)">Continue</button></p>
   </div>
@@ -4094,7 +4221,7 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
       <div id="setupRecoveryReadbackStep" hidden>
         <p class="hint">Re-enter the recovery phrase from your saved copy to confirm before it is stored. Paste is disabled so the re-entry proves you captured it off-screen.</p>
         <label>Re-enter the recovery phrase
-          <input id="setupRecoveryReadback" autocomplete="off" onpaste="return false" placeholder="type the phrase from your saved copy">
+          <input id="setupRecoveryReadback" autocomplete="off" onpaste="return false" ondrop="return false" ondragover="return false" placeholder="type the phrase from your saved copy">
         </label>
         <p class="row-actions">
           <button type="button" class="operation" onclick="setupRecoveryCommit()">Confirm and save recovery key</button>
@@ -4310,7 +4437,7 @@ body.first-run .app-shell > .content > section:not(#setup-stepper) { display: no
       <p class="hint">Re-enter the recovery phrase from your written copy to confirm before it is saved. Paste is disabled so the re-entry proves you captured it off-screen.</p>
       <div class="form-grid">
         <label>Re-enter the recovery phrase to confirm
-          <input id="recoveryReadback" autocomplete="off" onpaste="return false" placeholder="type the phrase from your written copy">
+          <input id="recoveryReadback" autocomplete="off" onpaste="return false" ondrop="return false" ondragover="return false" placeholder="type the phrase from your written copy">
         </label>
       </div>
       <p class="row-actions">
@@ -4920,7 +5047,25 @@ function renderAvailableVaults(status){
     return '<article class="vault-card '+cls+'"><header><span class="vault-name">'+esc(v.name)+'</span><span class="pill">'+esc(v.status)+'</span></header><div class="vault-path">'+esc(v.vaultPath)+'</div><small>'+key+(v.open?' | active vault':'')+'</small>'+stats+err+'<progress value="'+pct+'" max="1"></progress><label>Password <input id="'+passwordId+'" type="password" autocomplete="current-password" placeholder="optional; blank uses keychain when active"></label><p class="row-actions">'+keyIndicator+'<button data-name="'+esc(v.name)+'" data-path="'+esc(v.vaultPath)+'" data-password-id="'+passwordId+'" onclick="openSavedVaultFromPassword(this.dataset.name,this.dataset.path,this.dataset.passwordId,false)">'+openLabel+'</button><button data-name="'+esc(v.name)+'" data-path="'+esc(v.vaultPath)+'" data-password-id="'+passwordId+'" onclick="openSavedVaultFromPassword(this.dataset.name,this.dataset.path,this.dataset.passwordId,true)">Open and save keychain</button><button data-name="'+esc(v.name)+'" data-path="'+esc(v.vaultPath)+'" onclick="selectVaultCard(this.dataset.name,this.dataset.path)">Select</button><button data-name="'+esc(v.name)+'" data-path="'+esc(v.vaultPath)+'" data-password-id="'+passwordId+'" onclick="verifySavedVault(this.dataset.name,this.dataset.path,this.dataset.passwordId)">Verify</button></p></article>';
   }).join('');
 }
+let recoveryReminderDismissed = false;
+function dismissRecoveryReminder(){
+  recoveryReminderDismissed = true;
+  const box = $('recoveryReminder');
+  if(box) box.hidden = true;
+}
+// renderRecoveryReminder surfaces a persistent, dismissible "no recovery key"
+// banner whenever a vault is open that holds no recovery entry, re-surfacing a
+// deferred recovery key on every full-page load until one exists
+// (recovery-integration-3). Dismiss hides it for this page load; a reload brings
+// it back until a recovery key is created.
+function renderRecoveryReminder(s){
+  const box = $('recoveryReminder');
+  if(!box) return;
+  const show = !!(s && s.open && s.recoveryMissing) && !recoveryReminderDismissed;
+  box.hidden = !show;
+}
 function renderTopVaultStrip(s){
+  renderRecoveryReminder(s);
   const box = $('topSavedVaultStrip');
   if(!box) return;
   const rows = (s && s.availableVaults) || [];
@@ -5833,12 +5978,39 @@ async function setupNext(fromStep){
   if(fromStep === 1){
     const p1 = ($('setupPassword') && $('setupPassword').value) || '';
     const p2 = ($('setupPassword2') && $('setupPassword2').value) || '';
-    if(!p1){ setupMsg('Enter a password.', 'error'); return; }
-    if(p1 !== p2){ setupMsg('The password and its confirmation do not match.', 'error'); return; }
+    if(!p1){ setupFieldError('setupPassword2Error', ''); setupMsg('Enter a password.', 'error'); return; }
+    if(p1 !== p2){
+      // Render the mismatch BESIDE the confirm field, not only in the top banner
+      // (GUI-6), so the error points at the field the owner has to fix.
+      setupFieldError('setupPassword2Error', 'The password and its confirmation do not match.');
+      setupMsg('The password and its confirmation do not match.', 'error');
+      const c = $('setupPassword2'); if(c) c.focus();
+      return;
+    }
+    setupFieldError('setupPassword2Error', '');
     setupRenderReview();
     setupGo(2);
     return;
   }
+}
+// setupFieldError renders a validation message beside a specific field (GUI-6).
+// ok=true styles it as a neutral confirmation (the live "passwords match" hint)
+// rather than an error.
+function setupFieldError(id, text, ok){
+  const el = $(id);
+  if(!el) return;
+  el.textContent = text || '';
+  el.className = 'field-error' + (ok ? ' field-ok' : '');
+  el.hidden = !text;
+}
+// setupLiveMatch gives a live match/mismatch indicator beside the confirm field
+// as the owner types, so a mistype is caught before Continue (GUI-6).
+function setupLiveMatch(){
+  const p1 = ($('setupPassword') && $('setupPassword').value) || '';
+  const p2 = ($('setupPassword2') && $('setupPassword2').value) || '';
+  if(!p2){ setupFieldError('setupPassword2Error', ''); return; }
+  if(p1 === p2){ setupFieldError('setupPassword2Error', 'Passwords match.', true); }
+  else { setupFieldError('setupPassword2Error', 'The password and its confirmation do not match.'); }
 }
 function setupRenderReview(){
   const b = setupPlanBody(false);
@@ -5859,7 +6031,13 @@ async function setupRun(){
     setupState.result = (res && res.result) || null;
     if($('setupPassword')) $('setupPassword').value = '';
     if($('setupPassword2')) $('setupPassword2').value = '';
-    setupMsg('');
+    // A 200 with warnings is a post-create cloud-step soft failure (api-setup-1):
+    // the vault was created and is open, so keep going to the recovery step and
+    // surface the warning (e.g. "the vault was created, but the remote did not
+    // verify ...") rather than the "Could not create the vault" error.
+    const warns = (res && Array.isArray(res.warnings)) ? res.warnings.filter(w => String(w||'').trim() !== '') : [];
+    if(warns.length){ setupMsg(warns.join(' '), 'warning'); }
+    else { setupMsg(''); }
     setupGo(3);
   } catch(e){ setupMsg('Could not create the vault: ' + e.message, 'error'); }
 }
@@ -5953,6 +6131,10 @@ function setupStepperInit(){
   });
   document.querySelectorAll('#setup-stepper input[name="setupCloud"]').forEach(el => {
     el.addEventListener('change', setupApplyCloud);
+  });
+  ['setupPassword', 'setupPassword2'].forEach(id => {
+    const el = $(id);
+    if(el) el.addEventListener('input', setupLiveMatch);
   });
   setupGo(0);
   setupLoadDetect();
