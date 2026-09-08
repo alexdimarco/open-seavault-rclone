@@ -4,12 +4,23 @@
 package setup
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// redactSecret renders secret-bearing material for a FAILURE MESSAGE without
+// disclosing it: its length plus a short SHA-256 prefix (testing discipline —
+// never a phrase/secret/card VALUE in a test log).
+func redactSecret(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("len=%d sha256=%s", len(s), hex.EncodeToString(sum[:])[:12])
+}
 
 // countShown returns how many shown lines contain sub.
 func countShown(shown []string, sub string) int {
@@ -239,7 +250,8 @@ func TestRecoverySaveCardDraftRewrittenOnCommit(t *testing.T) {
 		t.Fatalf("after commit the card must be re-written WITHOUT the DRAFT stamp; got:\n%s", string(data))
 	}
 	if strings.TrimSpace(pr.lastPhrase) == "" || !strings.Contains(string(data), pr.lastPhrase) {
-		t.Fatalf("the confirmed card must still contain the shown phrase; file=%q phrase=%q", string(data), pr.lastPhrase)
+		t.Fatalf("the confirmed card must still contain the shown phrase; card={%s} phrase={%s} cardContainsPhrase=%v",
+			redactSecret(string(data)), redactSecret(pr.lastPhrase), strings.Contains(string(data), pr.lastPhrase))
 	}
 }
 

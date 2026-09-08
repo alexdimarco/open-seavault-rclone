@@ -84,11 +84,14 @@ func canonicalRecovery(s string) string {
 // discriminating a word phrase from a base32 phrase FIRST (design U2 §2.5 / review
 // condition C1). The rule, after whitespace tokenization:
 //
-//   - Word-shaped input — exactly 24 tokens, OR 20–28 tokens the majority of which
-//     are wordlist words (a miscounted phrase) — is decoded STRICTLY. A valid
-//     phrase yields its canonical base32 secret; an invalid one returns the typed
+//   - Word-shaped input — 20–28 tokens the MAJORITY of which are wordlist words (a
+//     valid or miscounted phrase) — is decoded STRICTLY. A valid phrase yields its
+//     canonical base32 secret; an invalid one returns the typed
 //     ErrRecoveryWordCount / ErrRecoveryWordUnknown / ErrRecoveryChecksum error and
-//     NEVER falls through to base32 stripping.
+//     NEVER falls through to base32 stripping. The exact-24 count is NOT special-
+//     cased: even 24 tokens must be a wordlist majority, so a base32 phrase that
+//     happens to be split into 24 whitespace chunks (with ~no wordlist tokens) is
+//     NOT misrouted to the word decoder — it falls through to base32 (word-encoding-2).
 //   - Anything else is a base32 phrase, canonicalised exactly as before.
 //
 // So redeem/read-back accept either form for the SAME secret (a base32 phrase and
@@ -103,7 +106,11 @@ func canonicalRecoverySecret(input string) (string, error) {
 			inList++
 		}
 	}
-	wordShaped := n == recoveryWordCount || (n >= 20 && n <= 28 && inList*2 > n)
+	// A base32 phrase split into 24 whitespace chunks has ~no wordlist tokens, so
+	// gating even the 24-token count on a wordlist majority lets it fall through to
+	// base32 canonicalisation instead of a spurious word error; a genuine phrase
+	// with one mistyped word still holds a 23/24 majority, so C1 stands.
+	wordShaped := n >= 20 && n <= 28 && inList*2 > n
 	if wordShaped {
 		secret, err := DecodeRecoveryWords(tokens)
 		if err != nil {
@@ -157,12 +164,23 @@ func RecoveryPhraseMatches(minted, input string) bool {
 // phrase that is not a 32-byte base32 secret returns an error rather than a
 // truncated word list.
 func RecoveryPhraseWords(phrase string) ([]string, error) {
-	raw, err := recoveryB32.DecodeString(canonicalRecovery(phrase))
+	canon := canonicalRecovery(phrase)
+	raw, err := recoveryB32.DecodeString(canon)
 	if err != nil {
 		return nil, err
 	}
 	if len(raw) != recoveryEntropyBytes {
 		return nil, fmt.Errorf("recovery phrase is %d bytes, expected %d", len(raw), recoveryEntropyBytes)
+	}
+	// Reject a NON-CANONICAL base32 phrase — one whose final character carries
+	// non-zero trailing bits (encoding/base32 decodes those leniently). Such a
+	// phrase decodes to the same 32 bytes as its canonical form, so the words below
+	// would name a DIFFERENT wrap secret than the phrase the owner holds (the KDF
+	// keys off the base32 STRING, not the 32 bytes). Requiring that re-encoding the
+	// decoded bytes reproduces the canonical input keeps the word form and the
+	// base32 form naming the same secret (review word-encoding-1).
+	if recoveryB32.EncodeToString(raw) != canon {
+		return nil, errors.New("recovery phrase is not canonical base32 (its trailing bits are not zero)")
 	}
 	var secret [recoveryEntropyBytes]byte
 	copy(secret[:], raw)

@@ -4,6 +4,9 @@
 package profile
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -96,5 +99,116 @@ func TestW5_RecoveryLabelStore(t *testing.T) {
 	}
 	if dispB := views[1].Display(); dispB != "Recovery key #12ab" {
 		t.Fatalf("unlabeled display must degrade to the bare handle, got %q", dispB)
+	}
+}
+
+// TestWordlistLabels2_StorePermsForcedOnPreexistingFile (review wordlist-labels-2):
+// os.WriteFile only applies a mode on CREATION, so a pre-existing 0644 store would
+// stay world-readable. SaveLabels must force 0600 on the file and 0700 on the config
+// dir regardless. os.Chmod on Windows only toggles the read-only bit, so the exact-
+// mode assertion is Unix-only.
+func TestWordlistLabels2_StorePermsForcedOnPreexistingFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file mode bits are not represented on Windows")
+	}
+	isolateLabelHome(t)
+	p, err := LabelsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(`{"version":1,"labels":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(p); err != nil {
+		t.Fatal(err)
+	} else if fi.Mode().Perm() != 0o644 {
+		t.Fatalf("precondition: the store must start 0644, got %o", fi.Mode().Perm())
+	}
+
+	if err := SetRecoveryLabel("aabbccddeeff0011", RecoveryKeyLabel{Label: "k", Created: "2026-09-08", Device: "host"}); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("recovery-labels.json must be forced to 0600 after a save over a pre-existing file, got %o", fi.Mode().Perm())
+	}
+	di, err := os.Stat(filepath.Dir(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if di.Mode().Perm() != 0o700 {
+		t.Fatalf("the config dir must be forced to 0700, got %o", di.Mode().Perm())
+	}
+}
+
+// TestWordlistLabels3_DeleteAndPruneOrphans (review wordlist-labels-3): a revoked
+// key's label must not linger. DeleteRecoveryLabel removes exactly one record
+// (missing/empty are no-ops), and LabelledRecoveryKeys prunes records whose entry ID
+// is not in the current on-disk set — but NEVER when that set is empty (an ambiguous
+// closed / not-yet-loaded vault).
+func TestWordlistLabels3_DeleteAndPruneOrphans(t *testing.T) {
+	isolateLabelHome(t)
+	const idA = "aaaa1111bbbb2222"
+	const idB = "cccc3333dddd4444"
+	const idC = "eeee5555ffff6666"
+	for _, id := range []string{idA, idB, idC} {
+		if err := SetRecoveryLabel(id, RecoveryKeyLabel{Label: "L", Created: "2026-09-08", Device: "host"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// DeleteRecoveryLabel removes exactly idB and nothing else.
+	if err := DeleteRecoveryLabel(idB); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := GetRecoveryLabel(idB); err != nil || ok {
+		t.Fatalf("the deleted record must be gone, got ok=%v err=%v", ok, err)
+	}
+	if _, ok, _ := GetRecoveryLabel(idA); !ok {
+		t.Fatal("delete removed the wrong record (idA)")
+	}
+	if _, ok, _ := GetRecoveryLabel(idC); !ok {
+		t.Fatal("delete removed the wrong record (idC)")
+	}
+
+	// Missing and empty deletes are no-ops.
+	if err := DeleteRecoveryLabel(idB); err != nil {
+		t.Fatalf("deleting an absent record must be a no-op, got %v", err)
+	}
+	if err := DeleteRecoveryLabel("   "); err != nil {
+		t.Fatalf("deleting an empty ID must be a no-op, got %v", err)
+	}
+
+	// An EMPTY current set must not prune (ambiguous closed/not-loaded vault).
+	if _, err := LabelledRecoveryKeys(nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := GetRecoveryLabel(idA); !ok {
+		t.Fatal("an empty entry set must not prune labels (idA vanished)")
+	}
+	if _, ok, _ := GetRecoveryLabel(idC); !ok {
+		t.Fatal("an empty entry set must not prune labels (idC vanished)")
+	}
+
+	// A NON-EMPTY current set of {idA} prunes the orphan idC (its key was revoked)
+	// and keeps idA.
+	views, err := LabelledRecoveryKeys([]string{idA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].ID != idA || !views[0].HasRecord {
+		t.Fatalf("current set {idA} must list idA with its record, got %+v", views)
+	}
+	if _, ok, _ := GetRecoveryLabel(idC); ok {
+		t.Fatal("LabelledRecoveryKeys must prune the orphaned idC record (its key was revoked)")
+	}
+	if _, ok, _ := GetRecoveryLabel(idA); !ok {
+		t.Fatal("the still-current idA record must survive pruning")
 	}
 }

@@ -86,14 +86,11 @@ func LoadLabels() (LabelStore, error) {
 	return s, nil
 }
 
-// SaveLabels writes the label store atomically-ish with 0600 perms under a 0700
-// config dir, mirroring the profile store. It never touches vault.json.
+// SaveLabels writes the label store with 0600 perms under a 0700 config dir,
+// mirroring the profile store. It never touches vault.json.
 func SaveLabels(s LabelStore) error {
 	p, err := LabelsPath()
 	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
 	s.Version = 1
@@ -104,7 +101,27 @@ func SaveLabels(s LabelStore) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o600)
+	return writeDeviceLocalFile(p, data)
+}
+
+// writeDeviceLocalFile writes a device-local config file (profiles.json /
+// recovery-labels.json) and forces restrictive permissions EVEN WHEN the file or
+// its directory already exists: os.WriteFile and os.MkdirAll only apply a mode on
+// creation, so a pre-existing 0644 store would otherwise stay world-readable
+// (review wordlist-labels-2). The file becomes 0600 and its directory 0700. On
+// Windows os.Chmod only toggles the read-only bit, which is harmless here.
+func writeDeviceLocalFile(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(dir, 0o700)
 }
 
 // SetRecoveryLabel records (or replaces) the label for one recovery entry, keyed
@@ -120,6 +137,27 @@ func SetRecoveryLabel(entryID string, label RecoveryKeyLabel) error {
 		return err
 	}
 	s.Labels[entryID] = label
+	return SaveLabels(s)
+}
+
+// DeleteRecoveryLabel removes the device-local label record for one recovery
+// entry, if present. The CLI and GUI revoke paths call it so a revoked key's
+// hostname/date do not linger in the store indefinitely (review wordlist-labels-3).
+// A missing record is not an error; an empty ID is a no-op; the store is only
+// rewritten when a record was actually removed.
+func DeleteRecoveryLabel(entryID string) error {
+	entryID = strings.TrimSpace(entryID)
+	if entryID == "" {
+		return nil
+	}
+	s, err := LoadLabels()
+	if err != nil {
+		return err
+	}
+	if _, ok := s.Labels[entryID]; !ok {
+		return nil
+	}
+	delete(s.Labels, entryID)
 	return SaveLabels(s)
 }
 
@@ -197,6 +235,31 @@ func LabelledRecoveryKeys(entryIDs []string) ([]RecoveryKeyView, error) {
 	s, err := LoadLabels()
 	if err != nil {
 		return nil, err
+	}
+	// Prune orphaned records: a stored label whose entry ID is not among the
+	// current on-disk entries belongs to a key that has since been revoked, so its
+	// hostname/date must not persist (review wordlist-labels-3). Guard on a
+	// NON-EMPTY current set: an empty entryIDs is ambiguous (a closed or not-yet-
+	// loaded vault, not necessarily a zero-key one), and the targeted
+	// DeleteRecoveryLabel from the revoke path already cleans a last-key revoke — so
+	// an empty set must never be read as "revoke every label".
+	if len(entryIDs) > 0 {
+		current := make(map[string]struct{}, len(entryIDs))
+		for _, id := range entryIDs {
+			current[id] = struct{}{}
+		}
+		pruned := false
+		for id := range s.Labels {
+			if _, keep := current[id]; !keep {
+				delete(s.Labels, id)
+				pruned = true
+			}
+		}
+		if pruned {
+			if err := SaveLabels(s); err != nil {
+				return nil, err
+			}
+		}
 	}
 	out := make([]RecoveryKeyView, 0, len(entryIDs))
 	for i, id := range entryIDs {

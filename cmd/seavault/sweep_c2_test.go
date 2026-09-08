@@ -4,6 +4,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -14,6 +16,15 @@ import (
 	"github.com/alexdimarco/open-seavault-rclone/internal/setup"
 	"github.com/alexdimarco/open-seavault-rclone/internal/vault"
 )
+
+// redactSecret renders secret-bearing output for a FAILURE MESSAGE without
+// disclosing it: its length plus a short SHA-256 prefix. `recovery generate`
+// stdout carries the freshly minted 24 words + compact base32, so it must never
+// be echoed verbatim into a test log (testing discipline).
+func redactSecret(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("len=%d sha256=%s", len(s), hex.EncodeToString(sum[:])[:12])
+}
 
 // fastVault creates a real vault at dir with the fast test KDF (real crypto, no
 // stub) and returns the password used.
@@ -172,11 +183,11 @@ func TestRecoveryGenerateWordsCompactAndTypedError(t *testing.T) {
 
 	// The up-front password note.
 	if !strings.Contains(out, "you'll be asked for the vault password") {
-		t.Fatalf("recovery generate must print the password note; got %q", out)
+		t.Fatalf("recovery generate must print the password note; got redacted stdout {%s}", redactSecret(out))
 	}
 	// The compact base32 form label.
 	if !strings.Contains(out, "Compact form (base32)") {
-		t.Fatalf("recovery generate must show the compact form; got %q", out)
+		t.Fatalf("recovery generate must show the compact form; got redacted stdout {%s}", redactSecret(out))
 	}
 	// 24 numbered word lines.
 	wordLines := 0
@@ -196,7 +207,7 @@ func TestRecoveryGenerateWordsCompactAndTypedError(t *testing.T) {
 		}
 	}
 	if wordLines != 24 {
-		t.Fatalf("recovery generate must show 24 numbered words; got %d in:\n%s", wordLines, out)
+		t.Fatalf("recovery generate must show 24 numbered words; got %d in redacted stdout {%s}", wordLines, redactSecret(out))
 	}
 
 	// Nothing was committed (a mismatch aborts).
