@@ -4,7 +4,9 @@
 package main
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -20,7 +22,14 @@ import (
 // It is a repository-integrity check, not a unit test, so it needs git and the
 // base ref; when neither `main` nor `origin/main` resolves (a detached/shallow
 // checkout that dropped the base), it SKIPS rather than fails spuriously — a
-// visible skip, never a green vacuous pass.
+// visible skip, never a green vacuous pass. It likewise SKIPS when HEAD is the
+// base itself (running on main after a merge): there is no branch diff to guard,
+// and failing there would fail every merge by construction.
+//
+// Mechanical edits to a pre-existing test that a human reviewer has accepted
+// (e.g. call sites updated because a function under test gained parameters)
+// are listed in testdata/accepted-test-edits.txt and exempted; adding a line
+// there is itself a reviewed diff.
 func TestZ1NoPreU2TestEditedOrDeleted(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available; cannot run the Z1 diff guard")
@@ -41,12 +50,16 @@ func TestZ1NoPreU2TestEditedOrDeleted(t *testing.T) {
 	if base == "" {
 		t.Skip("could not resolve the branch base (main / origin/main); cannot run the Z1 diff guard")
 	}
+	if head, err := gitOutput(t, root, "rev-parse", "HEAD"); err == nil && strings.TrimSpace(head) == base {
+		t.Skip("HEAD is the base ref itself (on main); there is no branch diff to guard")
+	}
 
 	// Whole working tree (committed branch changes + uncommitted edits) vs base.
 	diff, err := gitOutput(t, root, "diff", "--name-status", "-M", base)
 	if err != nil {
 		t.Fatalf("git diff against base %s failed: %v", base, err)
 	}
+	diff = z1ApplyExemptions(t, root, diff)
 	lines := strings.Split(strings.TrimSpace(diff), "\n")
 	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
 		t.Fatalf("the branch shows no changes against its base %s; the guard would be vacuous", base)
@@ -99,4 +112,34 @@ func gitOutput(t *testing.T, dir string, args ...string) (string, error) {
 	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// z1ApplyExemptions drops --name-status rows whose path is listed in
+// cmd/seavault/testdata/accepted-test-edits.txt ("<path><TAB><reason>", one per
+// line, # comments), logging each exemption so a reviewer sees exactly what was
+// waived. A missing or empty file exempts nothing.
+func z1ApplyExemptions(t *testing.T, root, diff string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(root, "cmd", "seavault", "testdata", "accepted-test-edits.txt"))
+	if err != nil {
+		return diff
+	}
+	exempt := map[string]bool{}
+	for _, ln := range strings.Split(string(raw), "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		exempt[strings.Fields(ln)[0]] = true
+	}
+	var keep []string
+	for _, ln := range strings.Split(diff, "\n") {
+		fields := strings.Split(ln, "\t")
+		if ln != "" && exempt[fields[len(fields)-1]] {
+			t.Logf("Z1: exempting reviewer-accepted edit to %s", fields[len(fields)-1])
+			continue
+		}
+		keep = append(keep, ln)
+	}
+	return strings.Join(keep, "\n")
 }
