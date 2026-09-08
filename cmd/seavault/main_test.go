@@ -25,18 +25,23 @@ import (
 // TestEnsureLoopbackBind verifies the GUI/WebDAV listeners (which serve
 // decrypted content) refuse non-loopback binds unless explicitly overridden.
 func TestEnsureLoopbackBind(t *testing.T) {
+	// U3 note: the guard signature became ensureLoopbackBind(addr, insecureBind,
+	// tlsOn, selfSigned) (design §3; predesign review integration-seams-3). These
+	// original rows are preserved verbatim in meaning by threading the no-TLS,
+	// not-self-signed case (tlsOn=false, selfSigned=false); the full TLS-aware
+	// table is TestEnsureLoopbackBindGuardTable (row P2).
 	allowed := []string{"127.0.0.1:8787", "localhost:8765", "[::1]:8787", "127.0.0.1:0"}
 	for _, a := range allowed {
-		if err := ensureLoopbackBind(a, false); err != nil {
+		if _, err := ensureLoopbackBind(a, false, false, false); err != nil {
 			t.Fatalf("expected %q to be allowed: %v", a, err)
 		}
 	}
 	rejected := []string{"0.0.0.0:8787", ":8787", "192.168.1.5:8787", "example.com:8787"}
 	for _, a := range rejected {
-		if err := ensureLoopbackBind(a, false); err == nil {
+		if _, err := ensureLoopbackBind(a, false, false, false); err == nil {
 			t.Fatalf("expected %q to be rejected", a)
 		}
-		if err := ensureLoopbackBind(a, true); err != nil {
+		if _, err := ensureLoopbackBind(a, true, false, false); err != nil {
 			t.Fatalf("expected %q to be allowed with --insecure-bind override: %v", a, err)
 		}
 	}

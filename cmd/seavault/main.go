@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -36,6 +37,7 @@ import (
 	"github.com/alexdimarco/open-seavault-rclone/internal/rsyncput"
 	"github.com/alexdimarco/open-seavault-rclone/internal/setup"
 	"github.com/alexdimarco/open-seavault-rclone/internal/sshkeys"
+	"github.com/alexdimarco/open-seavault-rclone/internal/tlsconfig"
 	"github.com/alexdimarco/open-seavault-rclone/internal/transport"
 	localtransport "github.com/alexdimarco/open-seavault-rclone/internal/transport/local"
 	rclonetransport "github.com/alexdimarco/open-seavault-rclone/internal/transport/rclone"
@@ -1254,29 +1256,74 @@ func cmdStats(args []string) error {
 	return nil
 }
 
-// ensureLoopbackBind refuses a non-loopback listen address for endpoints that
-// serve DECRYPTED vault content (the GUI and the WebDAV endpoint). Exposing
-// those off localhost would let the network reach plaintext, so a non-loopback
-// bind requires an explicit --insecure-bind override.
-func ensureLoopbackBind(addr string, allowNonLoopback bool) error {
-	if allowNonLoopback {
-		return nil
-	}
+// hostOf returns the trimmed host portion of a listen address, tolerating an
+// address that carries no port (net.SplitHostPort fails, so addr is the host).
+func hostOf(addr string) string {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
 	}
+	return strings.TrimSpace(host)
+}
+
+// isLoopbackOrLocalhost reports whether host names this machine's loopback
+// interface: the literal "localhost" (case-insensitive) or any IP that
+// net.ParseIP considers loopback (127.0.0.0/8, ::1). An empty host is NOT
+// loopback — it binds every interface.
+func isLoopbackOrLocalhost(host string) bool {
 	host = strings.TrimSpace(host)
 	if host == "" {
-		return fmt.Errorf("refusing to bind %q: an empty host listens on all interfaces and would expose decrypted content; use 127.0.0.1 or pass --insecure-bind", addr)
+		return false
 	}
 	if strings.EqualFold(host, "localhost") {
-		return nil
+		return true
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		return nil
+		return true
 	}
-	return fmt.Errorf("refusing to bind %q: %q is not a loopback address, and this endpoint serves DECRYPTED content. Keep it on 127.0.0.1/localhost, or pass --insecure-bind to override (not recommended)", addr, host)
+	return false
+}
+
+// selfSignedTrustWarning is the warning surfaced when a non-loopback bind is
+// admitted on the strength of a self-signed certificate: clients cannot verify
+// it, and Windows' WebDAV client refuses it outright.
+const selfSignedTrustWarning = "clients will show a trust prompt; Windows WebDAV will refuse this certificate"
+
+// everyInterfaceWarning is surfaced when the bind host is empty, so the operator
+// knows the listener is reachable on every interface, not just one.
+const everyInterfaceWarning = "listening on every interface"
+
+// ensureLoopbackBind decides whether the GUI / WebDAV listener (which serves
+// DECRYPTED vault content) may bind addr, and returns any advisory warnings for
+// an admitted non-loopback bind. Loopback and "localhost" are always fine. A
+// non-loopback or empty host is admitted when tlsOn (the wire is encrypted) —
+// with the self-signed trust warning when selfSigned, and the every-interface
+// warning when the host is empty. Without TLS it is refused exactly as before
+// unless insecureBind overrides. Plaintext therefore never reaches a
+// non-loopback address without the explicit override (I-T1); the guard relaxes
+// only for a TLS listener.
+func ensureLoopbackBind(addr string, insecureBind, tlsOn, selfSigned bool) ([]string, error) {
+	host := hostOf(addr)
+	if isLoopbackOrLocalhost(host) {
+		return nil, nil
+	}
+	if tlsOn {
+		var warnings []string
+		if selfSigned {
+			warnings = append(warnings, selfSignedTrustWarning)
+		}
+		if host == "" {
+			warnings = append(warnings, everyInterfaceWarning)
+		}
+		return warnings, nil
+	}
+	if insecureBind {
+		return nil, nil
+	}
+	if host == "" {
+		return nil, fmt.Errorf("refusing to bind %q: an empty host listens on all interfaces and would expose decrypted content; use 127.0.0.1 or pass --insecure-bind", addr)
+	}
+	return nil, fmt.Errorf("refusing to bind %q: %q is not a loopback address, and this endpoint serves DECRYPTED content. Keep it on 127.0.0.1/localhost, or pass --insecure-bind to override (not recommended)", addr, host)
 }
 
 // repeatableString collects a repeatable string flag (e.g. --allow-host NAME).
@@ -1343,8 +1390,11 @@ func resolveServeCredentials(user, passwordFile, envPassword string, quiet bool)
 // address: the bind host is added only when it is a real non-loopback,
 // non-unspecified name or IP (loopback and localhost are always accepted, and an
 // unspecified address is never added), followed by the explicit --allow-host
-// values. See.
-func allowedHostsForBind(addr string, extra []string) []string {
+// values, followed by the exact names listed in the shared tls.allowHosts
+// config (I-T6): a certificate SAN the wizard recorded is admitted by the
+// rebinding guard without a second --allow-host flag. Matching stays exact — no
+// wildcard expansion — so the DNS-rebinding guard is not weakened. See.
+func allowedHostsForBind(addr string, extra, tlsAllowHosts []string) []string {
 	host := addr
 	if h, _, err := net.SplitHostPort(addr); err == nil {
 		host = h
@@ -1361,7 +1411,137 @@ func allowedHostsForBind(addr string, extra []string) []string {
 		}
 	}
 	hosts = append(hosts, extra...)
+	hosts = append(hosts, tlsAllowHosts...)
 	return hosts
+}
+
+// firstConfirmedName returns the name a cross-device launch link should use for
+// a non-loopback TLS bind: the first --allow-host value the operator confirmed,
+// or, failing that, the certificate's first DNS SAN (an IP SAN is skipped — a
+// launch link wants a name). It returns "" when neither is available.
+func firstConfirmedName(allowHosts, certNames []string) string {
+	for _, h := range allowHosts {
+		if h = strings.TrimSpace(h); h != "" {
+			return h
+		}
+	}
+	for _, n := range certNames {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			continue
+		}
+		if net.ParseIP(n) != nil {
+			continue // an IP SAN is not a launch-link name
+		}
+		return n
+	}
+	return ""
+}
+
+// launchAddrForBind returns the host:port the printed launch link and login
+// hint should carry (C1). A loopback bind keeps its own address (127.0.0.1). A
+// non-loopback TLS bind swaps the bind host for the first confirmed --allow-host
+// name (or the certificate's first DNS SAN), so the URL a person opens from
+// another device is a name the certificate is valid for; when no such name is
+// available it falls back to the bind address.
+func launchAddrForBind(addr string, tlsOn bool, allowHosts, certNames []string) string {
+	host := hostOf(addr)
+	if !tlsOn || isLoopbackOrLocalhost(host) {
+		return addr
+	}
+	name := firstConfirmedName(allowHosts, certNames)
+	if name == "" {
+		return addr
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return name
+	}
+	return net.JoinHostPort(name, port)
+}
+
+// serveOn serves srv.Handler on ln, wrapping ln in a TLS listener built from the
+// resolved certificate holder when a TLS source is present, and otherwise
+// serving plaintext. It is the single serve-decision seam shared by gui and
+// serve: when resolved carries a TLS config there is no code path that yields a
+// plaintext listener (C2, C10), so a resolved TLS source can never fall through
+// to plaintext on the wire (I-T1). srv.Serve returns http.ErrServerClosed on a
+// graceful Shutdown, exactly as ListenAndServe/ListenAndServeTLS would.
+func serveOn(ln net.Listener, srv *http.Server, resolved *tlsconfig.Resolved) error {
+	if resolved != nil && resolved.TLS != nil {
+		srv.TLSConfig = resolved.TLS
+		return srv.Serve(tls.NewListener(ln, resolved.TLS))
+	}
+	return srv.Serve(ln)
+}
+
+// resolveServeTLS resolves the TLS state for `seavault serve`. Unlike gui, serve
+// has no self-signed floor and never auto-enables TLS from config: TLS is on
+// ONLY when the operator passes --tls-cert/--tls-key or --tls. When --tls is
+// passed but nothing is configured (an empty tls section) it returns a typed
+// error naming the remedy rather than silently serving plaintext. When no TLS
+// flag is given it returns (nil, nil): plaintext loopback exactly as today.
+func resolveServeTLS(certFlag, keyFlag string, useTLS bool, cfg appconfig.Config, bindHost string) (*tlsconfig.Resolved, error) {
+	if strings.TrimSpace(certFlag) == "" && strings.TrimSpace(keyFlag) == "" && !useTLS {
+		return nil, nil
+	}
+	resolved, err := tlsconfig.Resolve(tlsconfig.Options{
+		CertFlag: certFlag,
+		KeyFlag:  keyFlag,
+		Cfg:      cfg,
+		Purpose:  tlsconfig.PurposeServe,
+		BindHost: bindHost,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resolved.Source == tlsconfig.SourceNone {
+		return nil, fmt.Errorf("--tls was requested but no certificate is configured: set tls.certFile/tls.keyFile (run `seavault tls setup`) or pass --tls-cert and --tls-key")
+	}
+	return resolved, nil
+}
+
+// logTLSStartup prints the resolved certificate's source, names, and expiry at
+// listener startup, and warns when a certificate name is absent from the Host
+// allowlist (I-T6) so a name that will 403 at the rebinding guard is visible
+// before a client hits it. It never prints key material. resolved==none prints
+// nothing (plaintext listener).
+func logTLSStartup(out io.Writer, purpose string, resolved *tlsconfig.Resolved, allowedHosts []string) {
+	if resolved == nil || resolved.Source == tlsconfig.SourceNone {
+		return
+	}
+	names := "(none)"
+	if len(resolved.Names) > 0 {
+		names = strings.Join(resolved.Names, ", ")
+	}
+	fmt.Fprintf(out, "%s TLS: source=%s names=%s expires=%s\n",
+		purpose, resolved.Source, names, resolved.NotAfter.UTC().Format(time.RFC3339))
+	if resolved.SelfSigned {
+		fmt.Fprintf(out, "%s TLS: %s\n", purpose, selfSignedTrustWarning)
+	}
+	for _, w := range resolved.Warnings {
+		fmt.Fprintf(out, "%s TLS: %s\n", purpose, w)
+	}
+	for _, n := range resolved.Names {
+		if net.ParseIP(strings.TrimSpace(n)) != nil {
+			continue // an IP SAN is checked by the guard's loopback/allow rules
+		}
+		if !hostInAllowlist(n, allowedHosts) {
+			fmt.Fprintf(out, "%s TLS: warning: certificate name %q is not in the Host allowlist; requests with that Host will be refused — add it with --allow-host or tls.allowHosts\n", purpose, n)
+		}
+	}
+}
+
+// hostInAllowlist reports whether name matches an allowlist entry exactly
+// (case-insensitive). No wildcard expansion: the exact-match rebinding guard is
+// authoritative (C5, I-T6).
+func hostInAllowlist(name string, allowedHosts []string) bool {
+	for _, h := range allowedHosts {
+		if strings.EqualFold(strings.TrimSpace(h), strings.TrimSpace(name)) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildLoopbackServer constructs the http.Server used by `serve` and `gui` with
@@ -1439,16 +1619,33 @@ func cmdServe(args []string) error {
 	passwordFile := fs.String("password-file", "", "read the WebDAV Basic-auth password from this file (trailing newline trimmed, must be non-empty)")
 	quietCredentials := fs.Bool("quiet-credentials", false, "do not print the WebDAV password; requires --password-file or SEAVAULT_SERVE_PASSWORD")
 	dropOSJunk := fs.Bool("drop-os-junk", false, "silently discard OS junk files (.DS_Store, Thumbs.db, ...) instead of storing them")
+	tlsCert := fs.String("tls-cert", "", "serve WebDAV over HTTPS using this PEM certificate chain (leaf first); requires --tls-key")
+	tlsKey := fs.String("tls-key", "", "the PEM private key matching --tls-cert")
+	tlsUse := fs.Bool("tls", false, "serve WebDAV over HTTPS using the configured tls.certFile/tls.keyFile section")
 	var allowHost repeatableString
 	fs.Var(&allowHost, "allow-host", "additional Host header value to accept besides loopback/localhost (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: seavault serve [--addr 127.0.0.1:8765] [--user seavault] [--password-file PATH] [--quiet-credentials] [--allow-host NAME] [--drop-os-junk] [--no-keychain] [--insecure-bind] VAULT_DIR_OR_PROFILE")
+		return fmt.Errorf("usage: seavault serve [--addr 127.0.0.1:8765] [--user seavault] [--password-file PATH] [--quiet-credentials] [--allow-host NAME] [--tls-cert PATH --tls-key PATH | --tls] [--drop-os-junk] [--no-keychain] [--insecure-bind] VAULT_DIR_OR_PROFILE")
 	}
-	if err := ensureLoopbackBind(*addr, *insecureBind); err != nil {
+	cfg, err := appconfig.Load()
+	if err != nil {
 		return err
+	}
+	resolved, err := resolveServeTLS(*tlsCert, *tlsKey, *tlsUse, cfg, hostOf(*addr))
+	if err != nil {
+		return err
+	}
+	tlsOn := resolved != nil && resolved.Source != tlsconfig.SourceNone
+	selfSigned := resolved != nil && resolved.SelfSigned
+	warnings, err := ensureLoopbackBind(*addr, *insecureBind, tlsOn, selfSigned)
+	if err != nil {
+		return err
+	}
+	for _, w := range warnings {
+		fmt.Printf("warning: %s\n", w)
 	}
 	serveEnvPassword := os.Getenv("SEAVAULT_SERVE_PASSWORD")
 	credUser, credPassword, printCredentials, err := resolveServeCredentials(*user, *passwordFile, serveEnvPassword, *quietCredentials)
@@ -1468,21 +1665,30 @@ func cmdServe(args []string) error {
 	}
 	dav := localdav.New(v)
 	dav.Credentials = &localdav.BasicCredentials{User: credUser, Password: credPassword}
-	dav.AllowedHosts = allowedHostsForBind(*addr, allowHost)
+	dav.AllowedHosts = allowedHostsForBind(*addr, allowHost, cfg.TLS.AllowHosts)
 	dav.DropOSJunk = *dropOSJunk
-	fmt.Printf("serving local WebDAV-compatible vault at http://%s/\n", *addr)
+	scheme := "http"
+	if tlsOn {
+		scheme = "https"
+	}
+	fmt.Printf("serving local WebDAV-compatible vault at %s://%s/\n", scheme, *addr)
 	fmt.Println("bind is local by default; do not expose this listener on an untrusted network")
+	logTLSStartup(os.Stdout, "serve", resolved, dav.AllowedHosts)
 	if printCredentials {
 		fmt.Printf("WebDAV credentials: %s / %s\n", credUser, credPassword)
-		fmt.Printf("URL: http://%s:%s@%s/\n", credUser, credPassword, *addr)
+		fmt.Printf("URL: %s://%s:%s@%s/\n", scheme, credUser, credPassword, *addr)
 		if generatedPassword {
 			if fi, statErr := os.Stdout.Stat(); statErr == nil && stdoutLooksRedirected(fi) {
 				fmt.Println("warning: this credential is being written to a non-terminal stdout (log/redirect); prefer --password-file with --quiet-credentials for daemons")
 			}
 		}
 	}
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		return listenErrorHint(*addr, err)
+	}
 	srv := buildLoopbackServer(*addr, dav)
-	return listenErrorHint(*addr, srv.ListenAndServe())
+	return listenErrorHint(*addr, serveOn(ln, srv, resolved))
 }
 
 const guiAuthAccount = "seavault-gui-http-auth"
@@ -1576,6 +1782,8 @@ func cmdGUI(args []string) error {
 	noOpen := fs.Bool("no-open", false, "do not open the browser automatically")
 	exitOnBrowserClose := fs.Bool("exit-on-browser-close", true, "best-effort: stop the GUI after the browser page stops sending heartbeats; set --exit-on-browser-close=false to keep the server running")
 	insecureBind := fs.Bool("insecure-bind", false, "allow binding to a non-loopback address (exposes decrypted content; not recommended)")
+	tlsCert := fs.String("tls-cert", "", "serve the GUI over HTTPS using this PEM certificate chain (leaf first); requires --tls-key")
+	tlsKey := fs.String("tls-key", "", "the PEM private key matching --tls-cert")
 	var allowHost repeatableString
 	fs.Var(&allowHost, "allow-host", "additional Host header value to accept besides loopback/localhost (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -1583,10 +1791,7 @@ func cmdGUI(args []string) error {
 	}
 	initial := ""
 	if fs.NArg() > 1 {
-		return fmt.Errorf("usage: seavault gui [--addr 127.0.0.1:8787] [--no-open] [--allow-host NAME] [--insecure-bind] [VAULT_DIR_OR_PROFILE]")
-	}
-	if err := ensureLoopbackBind(*addr, *insecureBind); err != nil {
-		return err
+		return fmt.Errorf("usage: seavault gui [--addr 127.0.0.1:8787] [--no-open] [--allow-host NAME] [--tls-cert PATH --tls-key PATH] [--insecure-bind] [VAULT_DIR_OR_PROFILE]")
 	}
 	if fs.NArg() == 1 {
 		initial = fs.Arg(0)
@@ -1601,49 +1806,75 @@ func cmdGUI(args []string) error {
 	if err != nil {
 		return err
 	}
-	if strings.EqualFold(cfg.GUI.Protocol, "https") {
-		host := *addr
-		if h, _, splitErr := net.SplitHostPort(*addr); splitErr == nil {
-			host = h
-		}
-		cfg, err = appconfig.EnsureSelfSignedCertificate(cfg, host)
-		if err != nil {
-			return err
-		}
-		if saveErr := appconfig.Save(cfg); saveErr != nil {
-			return saveErr
-		}
+	// Resolve the serving certificate through the precedence chain (flags → the
+	// shared tls section → the legacy gui.certFile → the self-signed floor when
+	// gui.protocol is https → none). A configured full-but-mismatched pair fails
+	// here with ErrKeyMismatch and binds nothing (C13).
+	resolved, err := tlsconfig.Resolve(tlsconfig.Options{
+		CertFlag: *tlsCert,
+		KeyFlag:  *tlsKey,
+		Cfg:      cfg,
+		Purpose:  tlsconfig.PurposeGUI,
+		BindHost: hostOf(*addr),
+	})
+	if err != nil {
+		return err
+	}
+	tlsOn := resolved.Source != tlsconfig.SourceNone
+	warnings, err := ensureLoopbackBind(*addr, *insecureBind, tlsOn, resolved.SelfSigned)
+	if err != nil {
+		return err
+	}
+	for _, w := range warnings {
+		fmt.Printf("warning: %s\n", w)
+	}
+	// Resolved state drives the server (C2): when a certificate resolved, the
+	// in-memory protocol is https BEFORE the webui server is constructed, so the
+	// session-cookie Secure attribute follows the resolved state, not the
+	// persisted gui.protocol. There is no plaintext code path once tlsOn (C10).
+	if tlsOn {
+		cfg.GUI.Protocol = "https"
 	}
 	s, err := webui.NewWithConfig(initial, cfg)
 	if err != nil {
 		return err
 	}
-	s.AllowedHosts = allowedHostsForBind(*addr, allowHost)
+	s.TLSActive = tlsOn
+	s.AllowedHosts = allowedHostsForBind(*addr, allowHost, cfg.TLS.AllowHosts)
 	// Pick up changes made to.seavault by an external sync client (e.g. the
 	// Nextcloud desktop client) underneath this long-lived GUI server.
 	stopWatcher := s.StartSyncWatcher(2 * time.Second)
 	defer stopWatcher()
 	scheme := "http"
-	if strings.EqualFold(cfg.GUI.Protocol, "https") {
+	if tlsOn {
 		scheme = "https"
 	}
-	launchURL := s.LaunchURL(scheme + "://" + *addr)
+	// Launch-link identity (C1): a non-loopback TLS bind advertises the confirmed
+	// --allow-host name (or the certificate's first DNS SAN), so the link a person
+	// opens from another device is a name the certificate is valid for; loopback
+	// keeps its own address.
+	launchAddr := launchAddrForBind(*addr, tlsOn, allowHost, resolved.Names)
+	launchURL := s.LaunchURL(scheme + "://" + launchAddr)
+	if scheme == "https" {
+		s.LoginHintURL = scheme + "://" + launchAddr + "/?launch=…"
+	}
 	fmt.Printf("serving local GUI at %s\n", launchURL)
-	fmt.Println("open this exact launch link; a bare " + scheme + "://" + *addr + "/ no longer shows the app, and the launch secret rotates each launch, so bookmarks break by design")
+	fmt.Println("open this exact launch link; a bare " + scheme + "://" + launchAddr + "/ no longer shows the app, and the launch secret rotates each launch, so bookmarks break by design")
 	fmt.Println("bind is local by default; do not expose this listener on an untrusted network")
+	logTLSStartup(os.Stdout, "gui", resolved, s.AllowedHosts)
 	if *exitOnBrowserClose {
 		s.EnableBrowserCloseShutdown(10 * time.Second)
 		fmt.Println("exit-on-browser-close enabled; the GUI will stop shortly after the browser page closes")
 	}
 	printLaunchGuidance(os.Stdout, os.Stderr, launchURL, !*noOpen, openBrowser)
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		return listenErrorHint(*addr, err)
+	}
 	srv := buildLoopbackServer(*addr, s)
 	serveErr := make(chan error, 1)
 	go func() {
-		if scheme == "https" {
-			serveErr <- srv.ListenAndServeTLS(cfg.GUI.CertFile, cfg.GUI.KeyFile)
-			return
-		}
-		serveErr <- srv.ListenAndServe()
+		serveErr <- serveOn(ln, srv, resolved)
 	}()
 	select {
 	case err := <-serveErr:
