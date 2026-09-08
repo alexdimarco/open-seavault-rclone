@@ -21,15 +21,15 @@ func TestRecoveryPhraseEncoding(t *testing.T) {
 	}
 	// 256 bits of base32 with no padding is 52 characters — the wrap secret.
 	if len(secret) != 52 {
-		t.Fatalf("a 256-bit base32 secret must be 52 chars, got %d (%q)", len(secret), secret)
+		t.Fatalf("a 256-bit base32 secret must be 52 chars, got %d", len(secret))
 	}
 	// The canonical form of the displayed phrase IS the wrap secret.
 	if canonicalRecovery(phrase) != secret {
-		t.Fatalf("canonicalRecovery(phrase)=%q must equal the wrap secret %q", canonicalRecovery(phrase), secret)
+		t.Fatalf("canonicalRecovery(phrase) must equal the wrap secret (lengths %d vs %d)", len(canonicalRecovery(phrase)), len(secret))
 	}
 	// The grouped phrase contains separators (it is grouped for legibility).
 	if !strings.Contains(phrase, "-") {
-		t.Fatalf("the display phrase must be grouped with separators, got %q", phrase)
+		t.Fatalf("the display phrase must be grouped with separators (len %d, %d groups)", len(phrase), strings.Count(phrase, "-")+1)
 	}
 
 	// Read-back tolerance: assorted regroupings all match the minted phrase.
@@ -48,7 +48,7 @@ func TestRecoveryPhraseEncoding(t *testing.T) {
 	}
 	for _, tc := range variants {
 		if !RecoveryPhraseMatches(phrase, tc.input) {
-			t.Fatalf("read-back variant %q (%q) must match the minted phrase", tc.name, tc.input)
+			t.Fatalf("read-back variant %q (input len %d) must match the minted phrase", tc.name, len(tc.input))
 		}
 	}
 

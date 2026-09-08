@@ -552,7 +552,7 @@ func TestRunInteractiveRecoverySaveToFileBranch(t *testing.T) {
 		t.Fatalf("the save-to-file branch must write the phrase file: %v", rerr)
 	}
 	if !strings.Contains(string(data), pr.lastPhrase) {
-		t.Fatalf("the saved file must contain the shown phrase; file=%q phrase=%q", string(data), pr.lastPhrase)
+		t.Fatalf("the saved file must contain the shown phrase (file len %d, phrase len %d)", len(data), len(pr.lastPhrase))
 	}
 
 	// C6: the plaintext phrase on disk must be owner-only (0600). Permission
