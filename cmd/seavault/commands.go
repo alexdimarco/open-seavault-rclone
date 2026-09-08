@@ -126,7 +126,12 @@ func dispatchGroup(group string, exec func([]string) error, args []string) error
 	row, ok := groupCommand(group, sub)
 	if !ok {
 		renderGroupHelp(os.Stderr, group)
-		return fmt.Errorf("unknown %s subcommand %q; run \"seavault %s --help\"", group, sub, group)
+		// An unknown subcommand is a usage error and exits 2, the SAME code an
+		// unknown top-level command yields (CLI-1): the two were inconsistent
+		// before (top-level 2, subcommand 1). exitCodeError carries the code and
+		// run() does not reprint it, so the reason line is emitted here.
+		fmt.Fprintf(os.Stderr, "error: unknown %s subcommand %q; run \"seavault %s --help\"\n", group, sub, group)
+		return &exitCodeError{code: 2, msg: fmt.Sprintf("unknown %s subcommand %q", group, sub)}
 	}
 	if len(args) > 1 && isHelpFlag(args[1]) {
 		renderCommandHelp(os.Stdout, row)
@@ -314,7 +319,7 @@ func init() {
 		// keychain subcommands.
 		{group: "keychain", name: "store", synopsis: "Store a vault password in the OS keychain.", usage: "seavault keychain store VAULT_DIR_OR_PROFILE"},
 		{group: "keychain", name: "status", synopsis: "Report whether a keychain entry exists for a vault.", usage: "seavault keychain status VAULT_DIR_OR_PROFILE"},
-		{group: "keychain", name: "delete", aliases: []string{"remove", "rm"}, synopsis: "Delete a vault's OS keychain entry.", usage: "seavault keychain delete VAULT_DIR_OR_PROFILE"},
+		{group: "keychain", name: "delete", aliases: []string{"remove", "rm"}, synopsis: "Delete a vault's OS keychain entry.", usage: "seavault keychain delete [--debug] VAULT_DIR_OR_PROFILE"},
 
 		// rclone subcommands (version and path were omitted by older usage() — C3).
 		{group: "rclone", name: "status", synopsis: "Report the managed rclone runtime status.", usage: "seavault rclone status [--check-update]"},

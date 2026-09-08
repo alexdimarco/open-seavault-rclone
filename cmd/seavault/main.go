@@ -591,6 +591,15 @@ func cmdInit(args []string) error {
 	if err := userpath.ValidateCreatableVaultPath(vaultPath); err != nil {
 		return err
 	}
+	// Apply the same interrupted-setup leftovers classification `setup` enforces
+	// (CLI 4): a target that is non-empty but holds no vault.json is leftovers from
+	// an interrupted run, and `init` names the remove-and-retry remedy instead of
+	// letting CreateWithOptions fail with a lower-level message. Only the leftovers
+	// case is intercepted here; an EXISTING vault and an empty/absent directory
+	// fall through to the create path exactly as before.
+	if verr := (setup.Plan{VaultDir: vaultPath, Cloud: setup.LocalOnly{}}).Validate(); errors.Is(verr, setup.ErrVaultDirLeftovers) {
+		return annotateSetupError(verr)
+	}
 	params := vault.ChunkParams{MinSize: *min, AvgSize: *avg, MaxSize: *max}
 	var kdfCfg vault.KDFConfig
 	switch strings.ToLower(strings.TrimSpace(*kdf)) {
@@ -2009,7 +2018,11 @@ func cmdAppConfig(args []string) error {
 	case "reset-gui-login":
 		return resetLocalAppConfiguration(false)
 	default:
-		return fmt.Errorf("usage: seavault app-config path | reset | reset-gui-login")
+		// An unknown sub-action is a usage error and exits 2, matching the group
+		// dispatchers and the unknown top-level command (CLI-1). exitCodeError
+		// carries the code; run() does not reprint it, so print the usage here.
+		fmt.Fprintln(os.Stderr, "usage: seavault app-config path | reset | reset-gui-login")
+		return &exitCodeError{code: 2, msg: fmt.Sprintf("unknown app-config subcommand %q", args[0])}
 	}
 }
 
@@ -2673,6 +2686,33 @@ func keychainStatusLine(serviceReachable bool, getErr error) (line string, isErr
 	return getErr.Error(), true
 }
 
+// keychainDeleteReport composes what `seavault keychain delete` reports (DOCS-1),
+// given the pre-delete lookup result (getErr; nil means an entry was found),
+// whether the OS keychain service is reachable, and the delete outcome (delErr,
+// only meaningful when an entry was found). It returns the plain operator line,
+// whether that line is an error, and the raw backend detail to show ONLY under
+// --debug. The plain line NEVER contains backend error text (the pre-U4 delete
+// dumped a raw backend error when no entry existed), and no field ever carries a
+// password. A missing entry with the service reachable is reported plainly and is
+// NOT an error, so a delete that finds nothing to remove exits 0.
+func keychainDeleteReport(vaultLabel string, getErr error, serviceReachable bool, delErr error) (line string, isErr bool, rawDetail string) {
+	if getErr != nil {
+		if serviceReachable {
+			// The service answered and there is simply no entry: nothing to delete.
+			return fmt.Sprintf("no keychain entry for %s", vaultLabel), false, ""
+		}
+		// The service could not be reached, so we cannot tell entry-or-not: a real
+		// failure. The plain line names the situation; the raw backend error is the
+		// --debug detail.
+		return "could not reach the OS keychain to delete the entry", true, getErr.Error()
+	}
+	if delErr != nil {
+		// An entry existed but the delete itself failed.
+		return "could not delete the OS keychain entry", true, delErr.Error()
+	}
+	return "OS keychain entry deleted", false, ""
+}
+
 // cmdPassword implements `seavault password change`: rotate
 // the vault password by rewrapping the same master||index bundle (no chunk or
 // manifest rewrite) and refreshing the OS keychain entry when one exists.
@@ -3281,10 +3321,16 @@ func execKeychain(args []string) error {
 		fmt.Println(line)
 		return nil
 	case "delete", "remove", "rm":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: seavault keychain delete VAULT_DIR_OR_PROFILE")
+		fs := flag.NewFlagSet("keychain delete", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		debug := fs.Bool("debug", false, "print the raw keychain backend error the plain summary omits")
+		if err := fs.Parse(args[1:]); err != nil {
+			return fmt.Errorf("usage: seavault keychain delete [--debug] VAULT_DIR_OR_PROFILE")
 		}
-		vaultPath, err := resolveVaultArg(args[1])
+		if fs.NArg() != 1 {
+			return fmt.Errorf("usage: seavault keychain delete [--debug] VAULT_DIR_OR_PROFILE")
+		}
+		vaultPath, err := resolveVaultArg(fs.Arg(0))
 		if err != nil {
 			return err
 		}
@@ -3292,10 +3338,25 @@ func execKeychain(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := keychain.Delete(cfg.VaultID); err != nil {
-			return err
+		// Look the entry up BEFORE deleting so a missing entry is a plain line, not
+		// a raw backend error (DOCS-1). keychainDeleteReport composes the operator
+		// line and keeps every backend error string out of it; the raw detail is
+		// shown only under --debug, and never carries any password (I-R2/I-S1).
+		_, getErr := keychain.Get(cfg.VaultID)
+		serviceReachable := keychain.Check().Available
+		var delErr error
+		if getErr == nil {
+			delErr = keychain.Delete(cfg.VaultID)
 		}
-		fmt.Println("OS keychain entry deleted")
+		line, isErr, rawDetail := keychainDeleteReport(vaultPath, getErr, serviceReachable, delErr)
+		if isErr {
+			fmt.Fprintln(os.Stderr, line)
+			if *debug && rawDetail != "" {
+				fmt.Fprintln(os.Stderr, "keychain error detail:", rawDetail)
+			}
+			return &exitCodeError{code: 1, msg: line}
+		}
+		fmt.Println(line)
 		return nil
 	default:
 		return fmt.Errorf("unknown keychain command %q", args[0])

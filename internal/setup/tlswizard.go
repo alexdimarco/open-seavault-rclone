@@ -273,7 +273,14 @@ func RunTLSWizard(pr Prompter, deps TLSDeps) error {
 		case routeBYO:
 			cert, key, recipe, flowErr = routeBYOFlow(pr)
 		case routeSelfSigned:
-			return finishSelfSigned(pr)
+			if ferr := finishSelfSigned(pr); ferr != nil {
+				return ferr
+			}
+			// This is the "other devices" branch: keeping a self-signed certificate
+			// here cannot map a Windows network drive (Windows' WebDAV client refuses
+			// it), so name how to re-run for a mappable certificate (A3-c3).
+			pr.Show("To map a Windows network drive later, re-run `seavault tls setup` and choose Tailscale or your own CA instead — a self-signed certificate cannot be used for a Windows drive mapping.")
+			return nil
 		}
 		if errors.Is(flowErr, errBackToMenu) {
 			continue
