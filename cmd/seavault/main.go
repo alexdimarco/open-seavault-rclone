@@ -1894,6 +1894,262 @@ func cmdGUI(args []string) error {
 	}
 }
 
+// cmdTLS is the `seavault tls` command group (design §4): the interactive setup
+// wizard plus the non-interactive companions use/status/check/reset. Every
+// mutating command prints the status summary (C12); no command ever prints key
+// material (I-T2).
+func cmdTLS(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("%s", tlsUsage())
+	}
+	switch args[0] {
+	case "setup":
+		return cmdTLSSetup(args[1:])
+	case "use":
+		return cmdTLSUse(args[1:])
+	case "status":
+		return cmdTLSStatus(args[1:])
+	case "check":
+		return cmdTLSCheck(args[1:])
+	case "reset":
+		return cmdTLSReset(args[1:])
+	default:
+		return fmt.Errorf("%s", tlsUsage())
+	}
+}
+
+func tlsUsage() string {
+	return "usage: seavault tls setup | use --cert PATH --key PATH [--allow-host NAME] | status | check | reset"
+}
+
+// cmdTLSSetup runs the interactive wizard over the stdin prompter and the real
+// tool seam.
+func cmdTLSSetup(args []string) error {
+	fs := flag.NewFlagSet("tls setup", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("tls setup takes no arguments")
+	}
+	return setup.RunTLSWizard(newStdinPrompter(), setup.DefaultTLSDeps())
+}
+
+// cmdTLSUse validates a cert/key pair and persists it to the shared tls section
+// (clearing the legacy fields), then prints the status summary so the command
+// that changes the configuration also reports it (C12). Nothing is persisted when
+// validation fails.
+func cmdTLSUse(args []string) error {
+	fs := flag.NewFlagSet("tls use", flag.ExitOnError)
+	cert := fs.String("cert", "", "path to the PEM certificate chain (leaf first)")
+	key := fs.String("key", "", "path to the matching PEM private key")
+	var allowHost repeatableString
+	fs.Var(&allowHost, "allow-host", "exact Host name to admit at the rebinding guard (repeatable); defaults to the certificate's concrete DNS SANs")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*cert) == "" || strings.TrimSpace(*key) == "" {
+		return fmt.Errorf("tls use requires --cert PATH and --key PATH")
+	}
+	info, err := tlsconfig.Validate(*cert, *key)
+	if err != nil {
+		// Typed error (ErrKeyMismatch/ErrCertParse/ErrKeyParse); nothing persisted.
+		return err
+	}
+	cfg, err := appconfig.Load()
+	if err != nil {
+		return err
+	}
+	cfg.TLS.CertFile = strings.TrimSpace(*cert)
+	cfg.TLS.KeyFile = strings.TrimSpace(*key)
+	cfg.TLS.AllowHosts = cleanAllowHostsCLI(allowHost, info.Names)
+	cfg.GUI.Protocol = "https"
+	cfg.GUI.CertFile = ""
+	cfg.GUI.KeyFile = ""
+	cfg.GUI.SelfSigned = false
+	if err := appconfig.Save(cfg); err != nil {
+		return err
+	}
+	saved, err := appconfig.Load()
+	if err != nil {
+		return err
+	}
+	writeTLSStatusSummary(os.Stdout, saved)
+	return nil
+}
+
+// cmdTLSStatus prints the non-mutating status summary: source, names, expiry, days
+// left, allowlist, key permissions, and the running-listener line from
+// serving.json. It NEVER prints key material and never triggers the self-signed
+// floor's generation.
+func cmdTLSStatus(args []string) error {
+	fs := flag.NewFlagSet("tls status", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := appconfig.Load()
+	if err != nil {
+		return err
+	}
+	writeTLSStatusSummary(os.Stdout, cfg)
+	return nil
+}
+
+// cmdTLSCheck validates the configured pair and exits non-zero on error (design
+// §4). With nothing configured it reports so and exits 0 (nothing to validate).
+func cmdTLSCheck(args []string) error {
+	fs := flag.NewFlagSet("tls check", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := appconfig.Load()
+	if err != nil {
+		return err
+	}
+	cert, key, source := configuredPair(cfg)
+	switch source {
+	case tlsconfig.SourceNone:
+		fmt.Println("tls check: no certificate configured (HTTP loopback / plaintext WebDAV); nothing to validate")
+		return nil
+	case tlsconfig.SourceSelfSigned:
+		fmt.Println("tls check: self-signed floor — a certificate is generated when the GUI first starts over https")
+		return nil
+	}
+	if _, err := tlsconfig.Validate(cert, key); err != nil {
+		return err // exit 1
+	}
+	fmt.Printf("tls check: OK — %s\n", cert)
+	return nil
+}
+
+// cmdTLSReset returns to the default state (HTTP loopback; no configured
+// certificate): it clears the shared tls section and the legacy fields and sets
+// gui.protocol=http, then prints the resulting status summary (C12).
+func cmdTLSReset(args []string) error {
+	fs := flag.NewFlagSet("tls reset", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := appconfig.Load()
+	if err != nil {
+		return err
+	}
+	cfg.TLS = appconfig.TLSSection{}
+	cfg.GUI.Protocol = "http"
+	cfg.GUI.CertFile = ""
+	cfg.GUI.KeyFile = ""
+	cfg.GUI.SelfSigned = false
+	if err := appconfig.Save(cfg); err != nil {
+		return err
+	}
+	fmt.Println("tls reset: returned to the default — HTTP on loopback, no configured certificate.")
+	saved, err := appconfig.Load()
+	if err != nil {
+		return err
+	}
+	writeTLSStatusSummary(os.Stdout, saved)
+	return nil
+}
+
+// configuredPair reports the winning configured cert/key pair and its source
+// WITHOUT side effects (unlike tlsconfig.Resolve, it never triggers the
+// self-signed floor's generation). A gui.protocol=https with no explicit pair is
+// the self-signed floor (source self-signed, empty paths).
+func configuredPair(cfg appconfig.Config) (cert, key string, source tlsconfig.Source) {
+	switch {
+	case strings.TrimSpace(cfg.TLS.CertFile) != "" && strings.TrimSpace(cfg.TLS.KeyFile) != "":
+		return cfg.TLS.CertFile, cfg.TLS.KeyFile, tlsconfig.SourceConfig
+	case strings.TrimSpace(cfg.GUI.CertFile) != "" && strings.TrimSpace(cfg.GUI.KeyFile) != "":
+		return cfg.GUI.CertFile, cfg.GUI.KeyFile, tlsconfig.SourceLegacyGUI
+	case strings.EqualFold(strings.TrimSpace(cfg.GUI.Protocol), "https"):
+		return "", "", tlsconfig.SourceSelfSigned
+	default:
+		return "", "", tlsconfig.SourceNone
+	}
+}
+
+// writeTLSStatusSummary prints the shared status summary consumed by `tls status`,
+// `tls use`, and `tls reset` (C12). It reports the configured source, the
+// certificate paths (never key bytes), names, expiry, days-left, self-signed
+// classification (C7), any warnings, the allowlist, and the running-listener line
+// from serving.json (C11). It performs no mutation.
+func writeTLSStatusSummary(out io.Writer, cfg appconfig.Config) {
+	cert, key, source := configuredPair(cfg)
+	fmt.Fprintf(out, "tls source: %s\n", source)
+	switch source {
+	case tlsconfig.SourceConfig, tlsconfig.SourceLegacyGUI:
+		info, err := tlsconfig.Validate(cert, key)
+		if err != nil {
+			fmt.Fprintf(out, "certificate: %s\ncertificate error: %v\n", cert, err)
+		} else {
+			fmt.Fprintf(out, "certificate: %s\n", cert)
+			fmt.Fprintf(out, "private key: %s\n", key)
+			names := "(none)"
+			if len(info.Names) > 0 {
+				names = strings.Join(info.Names, ", ")
+			}
+			fmt.Fprintf(out, "names: %s\n", names)
+			fmt.Fprintf(out, "expires: %s (%d days left)\n", info.NotAfter.UTC().Format(time.RFC3339), daysUntil(info.NotAfter))
+			selfSigned := info.SelfSigned || (source == tlsconfig.SourceLegacyGUI && cfg.GUI.SelfSigned)
+			if selfSigned {
+				fmt.Fprintf(out, "self-signed: yes — %s\n", selfSignedTrustWarning)
+			}
+			for _, w := range info.Warnings {
+				fmt.Fprintf(out, "warning: %s\n", w)
+			}
+		}
+	case tlsconfig.SourceSelfSigned:
+		fmt.Fprintf(out, "self-signed floor: a self-signed certificate is generated when the GUI first starts over https — %s\n", selfSignedTrustWarning)
+	case tlsconfig.SourceNone:
+		fmt.Fprintln(out, "no certificate configured; the GUI stays on http loopback and WebDAV stays plaintext loopback")
+	}
+	allow := "(none)"
+	if len(cfg.TLS.AllowHosts) > 0 {
+		allow = strings.Join(cfg.TLS.AllowHosts, ", ")
+	}
+	fmt.Fprintf(out, "allowlist: %s\n", allow)
+	if dir, err := tlsconfig.ServingDir(); err == nil {
+		rs := tlsconfig.RunningListenerStatus(dir, time.Now())
+		switch {
+		case !rs.Present:
+			fmt.Fprintln(out, "running listener: none seen")
+		case rs.Stale:
+			fmt.Fprintln(out, "running listener: no running listener seen in the last 2 days")
+		default:
+			fmt.Fprintf(out, "running listener: %d days left\n", rs.DaysLeft)
+		}
+	}
+}
+
+// cleanAllowHostsCLI resolves the allowlist for `tls use`: the explicit
+// --allow-host values when given, else the certificate's concrete DNS SANs. It
+// trims, de-duplicates, and DROPS wildcards so a wildcard never enters the
+// exact-match allowlist (C5).
+func cleanAllowHostsCLI(explicit []string, certNames []string) []string {
+	src := explicit
+	if len(src) == 0 {
+		src = certNames
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	for _, h := range src {
+		h = strings.TrimSpace(h)
+		if h == "" || strings.Contains(h, "*") {
+			continue
+		}
+		if _, dup := seen[strings.ToLower(h)]; dup {
+			continue
+		}
+		seen[strings.ToLower(h)] = struct{}{}
+		out = append(out, h)
+	}
+	return out
+}
+
+func daysUntil(t time.Time) int {
+	return int(time.Until(t).Hours() / 24)
+}
+
 func cmdMove(args []string) error {
 	fs := flag.NewFlagSet("move", flag.ExitOnError)
 	profileName := fs.String("profile", "", "saved vault name to update after moving")
