@@ -28,7 +28,7 @@ func TestW4_Base32PhraseRedeemsByBothForms(t *testing.T) {
 		t.Fatalf("PrepareRecovery: %v", err)
 	}
 	if base32Phrase == "" || !strings.Contains(base32Phrase, "-") {
-		t.Fatalf("expected a grouped base32 phrase, got %q", base32Phrase)
+		t.Fatalf("expected a grouped base32 phrase (non-empty, hyphen-grouped), got len %d hyphenated=%v", len(base32Phrase), strings.Contains(base32Phrase, "-"))
 	}
 	if err := commit(); err != nil {
 		t.Fatalf("commit: %v", err)

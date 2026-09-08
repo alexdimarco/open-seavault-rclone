@@ -38,7 +38,7 @@ func TestW1_WordRoundTripAndCanonicalEquality(t *testing.T) {
 			t.Fatalf("iteration %d: DecodeRecoveryWords of a freshly encoded phrase must succeed, got %v", i, err)
 		}
 		if got != secret {
-			t.Fatalf("iteration %d: round-trip mismatch: decoded %x != secret %x", i, got, secret)
+			t.Fatalf("iteration %d: round-trip mismatch: decoded 32-byte secret != original (values redacted)", i)
 		}
 		// The base32 form the CLI/GUI have shown since 0.15 and the new word form
 		// must reduce to the exact same wrap secret via the discriminator.
@@ -50,10 +50,10 @@ func TestW1_WordRoundTripAndCanonicalEquality(t *testing.T) {
 		}
 		fromBase32 := canonicalRecovery(base32Form)
 		if fromWords != fromBase32 {
-			t.Fatalf("iteration %d: word form and base32 form disagree: %q != %q", i, fromWords, fromBase32)
+			t.Fatalf("iteration %d: word form and base32 form reduce to different wrap secrets (values redacted)", i)
 		}
 		if fromWords != base32Form {
-			t.Fatalf("iteration %d: canonical word secret %q != base32 secret %q", i, fromWords, base32Form)
+			t.Fatalf("iteration %d: canonical word secret != base32 secret (values redacted)", i)
 		}
 		reached++
 	}
@@ -99,7 +99,7 @@ func TestW2_StrictDecodeTable(t *testing.T) {
 					t.Fatalf("row %q must decode, got error %v", r.name, err)
 				}
 				if secret != r.wantSecret {
-					t.Fatalf("row %q decoded to %x, want %x", r.name, secret, r.wantSecret)
+					t.Fatalf("row %q decoded to the wrong secret (values redacted)", r.name)
 				}
 				return
 			}
@@ -107,7 +107,7 @@ func TestW2_StrictDecodeTable(t *testing.T) {
 				t.Fatalf("row %q: want error %v, got %v", r.name, r.wantErr, err)
 			}
 			if secret != ([32]byte{}) {
-				t.Fatalf("row %q: a failed decode must return the zero secret, got %x", r.name, secret)
+				t.Fatalf("row %q: a failed decode must return the zero secret (non-zero result redacted)", r.name)
 			}
 		})
 	}
@@ -133,7 +133,7 @@ func TestW3_GenerateThreeFormsAndChecksumMessage(t *testing.T) {
 	// ... alongside the compact base32 form (the same 52-char secret).
 	compact := canonicalRecovery(phrase)
 	if compact != secret || len(compact) != 52 {
-		t.Fatalf("compact form must be the 52-char base32 secret, got %q (len %d)", compact, len(compact))
+		t.Fatalf("compact form must equal the 52-char base32 secret (matches=%v, len=%d)", compact == secret, len(compact))
 	}
 
 	// All three forms redeem the same minted phrase.
@@ -224,14 +224,14 @@ func TestW7_GoldenVectorAndWordlistHash(t *testing.T) {
 
 		gotWords := strings.Join(EncodeRecoveryWords(secret), " ")
 		if gotWords != v.mnemonic {
-			t.Fatalf("entropy %s: encode mismatch:\n got %q\nwant %q", v.entropyHex, gotWords, v.mnemonic)
+			t.Fatalf("entropy %s: encode mismatch (got %d words, want %d; phrase redacted)", v.entropyHex, len(strings.Fields(gotWords)), len(strings.Fields(v.mnemonic)))
 		}
 		decoded, err := DecodeRecoveryWords(strings.Fields(v.mnemonic))
 		if err != nil {
 			t.Fatalf("entropy %s: golden mnemonic must decode, got %v", v.entropyHex, err)
 		}
 		if decoded != secret {
-			t.Fatalf("entropy %s: decode mismatch: %x != %x", v.entropyHex, decoded, secret)
+			t.Fatalf("entropy %s: decode mismatch: decoded secret != expected (values redacted)", v.entropyHex)
 		}
 	}
 }
