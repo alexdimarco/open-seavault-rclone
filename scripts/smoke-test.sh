@@ -36,6 +36,37 @@ set -e
 "$BIN" compact "$VAULT" >/dev/null
 "$BIN" gc --confirm "$VAULT" >/dev/null
 
+# wiring-1 / S1: revoking a recovery key non-interactively WITHOUT --yes is refused
+# when it would leave the vault with no recovery path — the command must exit
+# non-zero and change nothing, and the refusal must name --yes. `recovery generate`
+# is interactive-only (a phrase nobody has seen is never scriptable), so a key
+# cannot be minted here; the fresh vault's zero-key state still trips the same gate.
+set +e
+"$BIN" recovery revoke "$VAULT" deadbeef </dev/null >"$WORK/revoke.out" 2>&1
+REVOKE_RC=$?
+set -e
+[ "$REVOKE_RC" -ne 0 ] || {
+	echo "expected a non-interactive last-key revoke without --yes to be refused" >&2
+	cat "$WORK/revoke.out" >&2; exit 1; }
+grep -q -- '--yes' "$WORK/revoke.out" || {
+	echo "the last-key revoke refusal must name --yes" >&2
+	cat "$WORK/revoke.out" >&2; exit 1; }
+# The vault must still open after the refused revoke (nothing was destroyed).
+"$BIN" verify "$VAULT" >/dev/null
+
+# sweep-docs-1 / DOCS-6: `remote config create --help` prints usage and creates
+# NOTHING — the managed rclone.conf must not appear on disk. Run it under an
+# isolated app-home so the check never touches the developer's real config.
+RC_HOME="$WORK/rc-home"
+mkdir -p "$RC_HOME"
+RC_CONF="$(SEAVAULT_APP_HOME="$RC_HOME" "$BIN" remote config path)"
+SEAVAULT_APP_HOME="$RC_HOME" "$BIN" remote config create --help >"$WORK/rcch.out" 2>&1
+grep -q 'usage: seavault remote config' "$WORK/rcch.out" || {
+	echo "remote config create --help must print the registry usage" >&2
+	cat "$WORK/rcch.out" >&2; exit 1; }
+[ ! -e "$RC_CONF" ] || {
+	echo "remote config create --help must NOT write rclone.conf at $RC_CONF" >&2; exit 1; }
+
 # T8 (design section 7): the non-interactive first-run wizard, end to end against
 # the real binary. `setup --preset local` reads the password from SEAVAULT_PASSWORD,
 # creates a vault and registers a profile; a put/get round-trip through that

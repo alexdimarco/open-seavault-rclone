@@ -58,3 +58,12 @@ func recoveryCardText(vaultName string, words []string, compact string, wordsUna
 	b.WriteString("Keep this on paper, away from the computer. Anyone holding it can open the vault.\n")
 	return b.String()
 }
+
+// RecoveryCardText is the exported entry point to the recovery-card builder so
+// the standalone CLI `recovery generate --save` (design U2 §2.5) writes the SAME
+// card text the setup wizard's ceremony writes — the design calls for "the same
+// card in text", so the CLI reuses this builder rather than re-implementing the
+// format. It forwards to the unexported recoveryCardText.
+func RecoveryCardText(vaultName string, words []string, compact string, wordsUnavailable, draft bool) string {
+	return recoveryCardText(vaultName, words, compact, wordsUnavailable, draft)
+}

@@ -93,3 +93,14 @@ func pathWithin(target, root string, fold bool) bool {
 	}
 	return strings.HasPrefix(target, rootSlash)
 }
+
+// PathInsideVault reports whether target is the vault directory itself or a path
+// within it, honoring the host filesystem's case sensitivity (goos). The
+// standalone CLI `recovery generate --save` reuses it to REFUSE writing the
+// plaintext recovery card inside the vault folder — the same guard
+// runRecoveryCeremony's allowRecoverySavePath applies (design U2 §2.5 /
+// recovery-integration-1): a plaintext master secret inside the synced vault
+// would be uploaded to the untrusted remote and defeat the encryption.
+func PathInsideVault(target, vaultDir, goos string) bool {
+	return pathWithin(filepath.Clean(target), filepath.Clean(vaultDir), caseInsensitiveFS(goos))
+}

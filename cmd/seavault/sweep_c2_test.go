@@ -165,9 +165,12 @@ func TestRecoveryGenerateWordsCompactAndTypedError(t *testing.T) {
 	const pw = "pw-generate"
 	fastVault(t, dir, pw)
 	t.Setenv("SEAVAULT_PASSWORD", pw)
-	// A 24-word read-back that is word-shaped (all 24 tokens are wordlist words)
-	// but has a bad checksum, so RecoveryPhraseCheck returns ErrRecoveryChecksum.
-	t.Setenv("SEAVAULT_RECOVERY_PHRASE", strings.TrimSpace(strings.Repeat("abandon ", 24)))
+	// The read-back is interactive-only now (DOCS-1): the removed
+	// SEAVAULT_RECOVERY_PHRASE env hook no longer satisfies it, so drive the
+	// interactive read-back through the seams. The supplied phrase is 24 wordlist
+	// words with a bad checksum (word-shaped), so RecoveryPhraseCheck returns the
+	// typed ErrRecoveryChecksum rather than the generic wrong-secret error.
+	setRecoverySeams(t, true, strings.TrimSpace(strings.Repeat("abandon ", 24)), nil)
 
 	out, err := captureStdout(t, func() error { return cmdRecoveryGenerate([]string{dir}) })
 	if err == nil {
