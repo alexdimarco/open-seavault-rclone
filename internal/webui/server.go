@@ -1745,9 +1745,10 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		// A rolled-back config surfaces the accept-rollback affordance: the page
 		// reads canAcceptRollback and offers "I restored this from a backup", which
 		// re-submits with acceptRollback:true AND the re-entered password (design
-		// U2 §2.7). The error text still carries the strict-gate instructions.
+		// U2 §2.7). GUI-OWN 6: the body is worded for the GUI — it names that
+		// control, never the CLI --accept-rollback flag — keeping the strict-gate warning.
 		if errors.Is(err, vault.ErrConfigRolledBack) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "canAcceptRollback": true})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": rollbackGUIMessage, "canAcceptRollback": true})
 			return
 		}
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
@@ -1809,6 +1810,11 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	// Closing the vault ends the "skip to advanced" choice (GUI-D2 1): a returning
+	// owner who skipped to the app view and then closed must land on Welcome-back on
+	// the next index render, not the sticky app view, so the recovery/open golden
+	// path is signposted again. clearSetupSkipped is a no-op for a missing session.
+	s.clearSetupSkipped(r)
 	s.mu.Lock()
 	s.vault = nil
 	s.pendingRecovery = nil
@@ -2011,7 +2017,7 @@ func (s *Server) handleRecoveryCommit(w http.ResponseWriter, r *http.Request) {
 	// usability-aid disclaimer, instead of the generic wrong-phrase line (design
 	// U2 §2.5 / review C1). A base32-shaped mismatch keeps the generic message.
 	if err := vault.RecoveryPhraseCheck(pend.phrase, req.Readback); err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: recoveryReadbackMessage(err)})
+		writeJSON(w, http.StatusBadRequest, apiError{Error: recoveryReadbackMessage(err, pend.phrase, req.Readback)})
 		return
 	}
 	if err := pend.commit(); err != nil {
@@ -2035,14 +2041,61 @@ func (s *Server) handleRecoveryCommit(w http.ResponseWriter, r *http.Request) {
 // disclaimer that the built-in checksum is a usability aid, not a security
 // control (design U2 §2.5 / matrix M1). A base32-shaped mismatch keeps the
 // generic line. The message never contains either secret.
-func recoveryReadbackMessage(err error) string {
+func recoveryReadbackMessage(err error, minted, readback string) string {
 	switch {
 	case errors.Is(err, vault.ErrRecoveryChecksum), errors.Is(err, vault.ErrRecoveryWordUnknown), errors.Is(err, vault.ErrRecoveryWordCount):
-		return err.Error() + ". This checksum is a usability aid, not a security control. Nothing was written — check the words against your saved copy and try again."
+		msg := err.Error()
+		if idx := recoveryReadbackFirstDiff(minted, readback); idx > 0 {
+			msg += fmt.Sprintf("; the first word that differs is word %d", idx)
+		}
+		// DOCS-2: the disclaimer covers BOTH gates — an unknown word is caught by the
+		// wordlist lookup, a mistyped or misordered word by the built-in checksum — and
+		// neither is a security control (the "usability aid, not a security control"
+		// substring is pinned by matrix M1).
+		return msg + ". The recovery wordlist and its built-in checksum are a usability aid, not a security control. Nothing was written — check the words against your saved copy and try again."
 	default:
 		return "the re-entered phrase did not match; nothing was written — check the phrase and try again"
 	}
 }
+
+// recoveryReadbackFirstDiff returns the 1-based position of the first word in a
+// word-shaped readback that differs from minted's canonical 24-word form, or 0 when
+// the readback is not word-shaped or nothing differs (GUI-OWN 4). It is a server-side
+// diff: only the index is surfaced, never the correct word, so a typist learns WHICH
+// word to check without any phrase material leaving the process.
+func recoveryReadbackFirstDiff(minted, readback string) int {
+	want, err := vault.RecoveryPhraseWords(minted)
+	if err != nil {
+		return 0
+	}
+	got := strings.Fields(readback)
+	// Only a word-shaped read-back (roughly the 24-word form) has per-word positions
+	// to name; a compact base32 read-back does not.
+	if len(got) < 20 || len(got) > 28 {
+		return 0
+	}
+	n := len(got)
+	if len(want) < n {
+		n = len(want)
+	}
+	for i := 0; i < n; i++ {
+		if !strings.EqualFold(strings.TrimSpace(got[i]), want[i]) {
+			return i + 1
+		}
+	}
+	// The compared prefix matched but the lengths differ: the first missing or extra
+	// word is the divergence.
+	if len(got) != len(want) {
+		return n + 1
+	}
+	return 0
+}
+
+// rollbackGUIMessage is the GUI-neutral body for a rolled-back /api/open refusal
+// (GUI-OWN 6). It carries the same freshness warning as the CLI ErrConfigRolledBack
+// but points at the GUI "I restored this from a backup" control instead of the
+// --accept-rollback flag, so a browser user is never sent to a command line.
+const rollbackGUIMessage = "This vault looks older than this device last saw it. If you deliberately restored it from a backup, re-enter the vault password and choose \"I restored this from a backup\" to open it and re-establish freshness. If you did NOT expect this, the sync server may be replaying a retired configuration: do not enter a retired password, and restore this vault from a good backup or open it on another device."
 
 // recordRecoveryLabel writes the device-local label record for the recovery entry
 // just appended to v (design U2 §2.6): the created date and this device's
@@ -4601,7 +4654,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
     <button type="button" class="destination-tab" data-destination="security" onclick="showDestination('security')">Security</button>
     <button type="button" class="destination-tab" data-destination="advanced" onclick="showDestination('advanced')">Advanced</button>
   </nav>
-  <p class="advanced-toggle-row"><button type="button" id="showAdvancedToggle" onclick="toggleAdvanced()">Show advanced</button></p>
+  <p class="advanced-toggle-row"><button type="button" id="showAdvancedToggle" onclick="toggleAdvanced()">Keep advanced visible</button></p>
 </div>
 
 <section id="welcome-back" aria-label="Welcome back">
@@ -4609,7 +4662,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
   <p class="hint">Open one of your saved vaults, point open-seavault-rclone at a vault folder you already have, or create a new vault.</p>
   <div id="welcomeVaultList" class="table-wrap"><p class="hint">Loading your saved vaults&hellip;</p></div>
   <div class="form-grid">
-    <label>I already have a vault &mdash; choose its folder
+    <label>I already have a vault &mdash; enter its folder path
       <input id="welcomeVaultPath" placeholder="~/Nextcloud/seavault" autocomplete="off">
       <small>Point to a vault folder you already have, for example one your sync client restored on this device. This opens it with the existing vault; nothing is created.</small>
     </label>
@@ -5015,7 +5068,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
     </div>
     <div id="recoveryReadbackStep" hidden>
       <p class="hint">Re-enter the recovery phrase from your written copy to confirm before it is saved. Paste is disabled so the re-entry proves you captured it off-screen.</p>
-      <p class="hint">If a word is mistyped or out of order, the built-in checksum will usually catch it and say so. That checksum is a usability aid, not a security control.</p>
+      <p class="hint">If a word is not in the recovery wordlist, the wordlist lookup catches it. If a word is mistyped or out of order, the built-in checksum will usually catch it and say so. That checksum is a usability aid, not a security control.</p>
       <div class="form-grid">
         <label>Re-enter the recovery phrase to confirm
           <input id="recoveryReadback" autocomplete="off" onpaste="return false" ondrop="return false" ondragover="return false" placeholder="type the phrase from your written copy">
@@ -5033,6 +5086,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
       <button class="secondary" onclick="recoveryPrintConfirmedCard()">Print confirmed card</button>
     </p>
   </div>
+  <p class="hint">Each key is shown by its handle. The number after the # matches the number printed on that key&rsquo;s recovery card, so you can tell which paper key a row refers to and which to keep.</p>
   <div id="recoveryList" class="table-wrap"></div>
 
   <h3>Redeem a recovery key</h3>
@@ -5497,8 +5551,8 @@ async function listRecovery(){
     // full entry ID drives revoke. isLast is passed so the last remaining key
     // triggers the consequence-naming confirmation before its revoke.
     const isLast = rows.length === 1;
-    box.innerHTML = '<table><thead><tr><th>Recovery key</th><th>ID</th><th></th></tr></thead><tbody>' +
-      rows.map(r => '<tr><td>'+esc(r.display || ('Recovery key #' + (r.handle||'')))+'</td><td><code>'+esc(r.id)+'</code></td><td><button class="secondary" onclick="revokeRecovery(\''+esc(r.id)+'\','+(isLast?'true':'false')+')">Revoke</button></td></tr>').join('') +
+    box.innerHTML = '<table><thead><tr><th>Recovery key</th><th></th></tr></thead><tbody>' +
+      rows.map(r => '<tr><td>'+esc(r.display || ('Recovery key #' + (r.handle||'')))+'</td><td><button class="secondary" onclick="revokeRecovery(\''+esc(r.id)+'\','+(isLast?'true':'false')+')">Revoke</button></td></tr>').join('') +
       '</tbody></table>';
   } catch(e){ showError('Could not list recovery keys', e.message); }
 }
