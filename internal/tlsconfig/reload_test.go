@@ -84,6 +84,51 @@ func serialOf(addr, serverName string, pool *x509.CertPool) *big.Int {
 	return leaf.SerialNumber
 }
 
+// installPairFile atomically replaces path with data and stamps it with mtime
+// (temp file + Chtimes + rename), so the poll-based Reloader never reads a torn
+// (empty/partial) file and the path's mtime transitions exactly once. It mirrors
+// production atomicWrite; a renewal driven through it is a single coherent
+// change, not a race of separate write-then-chtime transitions.
+func installPairFile(t *testing.T, path string, data []byte, mtime time.Time) {
+	t.Helper()
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-reload-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		t.Fatal(err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(tmpName, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// coherentRewriter returns a rewrite(cert, key) that installs a renewal as ONE
+// change the poll-based Reloader can observe. It writes both files atomically
+// (no torn read) and advances ONLY the key's mtime, holding the cert's mtime
+// fixed: because the Reloader reads BOTH files' content whenever EITHER mtime
+// changes, a single advancing mtime with both new contents already in place is a
+// single, coherent pair-transition. Two separately-advancing mtimes (the old
+// os.WriteFile+os.Chtimes pattern) let a poll land between them and count a
+// rejected renewal twice — the pre-existing flake in "exactly one warning".
+func coherentRewriter(t *testing.T, certPath, keyPath string) func(certPEM, keyPEM []byte) {
+	certMtime := time.Now()
+	keyMtime := certMtime
+	return func(certPEM, keyPEM []byte) {
+		installPairFile(t, certPath, certPEM, certMtime) // fixed mtime: no standalone transition
+		keyMtime = keyMtime.Add(time.Minute)
+		installPairFile(t, keyPath, keyPEM, keyMtime) // the one advancing mtime drives detection
+	}
+}
+
 // TestR1HotReload is the §2 hot-reload / I-T3 / C6 proof against a real listener:
 // a client with the test CA connects; rewriting the pair swaps the served leaf
 // within the injected poll; a mismatched pair keeps the old leaf and logs one
@@ -99,24 +144,10 @@ func TestR1HotReload(t *testing.T) {
 	certPath := filepath.Join(watchDir, "leaf.crt")
 	keyPath := filepath.Join(watchDir, "leaf.key")
 
-	// controlled, strictly-increasing mtimes so the stat-poll detects each
-	// rewrite regardless of the filesystem's timestamp resolution.
-	mtime := time.Now()
-	rewrite := func(certPEM, keyPEM []byte) {
-		if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		mtime = mtime.Add(time.Minute)
-		if err := os.Chtimes(certPath, mtime, mtime); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chtimes(keyPath, mtime, mtime); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// Each renewal is installed as a single coherent change (atomic writes; only
+	// the key's mtime advances) so the stat-poll detects it exactly once and never
+	// reads a torn pair — see coherentRewriter.
+	rewrite := coherentRewriter(t, certPath, keyPath)
 
 	// leaf1: the initial serving pair.
 	cert1, key1, leaf1 := ca.issue(t, leafSpec{cn: name})
@@ -226,18 +257,7 @@ func TestR3ServingHeartbeatAndStatus(t *testing.T) {
 		watchDir := t.TempDir()
 		certPath := filepath.Join(watchDir, "leaf.crt")
 		keyPath := filepath.Join(watchDir, "leaf.key")
-		mtime := time.Now()
-		rewrite := func(c, k []byte) {
-			if err := os.WriteFile(certPath, c, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(keyPath, k, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			mtime = mtime.Add(time.Minute)
-			_ = os.Chtimes(certPath, mtime, mtime)
-			_ = os.Chtimes(keyPath, mtime, mtime)
-		}
+		rewrite := coherentRewriter(t, certPath, keyPath)
 
 		cert1, key1, leaf1 := ca.issue(t, leafSpec{cn: "hb.example"})
 		rewrite(cert1, key1)

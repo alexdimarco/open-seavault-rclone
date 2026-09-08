@@ -238,3 +238,55 @@ func TestStartupWildcardSANGuidance(t *testing.T) {
 		t.Fatalf("wildcard SAN still routed through the dead-end \"add it with --allow-host\" guidance; got:\n%s", out)
 	}
 }
+
+// TestStartTLSReloaderWaitJoinsGoroutine (re-fix, U3 F-B teardown race):
+// startTLSReloader must return a wait func that blocks until the reloader
+// goroutine has fully returned, so cmdGUI/cmdServe drain the goroutine — and the
+// serving.json write Run performs unconditionally at startup — before the
+// command returns. Before the join, `go rl.Run(ctx)` was fire-and-forget: the
+// startup write could land after the command returned and race a caller's
+// teardown. That is the TempDir RemoveAll flake the verifier reproduced ~20-30%
+// in TestGUILaunchLinkMergesConfigAllowHosts (the reloader recreating
+// <appHome>/config/tls/serving.json after shutdown cleanup returned).
+//
+// Deterministic discriminator: while ctx is live the reloader goroutine is still
+// running (blocked in its poll select after the startup write), so a joining
+// wait must NOT return yet; a fire-and-forget startTLSReloader returns a no-op
+// wait that returns at once — the RED. After cancel, wait must return promptly.
+func TestStartTLSReloaderWaitJoinsGoroutine(t *testing.T) {
+	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
+
+	ca := newU3CA(t)
+	certPEM, keyPEM := ca.issue(t, []string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")})
+	certPath, keyPath := writePairFiles(t, t.TempDir(), certPEM, keyPEM)
+	cfg := appconfig.Config{Version: appconfig.Version, TLS: appconfig.TLSSection{CertFile: certPath, KeyFile: keyPath}}
+	resolved, err := tlsconfig.Resolve(tlsconfig.Options{Cfg: cfg, Purpose: tlsconfig.PurposeServe})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Source == tlsconfig.SourceNone {
+		t.Fatal("resolved source is none; the join test needs a live reloader source")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wait := startTLSReloader(ctx, resolved, "test")
+
+	returned := make(chan struct{})
+	go func() { wait(); close(returned) }()
+
+	select {
+	case <-returned:
+		t.Fatal("wait() returned before the reloader context was cancelled; startTLSReloader does not join its goroutine (a leaked reloader can write serving.json after the command returns and race teardown)")
+	case <-time.After(250 * time.Millisecond):
+		// Good: still blocked while ctx is live.
+	}
+
+	cancel()
+	select {
+	case <-returned:
+		// Good: cancelling drains the goroutine and wait returns.
+	case <-time.After(5 * time.Second):
+		t.Fatal("wait() did not return after the reloader context was cancelled; the goroutine was not joined")
+	}
+}

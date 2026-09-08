@@ -1661,9 +1661,16 @@ var (
 // or its source is none (nothing to reload). The reloader stops when ctx is
 // cancelled (on server shutdown). Its log lines carry only path/name/time
 // diagnostics — never key material — and are prefixed with the purpose.
-func startTLSReloader(ctx context.Context, resolved *tlsconfig.Resolved, purpose string) {
+//
+// It returns a wait func the caller defers AFTER cancelling ctx: wait blocks
+// until the reloader goroutine has fully returned, so the goroutine — and its
+// serving.json write, which Run performs unconditionally at startup — is drained
+// before the command returns. Without this join the startup write can land after
+// the command returns and race a caller's teardown (e.g. a test's TempDir
+// RemoveAll); no goroutine or file write outlives the listener it maintains.
+func startTLSReloader(ctx context.Context, resolved *tlsconfig.Resolved, purpose string) (wait func()) {
 	if resolved == nil || resolved.Source == tlsconfig.SourceNone {
-		return
+		return func() {}
 	}
 	rl := resolved.Reloader(tlsconfig.ReloaderOptions{
 		Interval: tlsReloadInterval,
@@ -1672,9 +1679,14 @@ func startTLSReloader(ctx context.Context, resolved *tlsconfig.Resolved, purpose
 		},
 	})
 	if rl == nil {
-		return
+		return func() {}
 	}
-	go rl.Run(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rl.Run(ctx)
+	}()
+	return func() { <-done }
 }
 
 func cmdServe(args []string) error {
@@ -1759,8 +1771,8 @@ func cmdServe(args []string) error {
 	// serving.json is written for `tls status` (reload-not-wired-1). It stops when
 	// this command returns (defer cancel), so no goroutine outlives the listener.
 	reloadCtx, cancelReload := context.WithCancel(context.Background())
-	defer cancelReload()
-	startTLSReloader(reloadCtx, resolved, "serve")
+	waitReload := startTLSReloader(reloadCtx, resolved, "serve")
+	defer func() { cancelReload(); waitReload() }()
 	srv := buildLoopbackServer(*addr, dav)
 	if serveTestHook != nil {
 		serveTestHook(srv, ln.Addr().String())
@@ -1959,8 +1971,8 @@ func cmdGUI(args []string) error {
 	// this command returns (defer cancel), covering both the serveErr and the
 	// browser-close shutdown exits below.
 	reloadCtx, cancelReload := context.WithCancel(context.Background())
-	defer cancelReload()
-	startTLSReloader(reloadCtx, resolved, "gui")
+	waitReload := startTLSReloader(reloadCtx, resolved, "gui")
+	defer func() { cancelReload(); waitReload() }()
 	srv := buildLoopbackServer(*addr, s)
 	if guiTestHook != nil {
 		guiTestHook(srv, ln.Addr().String())
