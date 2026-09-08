@@ -22,6 +22,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ import (
 	"github.com/alexdimarco/open-seavault-rclone/internal/remotes"
 	"github.com/alexdimarco/open-seavault-rclone/internal/rsyncbin"
 	"github.com/alexdimarco/open-seavault-rclone/internal/rsyncput"
+	"github.com/alexdimarco/open-seavault-rclone/internal/setup"
 	"github.com/alexdimarco/open-seavault-rclone/internal/sshkeys"
 	"github.com/alexdimarco/open-seavault-rclone/internal/transport"
 	localtransport "github.com/alexdimarco/open-seavault-rclone/internal/transport/local"
@@ -107,6 +109,12 @@ type Server struct {
 	// phrase. A new generate replaces any prior pending one; open/close clear it.
 	// Guarded by mu.
 	pendingRecovery *pendingRecovery
+	// setupDeps overrides the setup.Deps handleSetupRun runs with. It is nil in
+	// production (setupDependencies falls back to setup.DefaultDeps()); a test
+	// sets it to inject a fault (e.g. a failing RcloneEnsure) so the post-create
+	// cloud-step soft-failure path (api-setup-1) is exercised deterministically
+	// without a real rclone runtime. Never a secret source.
+	setupDeps *setup.Deps
 }
 
 // pendingRecovery is a recovery-key generation waiting for the read-back
@@ -127,6 +135,12 @@ type session struct {
 	expires      time.Time
 	loggedIn     bool
 	cookieIssued time.Time
+	// setupSkipped is set when this session followed the first-run stepper's
+	// "Skip to advanced" link (design §3.4). Once set, handleIndex renders the
+	// full 22-panel page for this session even while the first-run trigger
+	// (no profiles, no vault open) still holds, so the choice sticks across
+	// reloads without touching disk.
+	setupSkipped bool
 }
 
 // exportTicket is a single-use grant for a ZIP export of path, valid until
@@ -288,6 +302,11 @@ type statusResponse struct {
 	AppConfig       appconfig.Config    `json:"appConfig"`
 	Dependencies    dependencies.Report `json:"dependencies"`
 	AuthEnabled     bool                `json:"authEnabled"`
+	// RecoveryMissing is true when a vault is open that holds no recovery-key
+	// entry, so the full page can surface a persistent "no recovery key" banner
+	// until one exists (recovery-integration-3, design §3.3 step 3). It is false
+	// when no vault is open. Carries no secret.
+	RecoveryMissing bool `json:"recoveryMissing"`
 }
 
 type webdavStatusDTO struct {
@@ -849,6 +868,12 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleRecoveryRedeem(w, r)
 	case "/api/recovery/revoke":
 		s.handleRecoveryRevoke(w, r)
+	case "/api/setup/detect":
+		s.handleSetupDetect(w, r)
+	case "/api/setup/validate":
+		s.handleSetupValidate(w, r)
+	case "/api/setup/run":
+		s.handleSetupRun(w, r)
 	case "/api/files":
 		s.handleFiles(w, r)
 	case "/api/upload":
@@ -1241,14 +1266,110 @@ func (s *Server) handleResetConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	// The first-run stepper's "Skip to advanced" link lands here as /?advanced=1;
+	// it flips a per-session flag so the full page renders now and on every later
+	// reload for this session (design §3.4). The full page's "Back to guided
+	// setup" link (GUI-4) lands as /?guided=1 and clears that flag, so the
+	// stepper renders again while the first-run trigger still holds.
+	if r.URL.Query().Get("guided") == "1" {
+		s.clearSetupSkipped(r)
+	} else if r.URL.Query().Get("advanced") == "1" {
+		s.markSetupSkipped(r)
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = page.Execute(w, struct {
-		Token          string
-		InitialPath    string
-		SuggestedPaths []string
-		RsyncHint      string
-		AuthEnabled    bool
-	}{Token: s.token, InitialPath: s.vaultPath, SuggestedPaths: userpath.SuggestedVaultPaths(), RsyncHint: rsyncput.DefaultBinaryHint(), AuthEnabled: s.guiAuthEnabled()})
+		Token           string
+		InitialPath     string
+		SuggestedPaths  []string
+		RsyncHint       string
+		AuthEnabled     bool
+		FirstRun        bool
+		SkippedFirstRun bool
+	}{Token: s.token, InitialPath: s.vaultPath, SuggestedPaths: userpath.SuggestedVaultPaths(), RsyncHint: rsyncput.DefaultBinaryHint(), AuthEnabled: s.guiAuthEnabled(), FirstRun: s.firstRun(r), SkippedFirstRun: s.skippedFirstRun(r)})
+}
+
+// firstRun reports whether the GUI should render the first-run stepper instead
+// of the full page (design §3.4): the trigger is an empty profile list AND no
+// vault open, unless this session already chose "Skip to advanced". A profile
+// store that cannot be read is treated as non-empty (fail toward the full page,
+// never trap an existing user behind a stepper).
+func (s *Server) firstRun(r *http.Request) bool {
+	if s.setupSkippedFor(r) {
+		return false
+	}
+	return s.firstRunTrigger()
+}
+
+// firstRunTrigger reports the raw first-run condition independent of this
+// session's "Skip to advanced" choice: no profiles AND no vault open. A profile
+// store that cannot be read is treated as non-empty (fail toward the full page,
+// never trap an existing user behind a stepper).
+func (s *Server) firstRunTrigger() bool {
+	s.mu.Lock()
+	vaultOpen := s.vault != nil
+	s.mu.Unlock()
+	if vaultOpen {
+		return false
+	}
+	entries, err := profile.Entries()
+	if err != nil {
+		return false
+	}
+	return len(entries) == 0
+}
+
+// skippedFirstRun reports whether this session chose "Skip to advanced" while
+// the raw first-run trigger still holds. The full page renders a "Back to
+// guided setup" link (GUI-4) only then, so the skip is not a one-way door; once
+// a vault exists the trigger is gone and the link disappears (a returning user
+// is not first-run and gets the normal full page).
+func (s *Server) skippedFirstRun(r *http.Request) bool {
+	return s.setupSkippedFor(r) && s.firstRunTrigger()
+}
+
+// markSetupSkipped records on the request's session that the user chose to skip
+// the first-run stepper. A missing/unknown session is a no-op (the next
+// handleIndex simply re-renders the stepper).
+func (s *Server) markSetupSkipped(r *http.Request) {
+	c, err := r.Cookie(guiSessionCookie)
+	if err != nil || strings.TrimSpace(c.Value) == "" {
+		return
+	}
+	s.mu.Lock()
+	if sess, ok := s.authSessions[c.Value]; ok {
+		sess.setupSkipped = true
+		s.authSessions[c.Value] = sess
+	}
+	s.mu.Unlock()
+}
+
+// clearSetupSkipped clears the request session's "Skip to advanced" flag, so the
+// next handleIndex renders the first-run stepper again while the trigger holds
+// (GUI-4, the "Back to guided setup" return path). A missing/unknown session is
+// a no-op.
+func (s *Server) clearSetupSkipped(r *http.Request) {
+	c, err := r.Cookie(guiSessionCookie)
+	if err != nil || strings.TrimSpace(c.Value) == "" {
+		return
+	}
+	s.mu.Lock()
+	if sess, ok := s.authSessions[c.Value]; ok {
+		sess.setupSkipped = false
+		s.authSessions[c.Value] = sess
+	}
+	s.mu.Unlock()
+}
+
+// setupSkippedFor reports whether the request's session has skipped the stepper.
+func (s *Server) setupSkippedFor(r *http.Request) bool {
+	c, err := r.Cookie(guiSessionCookie)
+	if err != nil || strings.TrimSpace(c.Value) == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.authSessions[c.Value]
+	return ok && sess.setupSkipped
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -1262,13 +1383,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	vaultPath := s.vaultPath
 	var vaultID string
 	var cfgDTO *vaultConfigDTO
+	var recoveryMissing bool
 	if s.vault != nil {
 		cfg := s.vault.Config
 		vaultID = s.vault.ID()
 		cfgDTO = &vaultConfigDTO{Version: cfg.Version, KDF: cfg.KDF, Crypto: cfg.Crypto, Chunk: cfg.Chunk, CreatedAt: cfg.CreatedAt, ManifestMode: cfg.Crypto.ManifestMode}
+		recoveryMissing = !vaultHasRecoveryEntry(s.vault)
 	}
 	s.mu.Unlock()
-	resp := statusResponse{Open: open, BrowserToken: s.tokenValue(), WebDAV: s.webdavStatus(), VaultPath: vaultPath, VaultID: vaultID, Config: cfgDTO, Profiles: entries, AvailableVaults: s.availableVaultStatuses(entries), SuggestedPaths: userpath.SuggestedVaultPaths(), KeychainStatus: s.keychainStatus, AppConfig: s.currentConfig(), Dependencies: dependencies.Report{Keychain: s.keychainStatus}, AuthEnabled: s.guiAuthEnabled()}
+	resp := statusResponse{Open: open, BrowserToken: s.tokenValue(), WebDAV: s.webdavStatus(), VaultPath: vaultPath, VaultID: vaultID, Config: cfgDTO, Profiles: entries, AvailableVaults: s.availableVaultStatuses(entries), SuggestedPaths: userpath.SuggestedVaultPaths(), KeychainStatus: s.keychainStatus, AppConfig: s.currentConfig(), Dependencies: dependencies.Report{Keychain: s.keychainStatus}, AuthEnabled: s.guiAuthEnabled(), RecoveryMissing: recoveryMissing}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1682,6 +1805,267 @@ func (s *Server) handleRecoveryRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// setupFolderDTO is one detected sync-client folder surfaced by
+// /api/setup/detect: the provider id, its display name, the absolute path, and
+// the placement caveat (design §3.4 / I-S6). It carries no secret.
+type setupFolderDTO struct {
+	Provider    string `json:"provider"`
+	DisplayName string `json:"displayName"`
+	Path        string `json:"path"`
+	Note        string `json:"note"`
+}
+
+// setupRunRequest is the JSON body of /api/setup/run and /api/setup/validate.
+// The password arrives here over the loopback session exactly as /api/init's
+// does; it is used only to build/open the vault and is NEVER logged, echoed, or
+// placed in any response (I-S1). Validate ignores it (no side effects, C-none).
+type setupRunRequest struct {
+	VaultPath    string `json:"vaultPath"`
+	Password     string `json:"password"`
+	Profile      string `json:"profile"`
+	SaveKeychain bool   `json:"saveKeychain"`
+	Cloud        struct {
+		Mode       string `json:"mode"` // "synced" | "rclone" | "local"
+		Provider   string `json:"provider"`
+		RemoteName string `json:"remoteName"`
+		RemotePath string `json:"remotePath"`
+	} `json:"cloud"`
+}
+
+// plan builds the UI-agnostic setup.Plan this request describes (design §3.1).
+// It resolves the vault path to an absolute path and maps the cloud mode onto
+// the sealed CloudChoice sum; an unknown mode is a typed error the caller turns
+// into a 400. It never reads the password.
+func (req setupRunRequest) plan() (setup.Plan, error) {
+	vaultPath, err := absVaultPath(req.VaultPath)
+	if err != nil {
+		return setup.Plan{}, err
+	}
+	var cloud setup.CloudChoice
+	switch strings.ToLower(strings.TrimSpace(req.Cloud.Mode)) {
+	case "synced":
+		cloud = setup.SyncedFolder{Provider: setup.Provider(req.Cloud.Provider)}
+	case "rclone":
+		cloud = setup.RcloneRemote{Name: req.Cloud.RemoteName, RemotePath: req.Cloud.RemotePath}
+	case "local", "":
+		cloud = setup.LocalOnly{}
+	default:
+		return setup.Plan{}, fmt.Errorf("unknown cloud mode %q; want synced, rclone, or local", req.Cloud.Mode)
+	}
+	return setup.Plan{
+		VaultDir:     vaultPath,
+		ProfileName:  req.Profile,
+		SaveKeychain: req.SaveKeychain,
+		Cloud:        cloud,
+	}, nil
+}
+
+// setupResultDTO is the secret-free projection of setup.Result the GUI renders
+// (design §3.4 / I-S1). It copies only the notes and identifiers Execute
+// produced; the password and any recovery phrase are never here (Execute never
+// puts them in Result, and the recovery ceremony runs separately).
+type setupResultDTO struct {
+	VaultID       string `json:"vaultId"`
+	VaultPath     string `json:"vaultPath"`
+	ProfileName   string `json:"profileName"`
+	KeychainSaved bool   `json:"keychainSaved"`
+	KeychainNote  string `json:"keychainNote,omitempty"`
+	CloudNote     string `json:"cloudNote,omitempty"`
+	PreflightNote string `json:"preflightNote,omitempty"`
+	FailedStep    string `json:"failedStep,omitempty"`
+}
+
+func newSetupResultDTO(res setup.Result) setupResultDTO {
+	return setupResultDTO{
+		VaultID:       res.VaultID,
+		VaultPath:     res.VaultDir,
+		ProfileName:   res.ProfileName,
+		KeychainSaved: res.KeychainSaved,
+		KeychainNote:  res.KeychainNote,
+		CloudNote:     res.CloudNote,
+		PreflightNote: res.PreflightNote,
+		FailedStep:    res.FailedStep,
+	}
+}
+
+// handleSetupDetect serves GET /api/setup/detect (design §3.4): the sync-folder
+// detection for the server's real home, through the SAME detector
+// userpath.SuggestedVaultPaths delegates to (C10). It is behind the existing
+// session auth like every /api route (I-S7); it writes nothing and reads no
+// secret.
+func (s *Server) handleSetupDetect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: "could not determine your home directory: " + err.Error()})
+		return
+	}
+	folders := setup.DetectSyncFolders(home, runtime.GOOS)
+	out := make([]setupFolderDTO, 0, len(folders))
+	for _, f := range folders {
+		out = append(out, setupFolderDTO{
+			Provider:    string(f.Provider),
+			DisplayName: setup.DisplayName(f.Provider),
+			Path:        f.Path,
+			Note:        f.Note,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"folders":        out,
+		"suggestedPaths": userpath.SuggestedVaultPaths(),
+	})
+}
+
+// handleSetupValidate serves POST /api/setup/validate (design §3.4): it runs
+// Plan.Validate and returns whether the plan is safe to run, with NO side
+// effects (nothing is created, no keychain touched). It never reads the
+// password field.
+func (s *Server) handleSetupValidate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var req setupRunRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	plan, err := req.plan()
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	if err := plan.Validate(); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "profileName": plan.ResolvedProfileName()})
+}
+
+// vaultHasRecoveryEntry reports whether the open vault holds at least one
+// recovery-key wrap entry. It is the signal for the persistent "no recovery
+// key" reminder banner (recovery-integration-3): the banner shows while this is
+// false and clears the moment a recovery entry exists, so a deferred recovery
+// key is re-surfaced without a separate persisted flag.
+func vaultHasRecoveryEntry(v *vault.Vault) bool {
+	if v == nil {
+		return false
+	}
+	for _, ref := range v.WrapEntryRefs() {
+		if ref.Type == vault.WrapTypeRecovery {
+			return true
+		}
+	}
+	return false
+}
+
+// setupDependencies returns the setup.Deps handleSetupRun runs with. Production
+// uses setup.DefaultDeps() (the network fetch stays denied, C11); a test may set
+// s.setupDeps to inject a fault so the cloud-step soft-failure path is exercised
+// deterministically. It never carries a secret.
+func (s *Server) setupDependencies() setup.Deps {
+	if s.setupDeps != nil {
+		return *s.setupDeps
+	}
+	return setup.DefaultDeps()
+}
+
+// isCloudStep reports whether a setup.Result.FailedStep names a post-create
+// cloud step (rclone install, remote add, remote test). A failure at one of
+// these leaves a fully-created, openable vault and profile behind, so it is a
+// soft failure surfaced as a warning with the vault opened (api-setup-1, §6/C9),
+// not the "could not create the vault" hard-failure path.
+func isCloudStep(step string) bool {
+	switch step {
+	case setup.StepRcloneEnsure, setup.StepRemoteAdd, setup.StepRemoteTest:
+		return true
+	default:
+		return false
+	}
+}
+
+// handleSetupRun serves POST /api/setup/run (design §3.4): it runs setup.Execute
+// (create + keychain + profile [+ rclone/remote]) and, on success, opens the new
+// vault into the session — the SAME session/vault wiring /api/init does. The
+// password arrives in the JSON body over the loopback session and is used only
+// to build and open the vault; it is NEVER logged, echoed, or placed in any
+// response (I-S1). The rclone runtime is never downloaded from here: DefaultDeps
+// denies the network fetch, so a missing runtime returns the offline remedy in
+// CloudNote rather than a silent download (C11).
+func (s *Server) handleSetupRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var req setupRunRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Password) == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "password is required"})
+		return
+	}
+	plan, err := req.plan()
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	res, err := setup.Execute(plan, req.Password, s.setupDependencies())
+	if err != nil {
+		// A post-create cloud-step soft failure (rclone install / remote add /
+		// remote test) leaves a fully-created, openable vault and profile behind:
+		// open it into the session and return 200 with the CloudNote as a warning
+		// so the stepper renders "the vault was created, but ..." instead of
+		// "Could not create the vault" (api-setup-1, §6/C9, I-S5). A create/profile
+		// failure keeps the 400 hard-failure path — nothing usable exists to open.
+		if res.VaultID != "" && isCloudStep(res.FailedStep) {
+			if v, oerr := vault.Open(res.VaultDir, req.Password); oerr == nil {
+				warnings := []string{}
+				if res.CloudNote != "" {
+					warnings = append(warnings, res.CloudNote)
+				}
+				if note := ratchetForWriteSession(v); note != "" {
+					warnings = append(warnings, note)
+				}
+				s.mu.Lock()
+				s.vaultPath = res.VaultDir
+				s.vault = v
+				s.pendingRecovery = nil
+				s.mu.Unlock()
+				// Secret-free body: the DTO and CloudNote never carry the password
+				// (Execute never puts it in Result; I-S1, T13).
+				writeJSON(w, http.StatusOK, map[string]any{"ok": true, "opened": true, "result": newSetupResultDTO(res), "warnings": warnings})
+				return
+			}
+			// If the created vault cannot be reopened, fall through to the honest
+			// error body (which still names what exists via the result DTO).
+		}
+		// Secret-free error body: Execute's error and the Result notes never
+		// carry the password (I-S1, proven by T13).
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error(), "result": newSetupResultDTO(res)})
+		return
+	}
+	// Open the freshly-created vault into the session, exactly as /api/init does
+	// after a create.
+	v, oerr := vault.Open(res.VaultDir, req.Password)
+	if oerr != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: "vault was created but could not be opened: " + oerr.Error()})
+		return
+	}
+	warnings := []string{}
+	if note := ratchetForWriteSession(v); note != "" {
+		warnings = append(warnings, note)
+	}
+	s.mu.Lock()
+	s.vaultPath = res.VaultDir
+	s.vault = v
+	s.pendingRecovery = nil
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "opened": true, "result": newSetupResultDTO(res), "warnings": warnings})
 }
 
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
@@ -3700,9 +4084,27 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
   .checkline { width: 100%; }
   table { min-width: 620px; }
 }
+/* First-run stepper (design §3.4): shown only when the server renders the page
+   in first-run mode; it replaces the full 22-panel page until the user finishes
+   setup or follows "Skip to advanced". */
+#setup-stepper { display: none; }
+body.first-run #setup-stepper { display: block; }
+body.first-run > header .jump-links { display: none; }
+body.first-run .app-shell > .content > section:not(#setup-stepper) { display: none; }
+#setup-stepper .step { display: none; }
+#setup-stepper .step.active { display: block; }
+#setup-stepper .step-dots { display: flex; gap: 8px; margin: 6px 0 14px; flex-wrap: wrap; }
+#setup-stepper .step-dot { font-size: 12px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; }
+#setup-stepper .step-dot.current { color: var(--fg); border-color: var(--button-border); font-weight: 600; }
+#setup-stepper .provider-choice { display: block; margin: 6px 0; }
+#setup-stepper .caveat { color: var(--muted); font-size: 13px; margin-top: 4px; }
+#setup-stepper .skip-advanced { float: right; font-size: 13px; }
+#setup-stepper pre.phrase { white-space: pre-wrap; word-break: break-all; }
+#setup-stepper .field-error { display: block; margin: 4px 0 0; color: var(--danger, #b00020); font-size: 13px; }
+#setup-stepper .field-error.field-ok { color: var(--muted); }
 </style>
 </head>
-<body>
+<body data-first-run="{{if .FirstRun}}true{{else}}false{{end}}" class="{{if .FirstRun}}first-run{{end}}">
 <header>
   <div class="header-row">
     <div class="header-main">
@@ -3730,10 +4132,112 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
     <a href="#keys-panel">SSH keys</a>
   </nav>
   <div id="compatWarning" class="compat-warning" role="alert"></div>
+  {{if .SkippedFirstRun}}<div id="backToGuided" class="notice-banner" role="status"><span class="notice-title">Guided setup</span> You skipped the first-run wizard. <a href="/?guided=1">Back to guided setup</a> &mdash; available until you create your first vault.</div>{{end}}
+  <div id="recoveryReminder" class="notice-banner" role="status" hidden><button class="notice-dismiss" type="button" aria-label="Dismiss" onclick="dismissRecoveryReminder()">x</button><span class="notice-title">No recovery key</span> This vault has no recovery key. Without one, a forgotten password means the vault cannot be opened. Create one from the Password &amp; recovery panel with &ldquo;Generate recovery key&rdquo;.</div>
   <div id="noticeBanner" class="notice-banner" role="status" hidden></div>
 </header>
 <main class="app-shell">
 <div class="content">
+<section id="setup-stepper" aria-label="First-run setup">
+  <a class="skip-advanced" href="/?advanced=1">Skip to advanced view</a>
+  <h2>Set up your encrypted vault</h2>
+  <p class="hint">A few quick steps: choose where the vault lives and how it reaches the cloud, pick a password, create the vault, then set up a recovery key. Every default is chosen for you; you can change anything later in the advanced view.</p>
+  <div class="step-dots">
+    <span class="step-dot" data-dot="0">1. Location &amp; cloud</span>
+    <span class="step-dot" data-dot="1">2. Password</span>
+    <span class="step-dot" data-dot="2">3. Create</span>
+    <span class="step-dot" data-dot="3">4. Recovery key</span>
+    <span class="step-dot" data-dot="4">5. Done</span>
+  </div>
+  <div id="setupMessage" class="notice-banner" role="status" hidden></div>
+
+  <div class="step" data-step="0">
+    <h3>Where should the vault live?</h3>
+    <p class="hint">The vault is ordinary encrypted files in a plain folder. The easiest setup is to put it inside a folder a sync client (Dropbox, OneDrive, iCloud Drive, Google Drive, Nextcloud, Syncthing) already keeps in the cloud &mdash; then no extra software is needed.</p>
+    <div id="setupProviders"><p class="hint">Looking for sync folders on this computer&hellip;</p></div>
+    <label class="provider-choice"><input type="radio" name="setupLoc" value="custom"> A folder I choose myself</label>
+    <label>Vault folder path
+      <input id="setupVaultPath" autocomplete="off" placeholder="~/open-seavault-rclone/MyVault">
+      <small>Where the encrypted chunks are stored. If this sits inside a sync folder, that client moves it to the cloud automatically.</small>
+    </label>
+    <label class="provider-choice"><input type="radio" name="setupCloud" value="synced" checked> A sync client already watches this folder</label>
+    <label class="provider-choice"><input type="radio" name="setupCloud" value="local"> Just this computer / an external drive (no cloud sync)</label>
+    <label class="provider-choice"><input type="radio" name="setupCloud" value="rclone"> An rclone remote I already configured</label>
+    <div id="setupRcloneFields" hidden>
+      <label>rclone remote name
+        <input id="setupRemoteName" autocomplete="off" placeholder="myremote">
+      </label>
+      <label>Remote path
+        <input id="setupRemotePath" autocomplete="off" placeholder="myremote:vault">
+      </label>
+      <p class="hint">U1 uses an rclone remote you have already configured or imported. The runtime is never downloaded from here; if it is missing you will see how to install it offline.</p>
+    </div>
+    <p id="setupLocCaveat" class="caveat"></p>
+    <p class="row-actions"><button type="button" class="operation" onclick="setupNext(0)">Continue</button></p>
+  </div>
+
+  <div class="step" data-step="1">
+    <h3>Choose a password</h3>
+    <p class="hint">This password unlocks the vault. There is no way to reset it without a recovery key (the next-but-one step), so pick something you can remember.</p>
+    <label>Password
+      <input id="setupPassword" type="password" autocomplete="new-password">
+    </label>
+    <label>Confirm password
+      <input id="setupPassword2" type="password" autocomplete="new-password">
+    </label>
+    <small id="setupPassword2Error" class="field-error" role="alert" hidden></small>
+    <label class="checkline"><input id="setupKeychain" type="checkbox" checked> Remember it in this computer's OS keychain</label>
+    <p class="row-actions"><button type="button" onclick="setupGo(0)">Back</button><button type="button" class="operation" onclick="setupNext(1)">Continue</button></p>
+  </div>
+
+  <div class="step" data-step="2">
+    <h3>Create the vault</h3>
+    <div id="setupReview" class="table-wrap"></div>
+    <p class="row-actions"><button type="button" onclick="setupGo(1)">Back</button><button type="button" class="operation" onclick="setupRun()">Create vault</button></p>
+  </div>
+
+  <div class="step" data-step="3">
+    <h3>Create a recovery key (recommended)</h3>
+    <p class="hint">A recovery key is a one-time phrase that can unlock the vault and set a new password if you ever forget it. Without one, a forgotten password means the vault cannot be opened. You can set this up now or be reminded after your first file.</p>
+    <div id="setupRecoveryStart">
+      <p class="row-actions">
+        <button type="button" class="operation" onclick="setupRecoveryGenerate()">Set up a recovery key now</button>
+        <button type="button" class="secondary" onclick="setupRecoveryDefer()">Remind me later</button>
+      </p>
+    </div>
+    <div id="setupRecoveryPhraseBox" hidden>
+      <div id="setupRecoveryPhraseStep">
+        <p class="hint">This phrase is shown ONCE and never stored. Write it down, or download / print it now &mdash; the next step hides it and asks you to re-type it from your saved copy.</p>
+        <pre id="setupRecoveryPhrase" class="table-wrap phrase"></pre>
+        <p class="row-actions">
+          <button type="button" class="secondary" onclick="setupRecoveryDownload()">Download phrase</button>
+          <button type="button" class="secondary" onclick="setupRecoveryPrint()">Print phrase</button>
+        </p>
+        <p class="row-actions">
+          <button type="button" class="operation" onclick="setupRecoveryWrittenDown()">I saved it &mdash; continue</button>
+          <button type="button" class="secondary" onclick="setupRecoveryCancel()">Cancel</button>
+        </p>
+      </div>
+      <div id="setupRecoveryReadbackStep" hidden>
+        <p class="hint">Re-enter the recovery phrase from your saved copy to confirm before it is stored. Paste is disabled so the re-entry proves you captured it off-screen.</p>
+        <label>Re-enter the recovery phrase
+          <input id="setupRecoveryReadback" autocomplete="off" onpaste="return false" ondrop="return false" ondragover="return false" placeholder="type the phrase from your saved copy">
+        </label>
+        <p class="row-actions">
+          <button type="button" class="operation" onclick="setupRecoveryCommit()">Confirm and save recovery key</button>
+          <button type="button" class="secondary" onclick="setupRecoveryCancel()">Cancel</button>
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <div class="step" data-step="4">
+    <h3>All set</h3>
+    <div id="setupDone" class="table-wrap"></div>
+    <p class="row-actions"><button type="button" class="operation" onclick="setupFinish()">Open the app</button></p>
+  </div>
+</section>
+
 <section id="files-panel">
   <h2>WebDAV file manager</h2>
   <p class="hint">This is open-seavault-rclone's built-in WebDAV client. It talks to the local same-origin WebDAV endpoint and does not depend on Finder, Windows Explorer, GNOME Files, KDE Dolphin, davfs2, WinFsp, macFUSE, or FUSE.</p>
@@ -3933,7 +4437,7 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
       <p class="hint">Re-enter the recovery phrase from your written copy to confirm before it is saved. Paste is disabled so the re-entry proves you captured it off-screen.</p>
       <div class="form-grid">
         <label>Re-enter the recovery phrase to confirm
-          <input id="recoveryReadback" autocomplete="off" onpaste="return false" placeholder="type the phrase from your written copy">
+          <input id="recoveryReadback" autocomplete="off" onpaste="return false" ondrop="return false" ondragover="return false" placeholder="type the phrase from your written copy">
         </label>
       </div>
       <p class="row-actions">
@@ -4543,7 +5047,25 @@ function renderAvailableVaults(status){
     return '<article class="vault-card '+cls+'"><header><span class="vault-name">'+esc(v.name)+'</span><span class="pill">'+esc(v.status)+'</span></header><div class="vault-path">'+esc(v.vaultPath)+'</div><small>'+key+(v.open?' | active vault':'')+'</small>'+stats+err+'<progress value="'+pct+'" max="1"></progress><label>Password <input id="'+passwordId+'" type="password" autocomplete="current-password" placeholder="optional; blank uses keychain when active"></label><p class="row-actions">'+keyIndicator+'<button data-name="'+esc(v.name)+'" data-path="'+esc(v.vaultPath)+'" data-password-id="'+passwordId+'" onclick="openSavedVaultFromPassword(this.dataset.name,this.dataset.path,this.dataset.passwordId,false)">'+openLabel+'</button><button data-name="'+esc(v.name)+'" data-path="'+esc(v.vaultPath)+'" data-password-id="'+passwordId+'" onclick="openSavedVaultFromPassword(this.dataset.name,this.dataset.path,this.dataset.passwordId,true)">Open and save keychain</button><button data-name="'+esc(v.name)+'" data-path="'+esc(v.vaultPath)+'" onclick="selectVaultCard(this.dataset.name,this.dataset.path)">Select</button><button data-name="'+esc(v.name)+'" data-path="'+esc(v.vaultPath)+'" data-password-id="'+passwordId+'" onclick="verifySavedVault(this.dataset.name,this.dataset.path,this.dataset.passwordId)">Verify</button></p></article>';
   }).join('');
 }
+let recoveryReminderDismissed = false;
+function dismissRecoveryReminder(){
+  recoveryReminderDismissed = true;
+  const box = $('recoveryReminder');
+  if(box) box.hidden = true;
+}
+// renderRecoveryReminder surfaces a persistent, dismissible "no recovery key"
+// banner whenever a vault is open that holds no recovery entry, re-surfacing a
+// deferred recovery key on every full-page load until one exists
+// (recovery-integration-3). Dismiss hides it for this page load; a reload brings
+// it back until a recovery key is created.
+function renderRecoveryReminder(s){
+  const box = $('recoveryReminder');
+  if(!box) return;
+  const show = !!(s && s.open && s.recoveryMissing) && !recoveryReminderDismissed;
+  box.hidden = !show;
+}
 function renderTopVaultStrip(s){
+  renderRecoveryReminder(s);
   const box = $('topSavedVaultStrip');
   if(!box) return;
   const rows = (s && s.availableVaults) || [];
@@ -5368,6 +5890,281 @@ function reportBrowserSupport(){
   if(!supportsFolder) $('folderSupportHint').textContent = 'This browser may not support folder selection. Use local path ingest for folder imports.';
   if(missing.length){ const w=$('compatWarning'); w.style.display='block'; w.textContent='This browser is missing required features: ' + missing.join(', ') + '. Use a current Chromium, Edge, Safari, or Firefox release, or use the CLI.'; }
 }
+/* ---- First-run stepper (design §3.4) ---------------------------------- */
+let setupState = { step: 0, folders: [], provider: '', result: null };
+function setupMsg(text, level){
+  const b = $('setupMessage');
+  if(!b) return;
+  b.className = 'notice-banner' + (level ? ' ' + level : '');
+  b.textContent = text || '';
+  b.hidden = !text;
+}
+function setupJoin(dir, child){
+  if(!dir) return child;
+  const sep = dir.indexOf('\\') >= 0 && dir.indexOf('/') < 0 ? '\\' : '/';
+  return dir.replace(/[\/\\]+$/, '') + sep + child;
+}
+function setupGo(step){
+  setupState.step = step;
+  document.querySelectorAll('#setup-stepper .step').forEach(el => {
+    el.classList.toggle('active', Number(el.dataset.step) === step);
+  });
+  document.querySelectorAll('#setup-stepper .step-dot').forEach(el => {
+    el.classList.toggle('current', Number(el.dataset.dot) === step);
+  });
+  setupMsg('');
+}
+function setupSelectedLoc(){
+  const el = document.querySelector('#setup-stepper input[name="setupLoc"]:checked');
+  return el ? el.value : 'custom';
+}
+function setupSelectedCloud(){
+  const el = document.querySelector('#setup-stepper input[name="setupCloud"]:checked');
+  return el ? el.value : 'synced';
+}
+function setupApplyLoc(){
+  const loc = setupSelectedLoc();
+  const caveat = $('setupLocCaveat');
+  if(loc.indexOf('prov-') === 0){
+    const idx = Number(loc.slice(5));
+    const f = setupState.folders[idx];
+    if(f){
+      const vp = $('setupVaultPath');
+      if(vp) vp.value = setupJoin(f.path, 'MyVault');
+      setupState.provider = f.provider;
+      const syncedRadio = document.querySelector('#setup-stepper input[name="setupCloud"][value="synced"]');
+      if(syncedRadio) syncedRadio.checked = true;
+      if(caveat) caveat.textContent = f.note || '';
+    }
+  } else {
+    setupState.provider = '';
+    if(caveat) caveat.textContent = '';
+  }
+  setupApplyCloud();
+}
+function setupApplyCloud(){
+  const rc = setupSelectedCloud() === 'rclone';
+  const fields = $('setupRcloneFields');
+  if(fields) fields.hidden = !rc;
+}
+function setupCloudPayload(){
+  const mode = setupSelectedCloud();
+  if(mode === 'rclone'){
+    return { mode: 'rclone', remoteName: ($('setupRemoteName') && $('setupRemoteName').value.trim()) || '', remotePath: ($('setupRemotePath') && $('setupRemotePath').value.trim()) || '' };
+  }
+  if(mode === 'local'){ return { mode: 'local' }; }
+  return { mode: 'synced', provider: setupState.provider || '' };
+}
+function setupPlanBody(withPassword){
+  const body = {
+    vaultPath: ($('setupVaultPath') && $('setupVaultPath').value.trim()) || '',
+    saveKeychain: !!($('setupKeychain') && $('setupKeychain').checked),
+    cloud: setupCloudPayload()
+  };
+  if(withPassword){ body.password = ($('setupPassword') && $('setupPassword').value) || ''; }
+  return body;
+}
+async function setupNext(fromStep){
+  if(fromStep === 0){
+    const vp = ($('setupVaultPath') && $('setupVaultPath').value.trim()) || '';
+    if(!vp){ setupMsg('Enter or choose a vault folder to continue.', 'error'); return; }
+    try {
+      const res = await api('/api/setup/validate', {method:'POST', headers:jsonHeaders, body: JSON.stringify(setupPlanBody(false))});
+      if(res && res.ok === false){ setupMsg(res.error || 'That vault folder cannot be used.', 'error'); return; }
+    } catch(e){ setupMsg('Could not validate the vault folder: ' + e.message, 'error'); return; }
+    setupGo(1);
+    return;
+  }
+  if(fromStep === 1){
+    const p1 = ($('setupPassword') && $('setupPassword').value) || '';
+    const p2 = ($('setupPassword2') && $('setupPassword2').value) || '';
+    if(!p1){ setupFieldError('setupPassword2Error', ''); setupMsg('Enter a password.', 'error'); return; }
+    if(p1 !== p2){
+      // Render the mismatch BESIDE the confirm field, not only in the top banner
+      // (GUI-6), so the error points at the field the owner has to fix.
+      setupFieldError('setupPassword2Error', 'The password and its confirmation do not match.');
+      setupMsg('The password and its confirmation do not match.', 'error');
+      const c = $('setupPassword2'); if(c) c.focus();
+      return;
+    }
+    setupFieldError('setupPassword2Error', '');
+    setupRenderReview();
+    setupGo(2);
+    return;
+  }
+}
+// setupFieldError renders a validation message beside a specific field (GUI-6).
+// ok=true styles it as a neutral confirmation (the live "passwords match" hint)
+// rather than an error.
+function setupFieldError(id, text, ok){
+  const el = $(id);
+  if(!el) return;
+  el.textContent = text || '';
+  el.className = 'field-error' + (ok ? ' field-ok' : '');
+  el.hidden = !text;
+}
+// setupLiveMatch gives a live match/mismatch indicator beside the confirm field
+// as the owner types, so a mistype is caught before Continue (GUI-6).
+function setupLiveMatch(){
+  const p1 = ($('setupPassword') && $('setupPassword').value) || '';
+  const p2 = ($('setupPassword2') && $('setupPassword2').value) || '';
+  if(!p2){ setupFieldError('setupPassword2Error', ''); return; }
+  if(p1 === p2){ setupFieldError('setupPassword2Error', 'Passwords match.', true); }
+  else { setupFieldError('setupPassword2Error', 'The password and its confirmation do not match.'); }
+}
+function setupRenderReview(){
+  const b = setupPlanBody(false);
+  let cloudText = 'Just this computer / external drive (no cloud sync).';
+  if(b.cloud.mode === 'synced'){ cloudText = 'Placed inside a folder your sync client watches' + (b.cloud.provider ? ' (' + esc(b.cloud.provider) + ')' : '') + '.'; }
+  else if(b.cloud.mode === 'rclone'){ cloudText = 'Through the rclone remote "' + esc(b.cloud.remoteName) + '".'; }
+  const box = $('setupReview');
+  if(box){
+    box.innerHTML = '<p><strong>Vault folder:</strong> ' + esc(b.vaultPath) + '</p>' +
+      '<p><strong>Password remembered in keychain:</strong> ' + (b.saveKeychain ? 'yes' : 'no') + '</p>' +
+      '<p><strong>Cloud:</strong> ' + cloudText + '</p>';
+  }
+}
+async function setupRun(){
+  try {
+    setupMsg('Creating the vault…', 'info');
+    const res = await api('/api/setup/run', {method:'POST', headers:jsonHeaders, body: JSON.stringify(setupPlanBody(true))});
+    setupState.result = (res && res.result) || null;
+    if($('setupPassword')) $('setupPassword').value = '';
+    if($('setupPassword2')) $('setupPassword2').value = '';
+    // A 200 with warnings is a post-create cloud-step soft failure (api-setup-1):
+    // the vault was created and is open, so keep going to the recovery step and
+    // surface the warning (e.g. "the vault was created, but the remote did not
+    // verify ...") rather than the "Could not create the vault" error.
+    const warns = (res && Array.isArray(res.warnings)) ? res.warnings.filter(w => String(w||'').trim() !== '') : [];
+    if(warns.length){ setupMsg(warns.join(' '), 'warning'); }
+    else { setupMsg(''); }
+    setupGo(3);
+  } catch(e){ setupMsg('Could not create the vault: ' + e.message, 'error'); }
+}
+async function setupRecoveryGenerate(){
+  try {
+    const res = await api('/api/recovery/generate', {method:'POST', headers:jsonHeaders, body: JSON.stringify({})});
+    if($('setupRecoveryPhrase')) $('setupRecoveryPhrase').textContent = (res && res.phrase) || '';
+    if($('setupRecoveryReadback')) $('setupRecoveryReadback').value = '';
+    if($('setupRecoveryStart')) $('setupRecoveryStart').hidden = true;
+    if($('setupRecoveryPhraseBox')) $('setupRecoveryPhraseBox').hidden = false;
+    if($('setupRecoveryPhraseStep')) $('setupRecoveryPhraseStep').hidden = false;
+    if($('setupRecoveryReadbackStep')) $('setupRecoveryReadbackStep').hidden = true;
+  } catch(e){ setupMsg('Could not generate a recovery key: ' + e.message, 'error'); }
+}
+function setupRecoveryPhraseText(){
+  return ($('setupRecoveryPhrase') && $('setupRecoveryPhrase').textContent) || '';
+}
+function setupRecoveryDownload(){
+  const phrase = setupRecoveryPhraseText();
+  if(!phrase) return;
+  const blob = new Blob([phrase + '\n'], {type:'text/plain'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'seavault-recovery-key.txt';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function setupRecoveryPrint(){
+  const phrase = setupRecoveryPhraseText();
+  if(!phrase) return;
+  const win = window.open('', '_blank');
+  if(!win){ setupMsg('The browser blocked the print window. Allow pop-ups or use Download.', 'error'); return; }
+  win.document.write('<pre style="font-size:16px;white-space:pre-wrap;word-break:break-all">' + esc(phrase) + '</pre>');
+  win.document.close();
+  win.focus();
+  win.print();
+}
+function setupRecoveryWrittenDown(){
+  // Hide and clear the phrase BEFORE the read-back appears (hide-then-retype).
+  if($('setupRecoveryPhrase')) $('setupRecoveryPhrase').textContent = '';
+  if($('setupRecoveryPhraseStep')) $('setupRecoveryPhraseStep').hidden = true;
+  if($('setupRecoveryReadbackStep')) $('setupRecoveryReadbackStep').hidden = false;
+  const rb = $('setupRecoveryReadback');
+  if(rb){ rb.value = ''; rb.focus(); }
+}
+async function setupRecoveryCommit(){
+  try {
+    const readback = ($('setupRecoveryReadback') && $('setupRecoveryReadback').value) || '';
+    if(!readback.trim()){ setupMsg('Re-enter the recovery phrase to confirm.', 'error'); return; }
+    await api('/api/recovery/commit', {method:'POST', headers:jsonHeaders, body: JSON.stringify({readback: readback})});
+    if($('setupRecoveryReadback')) $('setupRecoveryReadback').value = '';
+    setupRenderDone('A recovery key was saved for this vault.');
+    setupGo(4);
+  } catch(e){ setupMsg('Recovery key not saved: ' + e.message, 'error'); }
+}
+function setupRecoveryCancel(){
+  if($('setupRecoveryPhrase')) $('setupRecoveryPhrase').textContent = '';
+  if($('setupRecoveryReadback')) $('setupRecoveryReadback').value = '';
+  if($('setupRecoveryPhraseBox')) $('setupRecoveryPhraseBox').hidden = true;
+  if($('setupRecoveryStart')) $('setupRecoveryStart').hidden = false;
+}
+function setupRecoveryDefer(){
+  setupRenderDone('No recovery key yet. Create one any time from the Password & recovery panel with "Generate recovery key" — without it, a forgotten password cannot be recovered.');
+  setupGo(4);
+}
+function setupRenderDone(recoveryLine){
+  const r = setupState.result || {};
+  const box = $('setupDone');
+  if(box){
+    let html = '<p>Your encrypted vault is ready and open.</p>';
+    if(r.vaultPath) html += '<p><strong>Vault folder:</strong> ' + esc(r.vaultPath) + '</p>';
+    if(r.profileName) html += '<p><strong>Saved as:</strong> ' + esc(r.profileName) + '</p>';
+    if(r.keychainNote) html += '<p class="caveat">' + esc(r.keychainNote) + '</p>';
+    if(r.cloudNote) html += '<p class="caveat">' + esc(r.cloudNote) + '</p>';
+    if(r.preflightNote) html += '<p class="caveat">' + esc(r.preflightNote) + '</p>';
+    html += '<p>' + esc(recoveryLine) + '</p>';
+    box.innerHTML = html;
+  }
+}
+function setupFinish(){
+  // The vault is open in the session, so a plain reload renders the full page.
+  window.location.href = '/';
+}
+function setupStepperInit(){
+  if(!document.body.classList.contains('first-run')) return;
+  document.querySelectorAll('#setup-stepper input[name="setupLoc"]').forEach(el => {
+    el.addEventListener('change', setupApplyLoc);
+  });
+  document.querySelectorAll('#setup-stepper input[name="setupCloud"]').forEach(el => {
+    el.addEventListener('change', setupApplyCloud);
+  });
+  ['setupPassword', 'setupPassword2'].forEach(id => {
+    const el = $(id);
+    if(el) el.addEventListener('input', setupLiveMatch);
+  });
+  setupGo(0);
+  setupLoadDetect();
+}
+async function setupLoadDetect(){
+  const box = $('setupProviders');
+  try {
+    const res = await api('/api/setup/detect');
+    setupState.folders = (res && res.folders) || [];
+    const suggested = (res && res.suggestedPaths) || [];
+    if(box){
+      if(setupState.folders.length === 0){
+        box.innerHTML = '<p class="hint">No known sync folders were found on this computer. Choose a folder yourself below, or pick "just this computer".</p>';
+      } else {
+        box.innerHTML = setupState.folders.map((f,i) =>
+          '<label class="provider-choice"><input type="radio" name="setupLoc" value="prov-' + i + '"' + (i === 0 ? ' checked' : '') + '> Inside your ' + esc(f.displayName) + ' folder (' + esc(f.path) + ')</label>'
+        ).join('');
+        box.querySelectorAll('input[name="setupLoc"]').forEach(el => el.addEventListener('change', setupApplyLoc));
+      }
+    }
+    const vp = $('setupVaultPath');
+    if(vp && !vp.value){
+      if(setupState.folders.length > 0){ vp.value = setupJoin(setupState.folders[0].path, 'MyVault'); }
+      else if(suggested.length > 0){ vp.value = setupJoin(suggested[0], 'MyVault'); }
+    }
+    setupApplyLoc();
+  } catch(e){
+    if(box) box.innerHTML = '<p class="hint">Could not detect sync folders: ' + esc(e.message) + '. Choose a folder yourself below.</p>';
+  }
+}
 document.addEventListener('DOMContentLoaded', () => {
   const fileInput = $('fileInput');
   const folderInput = $('folderInput');
@@ -5386,6 +6183,7 @@ document.addEventListener('DOMContentLoaded', () => {
     dropZone.addEventListener('drop', async e => { e.preventDefault(); dropZone.classList.remove('dragover'); try { const items = await collectDroppedUploadItems(e.dataTransfer); await uploadDavItems(items); } catch(err){ showError('Folder drop failed', humanFetchError(err)); } });
   }
   updateUploadSelectionSummaries();
+  setupStepperInit();
 });
 document.addEventListener('keydown', ev => {
   const modal = $('vaultPasswordModal');

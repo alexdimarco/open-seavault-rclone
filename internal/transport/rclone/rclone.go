@@ -46,7 +46,13 @@ func (r *CommandRunner) Run(ctx context.Context, args []string) (string, error) 
 	out, err := cmd.CombinedOutput()
 	redacted := Redact(string(out))
 	if err != nil {
-		return redacted, fmt.Errorf("rclone %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(redacted))
+		// The full CombinedOutput can be rclone's ~60-line usage/help block (a
+		// flag-parse failure prints it). Callers surface this error verbatim
+		// (setup's CloudNote, the transport Result.Error), so the embedded output
+		// is summarised to the first line plus a short tail — never the whole
+		// block (ADM-3). The full text still rides in the returned string for the
+		// detailed log/output sink.
+		return redacted, fmt.Errorf("rclone %s failed: %w: %s", strings.Join(args, " "), err, summarizeOutput(redacted))
 	}
 	return redacted, nil
 }
@@ -210,7 +216,14 @@ func appendBaseArgs(p remotes.Profile, args []string) []string {
 			out = append(out, "--config", p.Remote.RcloneConfigPath)
 		}
 	}
-	out = append(out, "--log-format", "date,time,level,msg")
+	// rclone validates --log-format tokens and aborts on an unknown one. The
+	// only tokens it accepts are date, time, microseconds, UTC, longfile,
+	// shortfile, pid, nolevel, json (v1.74) — "level" and "msg" are NOT tokens
+	// (the level and message are always emitted), so the old "date,time,level,msg"
+	// made every command that carried base args (lsf/copy/check/…) die on flag
+	// parsing before it reached the remote (ADM-3). "date,time" is rclone's own
+	// default and keeps the level + message.
+	out = append(out, "--log-format", "date,time")
 	if isTransferCommand(args) {
 		out = append(out, "--transfers", fmt.Sprintf("%d", p.Remote.Transfers))
 		out = append(out, "--checkers", fmt.Sprintf("%d", p.Remote.Checkers))
@@ -318,6 +331,42 @@ func firstLine(s string) string {
 		return strings.TrimSpace(s[:idx])
 	}
 	return s
+}
+
+// summarizeOutput condenses multi-line subprocess output for an error message:
+// short output is returned as-is, but anything longer than summaryHeadLines +
+// summaryTailLines is collapsed to its first line, an elision marker naming how
+// many lines were dropped, and a short tail. This keeps rclone's ~60-line usage
+// block (printed on a flag-parse failure) from being pasted whole into a
+// CloudNote or a transport Result.Error (ADM-3). It never invents content: the
+// head and tail lines are verbatim (already redacted upstream).
+func summarizeOutput(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return ""
+	}
+	lines := strings.Split(trimmed, "\n")
+	// Drop blank lines so the tail carries real content, not padding.
+	nonEmpty := lines[:0]
+	for _, ln := range lines {
+		if strings.TrimSpace(ln) != "" {
+			nonEmpty = append(nonEmpty, strings.TrimRight(ln, "\r"))
+		}
+	}
+	lines = nonEmpty
+	const summaryHeadLines = 1
+	const summaryTailLines = 2
+	if len(lines) <= summaryHeadLines+summaryTailLines {
+		return strings.Join(lines, "; ")
+	}
+	head := lines[:summaryHeadLines]
+	tail := lines[len(lines)-summaryTailLines:]
+	omitted := len(lines) - summaryHeadLines - summaryTailLines
+	var b strings.Builder
+	b.WriteString(strings.Join(head, "; "))
+	fmt.Fprintf(&b, " … (%d more lines omitted) … ", omitted)
+	b.WriteString(strings.Join(tail, "; "))
+	return b.String()
 }
 
 func Redact(s string) string {

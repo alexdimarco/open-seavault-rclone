@@ -4,7 +4,62 @@ open-seavault-rclone is a cross-platform prototype for client-side encrypted sto
 
 This repository is a working MVP, not an audited production replacement for Cryptomator.
 
+## Quick start
 
+New here? Run the guided wizard:
+
+```bash
+seavault setup
+```
+
+Its first question is where the vault should live. If it finds a cloud-sync folder on your machine — Dropbox, OneDrive, iCloud Drive, Google Drive, Nextcloud, or Syncthing — it offers to put the vault **inside that folder** (iCloud Drive and Google Drive are detected on macOS and Windows only; Dropbox, OneDrive, Nextcloud and Syncthing on every platform). That is the easiest setup and needs no rclone, no remote, and no transport to configure: the vault is just encrypted files in a plain directory, so the sync client you already run uploads it for you (the wizard shows the provider's placement caveat — for example keeping the folder available offline — and asks you to confirm your client shows it uploading; it never claims "synced" on its own). The per-provider placement caveats are listed in [docs/cloud-provider-notes.md](docs/cloud-provider-notes.md). With no sync client it falls back to `~/open-seavault-rclone/MyVault`. It then takes a password, offers to remember it in your OS keychain and to create a recovery key, and opens the app. The recovery key is optional at that step — set it up now, or defer it; if you defer (and a non-interactive run always defers, because a phrase nobody has seen must not be committed) the wizard reminds you with the exact `seavault recovery generate` command to run later, and the app shows a dismissible "no recovery key" reminder for any open vault that has none. Advanced knobs stay one flag away — `seavault setup --expert` adds the KDF and chunk-size parameters (validated against the same floor as `init`).
+
+### Non-interactive setup (for scripts)
+
+Pass `--preset` for an unattended run and supply the password through `SEAVAULT_PASSWORD` — never on the command line:
+
+```bash
+export SEAVAULT_PASSWORD='your-password'
+# Inside a folder your own sync client already watches:
+seavault setup --preset synced-folder --vault ~/Dropbox/MyVault
+# Local-only vault (no cloud):
+seavault setup --preset local --vault ~/open-seavault-rclone/MyVault
+# An rclone remote that already exists (configured in rclone or imported):
+seavault setup --preset rclone --vault ~/open-seavault-rclone/MyVault --remote myremote --allow-download
+```
+
+A non-interactive run never generates a recovery key (a phrase nobody has seen must not be committed) — it prints the command to create one afterwards.
+
+**Keychain by default.** A `--preset` run stores the vault password in your OS keychain by default, so the vault opens later without a prompt. Pass `--no-keychain` to opt out (the password then comes only from `SEAVAULT_PASSWORD` or an interactive prompt on later commands). `--no-open` has no effect under `--preset` — a scripted run never launches the GUI — and is accepted only for symmetry with the interactive form. Add `--profile NAME` to name the profile explicitly (it defaults to the vault folder's basename).
+
+**The rclone preset needs a remote that already exists.** In U1, `--preset rclone` (and the interactive rclone branch) only *use* an rclone remote that is already configured **on that machine** — setup never runs `rclone config` and never creates or edits a remote. Create the remote first with rclone's own `rclone config`, or in the GUI's Remote Repositories section, or import an existing rclone config into the app:
+
+```bash
+# One of these, per machine, before `setup --preset rclone`:
+rclone config                                             # rclone's own interactive config
+seavault remote config import ~/.config/rclone/rclone.conf  # import an existing rclone.conf
+```
+
+`--remote NAME` then names that existing remote. `--preset rclone` refuses to fetch the rclone runtime unless you pass `--allow-download`, or install it offline first with `seavault rclone install --offline-archive <zip>` / `--from-binary <path>`. See `seavault setup --help` for the full flag and exit-code contract.
+
+**Exit codes and idempotent re-runs (for fleets).** `seavault setup` exits **0** on success — and, under `--preset`, also exits **0** when a vault already exists at `--vault` and matches the requested plan (an idempotent no-op, so a provisioning loop can safely re-run the same command; it registers the profile if only that was missing). It exits **1** on failure: bad flags, a refused rclone download, an existing vault whose profile name already points at a *different* vault, or an error while creating the vault. Pass `--json` with `--preset` for a machine-readable result (vault ID, paths, and whether the vault already existed; never a secret) instead of the prose summary.
+
+### Undo a setup
+
+There is no `setup --undo`; a setup is undone by reversing the four things it creates, in order. Substitute your own profile name (the vault folder's basename by default) and vault path.
+
+```bash
+# 1. Remove the profile entry (the app forgets the saved vault location):
+seavault profile remove MyVault
+# 2. Delete the vault directory itself (this destroys the encrypted vault and its data):
+rm -rf ~/open-seavault-rclone/MyVault
+# 3. Delete the saved keychain password, if you stored one:
+seavault keychain delete MyVault
+# 4. rclone setups only — delete the remote the vault used:
+seavault remote delete myremote
+```
+
+Steps 1–3 apply to every setup; step 4 only to an rclone-backed vault. Deleting the vault directory (step 2) is the irreversible one — it removes the ciphertext and, with it, any data you have not exported elsewhere. If the vault lives inside a cloud-sync folder, let your sync client (or `rclone`) finish removing the deleted folder remotely, and empty the provider's trash if you need the copy gone from the cloud too.
 
 ## License
 
@@ -13,6 +68,21 @@ open-seavault-rclone is free software, licensed under the **GNU General Public L
 This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details. You are free to use, study, modify, and redistribute it under the terms of the GPL.
 
 Vendored and bundled third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The GPL does not grant trademark rights: the **open-seavault-rclone** and **Crescendum** names, logos, icons, favicons, wordmarks, and visual identity remain reserved &mdash; see [TRADEMARKS.md](TRADEMARKS.md).
+
+## What changed in v0.18 (setup wizard)
+
+- **`seavault setup`** — a guided first-run wizard that gets a new user from nothing to a working,
+  recoverable vault with every default chosen: it detects Dropbox, OneDrive, iCloud Drive, Google
+  Drive, Nextcloud and Syncthing folders and offers "inside your synced folder" first (no transport
+  to configure), sets a password with an OS-keychain offer, runs the recovery-key ceremony
+  (deferrable, with print-before-re-type), and only asks about the cloud when nothing is synced.
+  `--expert` exposes the KDF and chunk knobs; `--preset synced-folder|rclone|local` with
+  `SEAVAULT_PASSWORD` is the scriptable form (idempotent rerun, `--json`, documented exit codes).
+- **GUI first-run stepper** — the app opens on the same guided steps when nothing is set up yet,
+  with a way back from "skip to advanced" and a persisted recovery-deferral reminder.
+- Fixes surfaced by the reviews: the rclone `RemoteTest` argv bug that failed every real remote,
+  atomic vault creation with leftover detection, profile-name collisions caught before anything is
+  written, and the recovery phrase file refused inside the vault or a cloud-synced folder.
 
 ## What changed in v0.17 (Phase A2 config-and-key layer)
 
@@ -366,6 +436,8 @@ Do not bind the GUI to a public or shared network interface.
 ## CLI overview
 
 ```bash
+seavault setup [--expert] [--no-keychain] [--profile NAME] [--no-open]
+seavault setup --preset synced-folder|rclone|local --vault PATH [--remote NAME] [--allow-download] [--no-keychain] [--profile NAME] [--no-open]
 seavault init [flags] VAULT_DIR
 seavault put [--method auto|native|managed-rsync|system-rsync|rsync] [flags] VAULT_DIR_OR_PROFILE SOURCE_PATH [VIRTUAL_PATH]
 seavault get [flags] VAULT_DIR_OR_PROFILE VIRTUAL_PATH DEST_PATH
@@ -438,7 +510,7 @@ GOOS=windows GOARCH=amd64 go build -o dist/seavault-windows-amd64.exe ./cmd/seav
 - Managed rsync is optional. `--method auto` falls back to native ingest when managed/system rsync is unavailable; strict rsync modes require either a verified managed runtime or a system binary.
 - Native mount integrations are not included; `serve` provides a minimal WebDAV-compatible local endpoint.
 - Multi-device concurrent edits are preserved as conflict copies, but the app does not merge application-level document contents.
-- Password rotation, recovery keys, signed release pipelines, installer packages, and full admin policy enforcement are still future work.
+- Signed release pipelines, installer packages, and full admin policy enforcement are still future work. (Password rotation and recovery keys shipped in v0.17 — see the Phase A2 notes above.)
 
 ## Security boundary
 

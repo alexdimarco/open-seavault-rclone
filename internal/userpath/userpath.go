@@ -167,6 +167,144 @@ func firstMissingComponent(abs string) string {
 	return string(os.PathSeparator) + first
 }
 
+// SyncRoot is one detected consumer-sync-client folder: the provider that owns
+// it (a stable lowercase token: "dropbox", "onedrive", "icloud",
+// "googledrive", "nextcloud", "syncthing") and the absolute path of the folder
+// on disk. It carries no caveat text: the caveat catalog is owned by
+// internal/setup (design C7). SyncRoot is deliberately note-free so this
+// low-level package stays dependency-free.
+type SyncRoot struct {
+	Provider string
+	Path     string
+}
+
+// SyncFolderSegmentNames are the exact folder-name segments DetectSyncRoots
+// builds its per-provider sync-root paths from. It is the SINGLE source the
+// vault package's create-time preflight matcher consumes (hasSyncClientSegment),
+// so the compatibility note fires for every path the detector can return — no
+// segment the detector knows can be silently unknown to the matcher
+// (detection-preflight-1). The setup package's preflight T-row enforces this by
+// asserting a non-empty note for every DetectSyncRoots hit across the goos
+// table. Keep this list and the addDir/addGlob calls below in lock-step.
+var SyncFolderSegmentNames = []string{
+	"Dropbox",             // dropbox
+	"Nextcloud",           // nextcloud
+	"Sync",                // syncthing (marker-gated; see hasSyncthingMarker)
+	"OneDrive",            // onedrive (plain)
+	"com~apple~CloudDocs", // icloud (macOS Mobile Documents)
+	"iCloudDrive",         // icloud (Windows)
+	"Google Drive",        // googledrive (Windows home-relative)
+	"My Drive",            // googledrive (Windows G:\My Drive and macOS GoogleDrive-*/My Drive)
+}
+
+// SyncFolderSegmentPrefixes are the stems of the org-suffixed macOS
+// Library/CloudStorage folders (OneDrive-Personal, GoogleDrive-you@example.com);
+// a path segment beginning with one of these (followed by the account suffix) is
+// a sync-client folder. Consumed by the vault preflight matcher alongside
+// SyncFolderSegmentNames.
+var SyncFolderSegmentPrefixes = []string{"OneDrive-", "GoogleDrive-"}
+
+// syncthingMarkers are the files/directories Syncthing places inside every
+// folder it manages. A bare ~/Sync is a common, generic directory name (a
+// scratch folder, a project subdir), so it is reported as a Syncthing root ONLY
+// when one of these markers is present (detection-preflight-2). This stops the
+// wizard from auto-answering the cloud step "already synced" for a directory
+// that merely happens to be named Sync, while still recognising a real
+// Syncthing default folder.
+var syncthingMarkers = []string{".stfolder", ".stignore", ".stversions"}
+
+// hasSyncthingMarker reports whether dir carries a Syncthing folder marker.
+func hasSyncthingMarker(dir string) bool {
+	for _, m := range syncthingMarkers {
+		if _, err := os.Stat(filepath.Join(dir, m)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// DetectSyncRoots is the SINGLE OS-path sync-folder detector (design §4, C10):
+// internal/setup.DetectSyncFolders delegates to it (attaching the caveat from
+// its catalog) and SuggestedVaultPaths is built from it, so the two never
+// diverge (proven by T10). It is pure aside from filesystem existence checks —
+// home and goos are injected so the whole per-OS table is testable — and it
+// never writes. A hit requires an existing directory; globs are expanded and
+// every matching directory is a hit. Detection is advisory: it reports what is
+// present and changes nothing.
+//
+// The detector lives here, not in internal/setup, because internal/setup
+// imports internal/vault (for the shared KDF floor and the vault create path)
+// and internal/vault imports internal/userpath, so internal/userpath cannot
+// import internal/setup without an import cycle. C10 sanctions this direction
+// explicitly ("have SuggestedVaultPaths delegate to it, or vice versa"): the
+// single source of truth is DetectSyncRoots and setup.DetectSyncFolders is the
+// thin, catalog-attaching wrapper over it.
+func DetectSyncRoots(home, goos string) []SyncRoot {
+	home = strings.TrimSpace(home)
+	if home == "" {
+		return nil
+	}
+	var out []SyncRoot
+	seen := map[string]bool{}
+	addDir := func(provider, path string) {
+		path = filepath.Clean(path)
+		key := provider + "\x00" + path
+		if seen[key] {
+			return
+		}
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			seen[key] = true
+			out = append(out, SyncRoot{Provider: provider, Path: path})
+		}
+	}
+	addGlob := func(provider, pattern string) {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return
+		}
+		sort.Strings(matches)
+		for _, m := range matches {
+			addDir(provider, m)
+		}
+	}
+
+	// Common to every platform: the vendor's default home-relative folder name.
+	addDir("dropbox", filepath.Join(home, "Dropbox"))
+	addDir("nextcloud", filepath.Join(home, "Nextcloud"))
+	// Syncthing's default folder is the generic ~/Sync, so it is a root only
+	// when a Syncthing marker proves the directory really is a managed folder
+	// (detection-preflight-2) — a bare ~/Sync must not pre-answer "already
+	// synced".
+	if syncDir := filepath.Join(home, "Sync"); hasSyncthingMarker(syncDir) {
+		addDir("syncthing", syncDir)
+	}
+	addDir("onedrive", filepath.Join(home, "OneDrive"))
+
+	switch goos {
+	case "darwin":
+		addGlob("onedrive", filepath.Join(home, "Library", "CloudStorage", "OneDrive-*"))
+		addDir("icloud", filepath.Join(home, "Library", "Mobile Documents", "com~apple~CloudDocs"))
+		addGlob("googledrive", filepath.Join(home, "Library", "CloudStorage", "GoogleDrive-*", "My Drive"))
+	case "windows":
+		addDir("icloud", filepath.Join(home, "iCloudDrive"))
+		addDir("googledrive", filepath.Join(home, "Google Drive"))
+		addDir("googledrive", `G:\My Drive`)
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Path != out[j].Path {
+			return out[i].Path < out[j].Path
+		}
+		return out[i].Provider < out[j].Provider
+	})
+	return out
+}
+
+// SuggestedVaultPaths returns the candidate vault locations the GUI offers,
+// derived from the single detector DetectSyncRoots so it never disagrees with
+// the setup wizard (C10). Each detected sync folder yields a "<folder>/seavault"
+// suggestion; a plain "~/open-seavault-rclone" always trails as the no-sync
+// default.
 func SuggestedVaultPaths() []string {
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
@@ -182,24 +320,8 @@ func SuggestedVaultPaths() []string {
 		seen[p] = true
 		out = append(out, p)
 	}
-	for _, name := range []string{"Nextcloud", "Dropbox", "OneDrive", "Syncthing", "Google Drive", "iCloud Drive"} {
-		base := filepath.Join(home, name)
-		if info, err := os.Stat(base); err == nil && info.IsDir() {
-			add(filepath.Join(base, "seavault"))
-		}
-	}
-	if runtime.GOOS == "darwin" {
-		cloudStorage := filepath.Join(home, "Library", "CloudStorage")
-		if entries, err := os.ReadDir(cloudStorage); err == nil {
-			for _, entry := range entries {
-				if entry.IsDir() {
-					name := entry.Name()
-					if strings.Contains(strings.ToLower(name), "onedrive") || strings.Contains(strings.ToLower(name), "google") || strings.Contains(strings.ToLower(name), "dropbox") {
-						add(filepath.Join(cloudStorage, name, "seavault"))
-					}
-				}
-			}
-		}
+	for _, r := range DetectSyncRoots(home, runtime.GOOS) {
+		add(filepath.Join(r.Path, "seavault"))
 	}
 	add(filepath.Join(home, "Nextcloud", "seavault"))
 	add(filepath.Join(home, "open-seavault-rclone"))

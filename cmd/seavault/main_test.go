@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alexdimarco/open-seavault-rclone/internal/profile"
+	"github.com/alexdimarco/open-seavault-rclone/internal/setup"
 	"github.com/alexdimarco/open-seavault-rclone/internal/vault"
 )
 
@@ -1272,5 +1275,500 @@ func forgeConfigMinSizeForTest(t *testing.T, cfgPath string, minSize int) {
 	}
 	if err := os.WriteFile(cfgPath, out, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// canonBase32Len counts the base32 (A-Z, 2-7) characters in s, ignoring dashes
+// and spaces. A minted recovery phrase canonicalises to exactly 52; prose does
+// not, so this recognises a leaked phrase anywhere in captured output.
+func canonBase32Len(s string) int {
+	n := 0
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= '2' && r <= '7':
+			n++
+		}
+	}
+	return n
+}
+
+// outputHasRecoveryPhrase reports whether any single line of out canonicalises to
+// the 52-character recovery-phrase length using only base32 characters, dashes
+// and spaces — i.e. a recovery phrase was printed.
+func outputHasRecoveryPhrase(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		only := true
+		for _, r := range line {
+			switch {
+			case r >= 'A' && r <= 'Z', r >= '2' && r <= '7', r == '-', r == ' ':
+			default:
+				only = false
+			}
+		}
+		if only && canonBase32Len(line) == 52 {
+			return true
+		}
+	}
+	return false
+}
+
+func countRecoveryEntriesCLI(t *testing.T, vaultDir string) int {
+	t.Helper()
+	cfg, err := vault.ReadConfig(vaultDir)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	n := 0
+	for _, e := range cfg.WrapEntries {
+		if e.Type == vault.WrapTypeRecovery {
+			n++
+		}
+	}
+	return n
+}
+
+// T3 (I-S1/I-S3): a non-interactive `setup --preset synced-folder` reads the
+// password from SEAVAULT_PASSWORD only, creates the vault, writes NO recovery
+// entry, prints the remedy, and never prints a recovery phrase. With no
+// SEAVAULT_PASSWORD it refuses (typed), reading nothing from argv.
+func TestCmdSetupNonInteractiveSyncedFolder(t *testing.T) {
+	const pw = "correct horse battery staple"
+
+	t.Run("with SEAVAULT_PASSWORD", func(t *testing.T) {
+		t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
+		t.Setenv("SEAVAULT_PASSWORD", pw)
+		vaultDir := filepath.Join(t.TempDir(), "MyVault")
+
+		out, err := captureStdout(t, func() error {
+			return cmdSetup([]string{"--preset", "synced-folder", "--vault", vaultDir, "--no-keychain"})
+		})
+		if err != nil {
+			t.Fatalf("preset synced-folder must succeed: %v", err)
+		}
+		if _, oerr := vault.Open(vaultDir, pw); oerr != nil {
+			t.Fatalf("the vault must be created and open with the SEAVAULT_PASSWORD value: %v", oerr)
+		}
+		if n := countRecoveryEntriesCLI(t, vaultDir); n != 0 {
+			t.Fatalf("a non-interactive run must write NO recovery entry (I-S3); got %d", n)
+		}
+		if !strings.Contains(out, "recovery generate") {
+			t.Fatalf("the summary must print the recovery remedy; got:\n%s", out)
+		}
+		if outputHasRecoveryPhrase(out) {
+			t.Fatalf("a non-interactive run must never print a recovery phrase; got:\n%s", out)
+		}
+		if strings.Contains(out, pw) {
+			t.Fatalf("the summary must not carry the password; got:\n%s", out)
+		}
+	})
+
+	t.Run("without SEAVAULT_PASSWORD refuses", func(t *testing.T) {
+		t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
+		os.Unsetenv("SEAVAULT_PASSWORD")
+		vaultDir := filepath.Join(t.TempDir(), "MyVault")
+
+		err := cmdSetup([]string{"--preset", "synced-folder", "--vault", vaultDir, "--no-keychain"})
+		if err == nil {
+			t.Fatal("a non-interactive run with no SEAVAULT_PASSWORD must refuse")
+		}
+		if !strings.Contains(err.Error(), "SEAVAULT_PASSWORD") {
+			t.Fatalf("the refusal must name SEAVAULT_PASSWORD; got %v", err)
+		}
+		if _, statErr := os.Stat(vaultDir); !os.IsNotExist(statErr) {
+			t.Fatalf("no vault may be created when the password is absent; stat err=%v", statErr)
+		}
+	})
+}
+
+// T14 CLI half (C11): `setup --preset rclone` without --allow-download is refused
+// with the offline install options named, before any password is read (so a
+// password is never taken from argv) and with nothing created.
+func TestCmdSetupRclonePresetRequiresAllowDownload(t *testing.T) {
+	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
+	os.Unsetenv("SEAVAULT_PASSWORD") // the refusal must not depend on a password
+	vaultDir := filepath.Join(t.TempDir(), "MyVault")
+
+	err := cmdSetup([]string{"--preset", "rclone", "--vault", vaultDir, "--remote", "myremote"})
+	if err == nil {
+		t.Fatal("`setup --preset rclone` without --allow-download must be refused")
+	}
+	for _, want := range []string{"--allow-download", "--offline-archive", "--from-binary"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal must name the offline option %q; got %v", want, err)
+		}
+	}
+	if _, statErr := os.Stat(vaultDir); !os.IsNotExist(statErr) {
+		t.Fatalf("nothing may be created when the rclone preset is refused; stat err=%v", statErr)
+	}
+}
+
+// TestSetupSynopsis asserts the `setup --help` synopsis exists, names the wizard
+// and the non-interactive SEAVAULT_PASSWORD path, and renders through the shared
+// usage writer (so the --help wiring is exercised).
+func TestSetupSynopsis(t *testing.T) {
+	s := setupSynopsis()
+	if s == "" || !strings.Contains(s, "wizard") || !strings.Contains(s, "SEAVAULT_PASSWORD") {
+		t.Fatalf("setupSynopsis must describe the wizard and the SEAVAULT_PASSWORD preset path, got %q", s)
+	}
+	var buf bytes.Buffer
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	fs.SetOutput(&buf)
+	fs.Bool("expert", false, "x")
+	writeSubcommandUsage(fs, "usage: seavault setup [--expert]", s)
+	out := buf.String()
+	for _, want := range []string{"usage: seavault setup", s, "-expert"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("rendered setup usage missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// U1 fix tranche (Fixer B): CLI-5, CLI-6/DOC-5, ADM-1, ADM-3, ADM-5, ADM-6,
+// preset-noninteractive-2. Tests live here (package main); the CLI-5 production
+// change lives in internal/setup (RunInteractive is the shared wizard flow).
+// ---------------------------------------------------------------------------
+
+// scriptPrompter is a queue-driven setup.Prompter for driving RunInteractive in
+// tests (design §3.2 "scripted prompter"). Each method dequeues its next answer
+// and records what was Shown; an exhausted queue returns an error so a
+// mis-scripted flow fails loudly instead of hanging. secretCalls counts password
+// prompts so a test can prove the password step was (not) reached.
+type scriptPrompter struct {
+	selects     []int
+	confirms    []bool
+	texts       []string
+	secrets     []string
+	shown       []string
+	secretCalls int
+}
+
+func (p *scriptPrompter) Select(_ string, _ []setup.Option, def int) (int, error) {
+	if len(p.selects) == 0 {
+		return def, fmt.Errorf("scriptPrompter: no Select answer queued")
+	}
+	v := p.selects[0]
+	p.selects = p.selects[1:]
+	return v, nil
+}
+
+func (p *scriptPrompter) Confirm(_ string, def bool) (bool, error) {
+	if len(p.confirms) == 0 {
+		return def, fmt.Errorf("scriptPrompter: no Confirm answer queued")
+	}
+	v := p.confirms[0]
+	p.confirms = p.confirms[1:]
+	return v, nil
+}
+
+func (p *scriptPrompter) Text(_, def string) (string, error) {
+	if len(p.texts) == 0 {
+		return def, fmt.Errorf("scriptPrompter: no Text answer queued")
+	}
+	v := p.texts[0]
+	p.texts = p.texts[1:]
+	return v, nil
+}
+
+func (p *scriptPrompter) Secret(_ string) (string, error) {
+	p.secretCalls++
+	if len(p.secrets) == 0 {
+		return "", fmt.Errorf("scriptPrompter: no Secret answer queued")
+	}
+	v := p.secrets[0]
+	p.secrets = p.secrets[1:]
+	return v, nil
+}
+
+func (p *scriptPrompter) Show(msg string)   { p.shown = append(p.shown, msg) }
+func (p *scriptPrompter) shownText() string { return strings.Join(p.shown, "\n") }
+
+// TestSetupInteractiveOpenExistingVault (CLI-5): when the chosen location already
+// holds a vault, the wizard offers to open it IMMEDIATELY — before the password
+// and the rest of the ceremony are spent. Accepting "open it now" finishes without
+// ever asking for a password.
+func TestSetupInteractiveOpenExistingVault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
+	existDir := filepath.Join(home, "already", "MyVault")
+	if err := vault.CreateWithOptions(existDir, "pw-existing", vault.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	pr := &scriptPrompter{
+		texts:    []string{existDir}, // step 1: where should the vault live?
+		confirms: []bool{true},       // "A vault already exists ... Open it now?" -> yes
+	}
+	res, err := setup.RunInteractive(pr, setup.DefaultDeps(), setup.RunOptions{
+		Home:       home,
+		NoKeychain: true,
+		NoOpen:     true,
+		// OpenApp nil -> the affordance prints the command instead of launching.
+	})
+	if err != nil {
+		t.Fatalf("choosing 'open it now' must not error: %v", err)
+	}
+	if pr.secretCalls != 0 {
+		t.Fatalf("the password step must be SKIPPED when the location already holds a vault (CLI-5); Secret was called %d times", pr.secretCalls)
+	}
+	if !strings.Contains(pr.shownText(), "seavault gui") {
+		t.Fatalf("the open affordance must name `seavault gui`; shown:\n%s", pr.shownText())
+	}
+	_ = res
+}
+
+// TestSetupInteractiveLeftoversRemoveAndRetry (CLI-5): interrupted-setup leftovers
+// (a non-empty dir with no vault.json) are caught right after the location is
+// chosen; the wizard offers remove-and-retry, then proceeds to build the vault.
+func TestSetupInteractiveLeftoversRemoveAndRetry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
+	target := filepath.Join(home, "vault", "MyVault")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "stray.tmp"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const pw = "leftovers-pass"
+	pr := &scriptPrompter{
+		texts:    []string{target},
+		confirms: []bool{true, false}, // remove leftovers -> yes; recovery -> defer
+		selects:  []int{2},            // cloud: local-only
+		secrets:  []string{pw, pw},    // password + confirm
+	}
+	res, err := setup.RunInteractive(pr, setup.DefaultDeps(), setup.RunOptions{
+		Home:       home,
+		NoKeychain: true,
+		NoOpen:     true,
+	})
+	if err != nil {
+		t.Fatalf("remove-and-retry must complete the setup: %v", err)
+	}
+	if pr.secretCalls != 2 {
+		t.Fatalf("after removing leftovers the flow must proceed to the password step; Secret called %d times", pr.secretCalls)
+	}
+	if _, oerr := vault.Open(target, pw); oerr != nil {
+		t.Fatalf("a working vault must exist at the target after remove-and-retry: %v", oerr)
+	}
+	if _, statErr := os.Stat(filepath.Join(target, "stray.tmp")); !os.IsNotExist(statErr) {
+		t.Fatalf("the leftover file must be gone after remove-and-retry; stat err=%v", statErr)
+	}
+	_ = res
+}
+
+// TestSetupInteractiveProfileCollisionSuffixed (CLI-5 / C3): a resolved profile
+// name that already points at a DIFFERENT vault is caught before the password; the
+// wizard offers a suffixed name and registers the NEW vault under it, leaving the
+// original profile untouched (C3: register under a new name, not silently repoint).
+func TestSetupInteractiveProfileCollisionSuffixed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
+	otherDir := filepath.Join(home, "other", "MyVault-other")
+	if err := vault.CreateWithOptions(otherDir, "pw-other", vault.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := profile.Add("MyVault", otherDir); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(home, "new", "MyVault") // basename "MyVault" collides
+	const pw = "suffix-pass"
+	pr := &scriptPrompter{
+		texts:    []string{target},
+		confirms: []bool{true, false}, // "register as MyVault-2?" -> yes; recovery -> defer
+		selects:  []int{2},            // cloud: local-only
+		secrets:  []string{pw, pw},
+	}
+	res, err := setup.RunInteractive(pr, setup.DefaultDeps(), setup.RunOptions{
+		Home:       home,
+		NoKeychain: true,
+		NoOpen:     true,
+	})
+	if err != nil {
+		t.Fatalf("the suffixed-name affordance must complete: %v", err)
+	}
+	if res.ProfileName != "MyVault-2" {
+		t.Fatalf("the new vault must register under the suffixed name; got %q", res.ProfileName)
+	}
+	if e, found, _ := profile.Resolve("MyVault"); !found || filepath.Clean(e.VaultPath) != filepath.Clean(otherDir) {
+		t.Fatalf("the original MyVault profile must be untouched (-> %s); got found=%v %q", otherDir, found, e.VaultPath)
+	}
+	if e, found, _ := profile.Resolve("MyVault-2"); !found || filepath.Clean(e.VaultPath) != filepath.Clean(target) {
+		t.Fatalf("MyVault-2 must point at the new vault %s; got found=%v %q", target, found, e.VaultPath)
+	}
+}
+
+// TestSetupFailureLines (CLI-6/DOC-5): on a failed setup the operator is told the
+// vault was created (when it was) and sees the step-branched CloudNote, each at
+// most once (the CloudNote must never be printed twice).
+func TestSetupFailureLines(t *testing.T) {
+	note := "the vault and profile were created, but the remote did not verify: boom. Fix it and run `seavault remote test r`."
+	res := setup.Result{VaultID: "vid", VaultDir: "/x/MyVault", ProfileName: "MyVault", CloudNote: note}
+	lines := setupFailureLines(res)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "/x/MyVault") || !strings.Contains(joined, "created") {
+		t.Fatalf("a built-then-failed setup must name the created vault; got %q", joined)
+	}
+	if strings.Count(joined, note) != 1 {
+		t.Fatalf("the CloudNote must appear exactly once; got %d in %q", strings.Count(joined, note), joined)
+	}
+	if got := setupFailureLines(setup.Result{}); len(got) != 0 {
+		t.Fatalf("a result with nothing built yields no reassurance lines; got %v", got)
+	}
+	only := setupFailureLines(setup.Result{VaultID: "v", VaultDir: "/d", ProfileName: "p"})
+	if len(only) != 1 || !strings.Contains(only[0], "/d") {
+		t.Fatalf("a built vault with no CloudNote yields exactly the created line; got %v", only)
+	}
+}
+
+// TestSetupPresetIdempotentRerun (ADM-5): a --preset run whose --vault already
+// holds a matching vault is an idempotent no-op — it reports the existing vault
+// and exits 0, so a provisioning loop is safe to re-run.
+func TestSetupPresetIdempotentRerun(t *testing.T) {
+	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
+	t.Setenv("SEAVAULT_PASSWORD", "correct horse battery staple")
+	vaultDir := filepath.Join(t.TempDir(), "MyVault")
+
+	if err := cmdSetup([]string{"--preset", "local", "--vault", vaultDir, "--no-keychain"}); err != nil {
+		t.Fatalf("first run must succeed: %v", err)
+	}
+	out, err := captureStdout(t, func() error {
+		return cmdSetup([]string{"--preset", "local", "--vault", vaultDir, "--no-keychain"})
+	})
+	if err != nil {
+		t.Fatalf("an idempotent re-run must exit 0 (err nil); got %v", err)
+	}
+	if !strings.Contains(out, "already exists") {
+		t.Fatalf("the re-run must report the existing vault; got:\n%s", out)
+	}
+}
+
+// TestSetupPresetRerunProfileMismatch (ADM-5): an existing vault at --vault whose
+// requested profile name already points at a DIFFERENT vault is a genuine
+// mismatch — it keeps a non-zero exit (distinct from the exit-0 match) and changes
+// nothing.
+func TestSetupPresetRerunProfileMismatch(t *testing.T) {
+	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
+	const pw = "correct horse battery staple"
+	t.Setenv("SEAVAULT_PASSWORD", pw)
+	dirA := filepath.Join(t.TempDir(), "A")
+	dirB := filepath.Join(t.TempDir(), "B")
+	if err := cmdSetup([]string{"--preset", "local", "--vault", dirA, "--no-keychain", "--profile", "shared"}); err != nil {
+		t.Fatalf("seed run A must succeed: %v", err)
+	}
+	if err := vault.CreateWithOptions(dirB, pw, vault.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	err := cmdSetup([]string{"--preset", "local", "--vault", dirB, "--no-keychain", "--profile", "shared"})
+	if err == nil {
+		t.Fatal("a vault at --vault whose profile name points elsewhere must NOT exit 0")
+	}
+	if !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("the mismatch must be handled by the idempotent-rerun path (naming 'nothing was changed'); got %v", err)
+	}
+	if e, _, _ := profile.Resolve("shared"); filepath.Clean(e.VaultPath) != filepath.Clean(dirA) {
+		t.Fatalf("the mismatch must not repoint the profile; shared -> %q", e.VaultPath)
+	}
+}
+
+// TestSetupPresetJSONOutput (ADM-1): --preset --json emits the machine-readable
+// Result fields and no secret; prose stays the default.
+func TestSetupPresetJSONOutput(t *testing.T) {
+	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
+	const pw = "correct horse battery staple"
+	t.Setenv("SEAVAULT_PASSWORD", pw)
+	vaultDir := filepath.Join(t.TempDir(), "MyVault")
+
+	out, err := captureStdout(t, func() error {
+		return cmdSetup([]string{"--preset", "local", "--vault", vaultDir, "--no-keychain", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("json preset run must succeed: %v", err)
+	}
+	var got setupResultJSON
+	if jerr := json.Unmarshal([]byte(out), &got); jerr != nil {
+		t.Fatalf("--json output must be a single JSON document: %v\n%s", jerr, out)
+	}
+	if got.VaultID == "" {
+		t.Fatalf("json must carry a vaultID; got:\n%s", out)
+	}
+	if filepath.Clean(got.VaultDir) != filepath.Clean(vaultDir) {
+		t.Fatalf("json vaultDir mismatch: %q", got.VaultDir)
+	}
+	if got.Profile != "MyVault" {
+		t.Fatalf("json profile mismatch: %q", got.Profile)
+	}
+	if got.Cloud != "local" {
+		t.Fatalf("json cloud mismatch: %q", got.Cloud)
+	}
+	if got.RecoveryCreated {
+		t.Fatal("a preset run never creates a recovery key (I-S3)")
+	}
+	if strings.Contains(out, pw) {
+		t.Fatalf("json output must never carry the password")
+	}
+
+	prose, perr := captureStdout(t, func() error {
+		return cmdSetup([]string{"--preset", "local", "--vault", filepath.Join(t.TempDir(), "V2"), "--no-keychain"})
+	})
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	if strings.HasPrefix(strings.TrimSpace(prose), "{") {
+		t.Fatalf("prose must be the default without --json; got:\n%s", prose)
+	}
+}
+
+// TestSetupHelpDoubleDashAndExitCodes (ADM-6 + ADM-3): `setup --help` prints the
+// double-dash long flag forms (matching the usage line), documents the exit-code
+// contract, and states the rclone-remote precondition.
+func TestSetupHelpDoubleDashAndExitCodes(t *testing.T) {
+	var buf bytes.Buffer
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	fs.SetOutput(&buf)
+	registerSetupFlags(fs)
+	writeSetupUsage(fs)
+	out := buf.String()
+
+	for _, want := range []string{"--expert", "--preset", "--vault", "--remote", "--allow-download", "--no-keychain", "--profile", "--no-open", "--json"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup --help must list the long flag %q; got:\n%s", want, out)
+		}
+	}
+	// The flag BLOCK (not just the usage line) renders double-dash: the usage line
+	// spells flags as "[--expert]", so a two-space "  --expert" appears only in the
+	// rendered flag block.
+	if !strings.Contains(out, "  --expert") {
+		t.Fatalf("the flag block must render double-dash long forms; got:\n%s", out)
+	}
+	for _, want := range []string{"Exit codes:", "idempotent re-run", "setup failed"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup --help must document the exit-code contract (%q); got:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "ALREADY EXISTS") || !strings.Contains(out, "rclone config") {
+		t.Fatalf("setup --help must state --remote must already exist in each machine's rclone config (ADM-3); got:\n%s", out)
+	}
+}
+
+// TestSetupPresetRecoveryRemedyShellQuoted (preset-noninteractive-2, main.go half):
+// the printed recovery-skip remedy shell-quotes a profile name with spaces so the
+// command pastes as a single argument.
+func TestSetupPresetRecoveryRemedyShellQuoted(t *testing.T) {
+	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
+	const pw = "correct horse battery staple"
+	t.Setenv("SEAVAULT_PASSWORD", pw)
+	vaultDir := filepath.Join(t.TempDir(), "My Vault") // spaced basename -> spaced profile
+
+	out, err := captureStdout(t, func() error {
+		return cmdSetup([]string{"--preset", "local", "--vault", vaultDir, "--no-keychain"})
+	})
+	if err != nil {
+		t.Fatalf("preset run must succeed: %v", err)
+	}
+	if !strings.Contains(out, "recovery generate 'My Vault'") {
+		t.Fatalf("the recovery remedy must shell-quote a spaced profile name; got:\n%s", out)
+	}
+	if strings.Contains(out, "recovery generate My Vault") {
+		t.Fatalf("the remedy must not interpolate the spaced name raw; got:\n%s", out)
 	}
 }
