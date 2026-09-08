@@ -1,0 +1,7 @@
+# Reviewer-accepted mechanical edits to pre-existing tests, exempted from the Z1
+# diff guard (cmd/seavault/z1_diff_guard_test.go). One per line:
+#   <repo path><TAB><reason, with the phase, date, and what was checked>
+# Adding a line here is itself a reviewed diff; keep the reason specific enough
+# that a later reader can re-verify it.
+cmd/seavault/main_test.go	U3 (2026-09-08): ensureLoopbackBind gained tlsOn/selfSigned parameters and a warnings return; the three TestEnsureLoopbackBind call sites thread (false,false) and discard the warnings; assertions unchanged (3 before, 3 after); overseer-checked against main.
+cmd/seavault/commands_test.go	U3 (2026-09-08): H4 (TestRegistryEqualsDispatchBothDirections) rewritten to derive BOTH the registry side and the dispatch side from the code instead of a hardcoded command list, so a new command needs no test edit; proven red in both directions (tls rows unregistered; stray exec function); maintainer-authorized.
