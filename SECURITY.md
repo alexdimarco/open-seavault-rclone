@@ -184,6 +184,42 @@ account containing a control character is refused (`ErrSecretNotStorable`) rathe
 than risk desynchronising that line-oriented reader — the vault still opens with
 the password typed or via `SEAVAULT_PASSWORD`.
 
+## Network-exposed mode
+
+By default the GUI serves plain HTTP on loopback and `seavault serve` (WebDAV) is
+plaintext on loopback: decrypted content never leaves the machine. Bringing a
+CA-trusted certificate (obtained with a DNS-01 challenge — see
+[docs/tls-and-certificates.md](docs/tls-and-certificates.md)) lets the GUI and
+WebDAV be served to other devices over TLS. Turning that on is *network-exposed
+mode*, and it carries these guarantees:
+
+- **I-T1** Plaintext is never served on a non-loopback address without an explicit
+  `--insecure-bind`; the bind guard relaxes for a non-loopback address only when a
+  TLS certificate is configured.
+- **I-T2** Private key material is never logged, echoed, printed by `tls status`,
+  placed in an error message, or copied by the wizard; a group- or world-readable
+  key file produces a warning naming `chmod 600`.
+- **I-T3** Hot-reload never swaps in an invalid pair, and startup refuses a
+  configured key-mismatched pair (`ErrKeyMismatch`) and binds nothing.
+- **I-T4** Defaults are unchanged: the GUI is HTTP on loopback (with self-signed
+  HTTPS opt-in) and WebDAV is plaintext loopback. A user who does nothing sees
+  identical behaviour.
+- **I-T5** The `seavault tls setup` wizard stores no DNS-provider token and never
+  prompts for one; the only tool it runs is `tailscale cert`, which needs no secret.
+  The lego and certbot commands are printed for you to run yourself.
+- **I-T6** Startup warns when a certificate name is absent from the Host allowlist;
+  the DNS-rebinding guard remains authoritative and matches exact names only.
+
+**Residuals.** Turning on network-exposed mode widens the attack surface in two ways
+that this phase does not close:
+
+- Exposure hardening of the authentication endpoints is out of scope:
+  the GUI login and WebDAV Basic auth become network-facing (rate limiting and lockout are a later phase).
+  Firewall the port and prefer a VPN.
+- Trust-on-first-use is inherent to self-signed certificates:
+  clients that accept a self-signed prompt are MITM-able on first connect.
+  Use a CA-issued certificate for any cross-device use.
+
 ## Production work still required
 
 - Independent cryptographic review.

@@ -114,4 +114,19 @@ else
 		echo "--json output missing the profile field" >&2; exit 1; }
 fi
 
+# U3 (design sections 4-5): the `tls` command group is wired into the real binary.
+# A fresh app-home has no certificate configured, so `tls status` reports the
+# default (source none), `tls check` exits 0 with nothing to validate, and
+# `tls reset` returns cleanly. None print key material (there is none). This proves
+# the command surface the guide names (D1) exists end to end without a real cert.
+TLS_STATUS="$("$BIN" tls status)"
+printf '%s\n' "$TLS_STATUS" | grep -q 'tls source: none' || {
+	echo "expected fresh tls status to report source none, got: $TLS_STATUS" >&2; exit 1; }
+printf '%s\n' "$TLS_STATUS" | grep -q 'no certificate configured' || {
+	echo "expected fresh tls status to say no certificate configured" >&2; exit 1; }
+"$BIN" tls check | grep -q 'nothing to validate' || {
+	echo "expected tls check to report nothing to validate on a fresh app-home" >&2; exit 1; }
+"$BIN" tls reset | grep -q 'returned to the default' || {
+	echo "expected tls reset to confirm the default state" >&2; exit 1; }
+
 echo 'smoke test passed'

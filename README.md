@@ -71,7 +71,7 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 
 Vendored and bundled third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The GPL does not grant trademark rights: the **open-seavault-rclone** and **Crescendum** names, logos, icons, favicons, wordmarks, and visual identity remain reserved &mdash; see [TRADEMARKS.md](TRADEMARKS.md).
 
-## What changed in v0.19 (four-destination GUI, word recovery phrases, operability polish)
+## What changed in v0.19 (four-destination GUI, word recovery phrases, TLS certificates, operability polish)
 
 Phase U2 makes the product usable every day without hiding anything from an expert. It is pure
 UX/legibility over the unchanged v0.17 security mechanisms — no vault-format change, no change to
@@ -130,6 +130,33 @@ the recovery read-back ceremony, the strict rollback gate, or the config-tamper/
   keychain-store failure is a plain one-liner (the raw error only under `--debug`), `profile remove`
   says what it removed, `--no-open` is inert under `--preset` and the "open the app" trailer is
   dropped for fleets, and the exit-code contract is documented in `setup --help`.
+### TLS certificates for the GUI and WebDAV
+
+- **Bring your own certificate.** `seavault gui` and `seavault serve` can now serve
+  over HTTPS with a CA-trusted certificate so other devices on a LAN or VPN connect
+  without a browser trust prompt — and so Windows Explorer's WebDAV client, which
+  refuses self-signed HTTPS, can map the drive at all. A resolved certificate is the
+  only thing that relaxes the non-loopback bind guard; plaintext still never reaches a
+  non-loopback address without the explicit `--insecure-bind` override. A user who
+  does nothing sees no change: the GUI stays HTTP on loopback and WebDAV stays
+  plaintext loopback.
+- **`seavault tls setup`** — an interactive wizard that guides the whole procedure:
+  who needs to connect, the certificate route (Tailscale, Let's Encrypt via DNS-01
+  with `lego` or `certbot`, bring-your-own, or keep self-signed), validation, the Host
+  allowlist, where to listen, and the renewal recipe. It stores no DNS-provider token
+  and never prompts for one; the only tool it runs is `tailscale cert`. Companions:
+  `seavault tls use --cert PATH --key PATH [--allow-host NAME]`, `seavault tls status`,
+  `seavault tls check`, and `seavault tls reset`.
+- **`--tls-cert` / `--tls-key`** on `seavault gui` and `seavault serve` (and `--tls`
+  on `serve` to use the configured `tls` section). A shared `tls` app-config section
+  (`certFile`, `keyFile`, `allowHosts`) with legacy `gui.certFile` compatibility.
+- **Hot-reload.** A renewed certificate is picked up within 30 seconds with no
+  restart; the reloader never swaps in an invalid pair and never downgrades a valid
+  live certificate, and it surfaces a `< 14 days left` staleness warning so a silently
+  disabled renewal timer is visible at runtime.
+- New guide: [docs/tls-and-certificates.md](docs/tls-and-certificates.md), and a
+  "Network-exposed mode" section in [SECURITY.md](SECURITY.md) stating the guarantees
+  (I-T1..I-T6) and residuals.
 
 ## What changed in v0.18 (setup wizard)
 
@@ -333,7 +360,7 @@ http://127.0.0.1:8787/dav/<session-token>/
 
 The `/dav/` token is a distinct per-GUI-session WebDAV token (separate from the GUI's CSRF token, which is never placed in a `/dav/` URL). It is rotated when the vault is closed or the GUI restarts. Every request must carry a `Host` header naming a loopback address, `localhost`, or an explicit `--allow-host` value, or it is rejected with `403`; every response carries `Referrer-Policy: no-referrer`. Decrypted file responses include no-store headers. The endpoint blocks path traversal, `.seavault` internals, reserved `.seavault-dir` markers, and deletion of the protected `content/` workspace. Range (`bytes=`) requests are served as `206 Partial Content`. Use read-only mode when you want browse/download access without PUT, DELETE, MKCOL, MOVE, or COPY writes.
 
-For native WebDAV clients (rclone, Finder) use `seavault serve`, which exposes the same virtual view over HTTP Basic authentication instead of a URL token. Windows Explorer's WebClient refuses Basic over plain HTTP unless `BasicAuthLevel=2`; the supported Windows drive path is the Phase B rclone/WinFsp mount. See [docs/webdav-file-manager.md](docs/webdav-file-manager.md).
+For native WebDAV clients (rclone, Finder) use `seavault serve`, which exposes the same virtual view over HTTP Basic authentication instead of a URL token. Windows Explorer's WebClient refuses Basic over plain HTTP unless `BasicAuthLevel=2`; the supported Windows drive path is the Phase B rclone/WinFsp mount. Serving WebDAV over HTTPS with a CA-trusted certificate (`seavault serve --tls-cert/--tls-key` or `--tls`) is what lets Windows Basic auth and drive mapping work; set it up with `seavault tls setup`. See [docs/webdav-file-manager.md](docs/webdav-file-manager.md) and [docs/tls-and-certificates.md](docs/tls-and-certificates.md).
 
 Supported file-manager operations:
 
@@ -493,7 +520,7 @@ The GUI listens on `127.0.0.1:8787` by default. It provides vault create/open/up
 
 The desktop layout keeps the result/progress panel on the right. Narrower tablet and phone layouts collapse to one column so controls remain readable and tables do not force horizontal page scrolling. Browser folder upload is capability-detected; when a browser does not expose folder selection, use local path ingest for directory imports.
 
-Do not bind the GUI to a public or shared network interface.
+To serve the GUI over HTTPS to other devices on a LAN or VPN, bring a CA-trusted certificate with `seavault tls setup` (or `--tls-cert`/`--tls-key`); without one, do not bind the GUI to a public or shared network interface. See [docs/tls-and-certificates.md](docs/tls-and-certificates.md).
 
 ## CLI overview
 
@@ -511,8 +538,9 @@ seavault verify [flags] VAULT_DIR_OR_PROFILE
 seavault gc [--confirm] [--fence 72h] [--json] VAULT_DIR_OR_PROFILE
 seavault compact VAULT_DIR_OR_PROFILE
 seavault stats [flags] VAULT_DIR_OR_PROFILE
-seavault serve [--addr 127.0.0.1:8765] [--user seavault] [--password-file PATH] [--quiet-credentials] [--allow-host NAME] [--drop-os-junk] [--no-keychain] [--insecure-bind] VAULT_DIR_OR_PROFILE
-seavault gui [--addr 127.0.0.1:8787] [--no-open] [--allow-host NAME] [--exit-on-browser-close] [--insecure-bind] [VAULT_DIR_OR_PROFILE]
+seavault serve [--addr 127.0.0.1:8765] [--user seavault] [--password-file PATH] [--quiet-credentials] [--allow-host NAME] [--tls-cert PATH --tls-key PATH | --tls] [--drop-os-junk] [--no-keychain] [--insecure-bind] VAULT_DIR_OR_PROFILE
+seavault gui [--addr 127.0.0.1:8787] [--no-open] [--allow-host NAME] [--tls-cert PATH --tls-key PATH] [--exit-on-browser-close] [--insecure-bind] [VAULT_DIR_OR_PROFILE]
+seavault tls setup | use --cert PATH --key PATH [--allow-host NAME] | status | check | reset
 seavault rclone status|install|check-update|update|rollback|version|path|verify-runtime
 seavault remote add|edit|list|show|delete|test|dry-run|push|pull|check|sync|config
 seavault ssh-key generate|import|list|public

@@ -1,6 +1,6 @@
 # Design — Phase U3: certificates for the GUI and WebDAV, a guiding `tls setup` wizard, and the documentation
 
-STATUS: Revision 2 — the 13 conditions of the pre-code review (`docs/review-u3-predesign.md`, GO_WITH_CONDITIONS; 58 judged / 44 refuted / 0 blockers) are applied below and in §10. Ready to build.
+STATUS: BUILT — the 13 conditions of the pre-code review (`docs/review-u3-predesign.md`, GO_WITH_CONDITIONS; 58 judged / 44 refuted / 0 blockers) are applied below and in §10, and the §7 test matrix is green on `feature/u3-tls`. Shipped as v0.19 in four slices: T1 `internal/tlsconfig` resolve/validate/hot-reload (0d094a0), T2 the TLS-aware bind guard and gui/serve servers (1f17d30), T3 the `tls setup` wizard and command group (2f69ab9), and T4 the documentation (`docs/tls-and-certificates.md`, the SECURITY.md Network-exposed mode section, README links) plus the D1 drift guard and the final verification.
 
 ## 1. Goal and scope
 
