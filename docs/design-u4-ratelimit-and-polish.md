@@ -216,6 +216,12 @@ B1/G1 through the real startup path.
 
 **Z1 exemption entries the build will add to `cmd/seavault/testdata/accepted-test-edits.txt`
 (each is a reviewed diff):** any pre-U4 test that asserted the old non-2 exit code for an unknown
-subcommand or the old single-dash leaf `--help` output (CLI-1), and any pre-U4 test that asserted
-`setupSkipped` persisting across `/api/close` (GUI-D2 1). If no pre-U4 test asserts those, no
-entry is needed; the builder states which case applies.
+subcommand or the old single-dash leaf `--help` output (CLI-1), any pre-U4 test that asserted
+`setupSkipped` persisting across `/api/close` (GUI-D2 1), and — added during the build when the
+P2 builder correctly stopped on it — the U3 wizard test that pins the Tailscale renewal row to the
+DAILY cron/systemd/schtasks template (`internal/setup/tlswizard_fixes_u3_test.go`,
+`TestShowRenewalSubstitutesConcreteValues`): row A1-c6 changes that cadence to MONTHLY, so the
+pinned expected values for the Tailscale row change accordingly and nothing else in the test does
+(its intent, "placeholders are substituted with concrete values", is preserved; the assertion
+stays exact). If no pre-U4 test asserts those, no entry is needed; the builder states which case
+applies.
