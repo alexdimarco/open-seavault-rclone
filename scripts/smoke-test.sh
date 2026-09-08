@@ -50,4 +50,37 @@ SETUP_OUT="$WORK/setup-out.txt"
 "$BIN" get smokeprofile docs/source.txt "$SETUP_OUT" >/dev/null
 cmp "$SRC" "$SETUP_OUT"
 
+# ADM-5: a --preset run whose --vault already holds a matching vault is an
+# idempotent no-op — a provisioning loop can re-run the SAME command and it must
+# exit 0 (reporting the existing vault) rather than failing on "already exists".
+RERUN_OUT="$("$BIN" setup --preset local --vault "$SETUP_VAULT" --no-keychain --profile smokeprofile)"
+echo "$RERUN_OUT" | grep -q 'already exists' || {
+	echo "expected the idempotent re-run to report the existing vault" >&2; exit 1; }
+
+# ADM-1: --preset --json emits the machine-readable result (never a secret). Parse
+# it with python3 or jq when either is available, else assert the shape textually.
+JSON_VAULT="$WORK/json-vault/MyVault"
+JSON_OUT="$("$BIN" setup --preset local --vault "$JSON_VAULT" --no-keychain --profile jsonprofile --json)"
+if printf '%s' "$JSON_OUT" | grep -q "$SEAVAULT_PASSWORD"; then
+	echo "the --json output must never carry the password" >&2; exit 1
+fi
+if command -v python3 >/dev/null 2>&1; then
+	printf '%s' "$JSON_OUT" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["profile"]=="jsonprofile", d
+assert d["cloud"]=="local", d
+assert d["vaultID"], d
+assert d["recoveryCreated"] is False, d
+'
+elif command -v jq >/dev/null 2>&1; then
+	[ "$(printf '%s' "$JSON_OUT" | jq -r .profile)" = "jsonprofile" ] || {
+		echo "jq: --json profile mismatch" >&2; exit 1; }
+	[ "$(printf '%s' "$JSON_OUT" | jq -r .cloud)" = "local" ] || {
+		echo "jq: --json cloud mismatch" >&2; exit 1; }
+else
+	printf '%s' "$JSON_OUT" | grep -q '"profile": "jsonprofile"' || {
+		echo "--json output missing the profile field" >&2; exit 1; }
+fi
+
 echo 'smoke test passed'

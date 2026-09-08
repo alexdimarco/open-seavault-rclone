@@ -144,26 +144,84 @@ func setupSynopsis() string {
 	return "setup is the guided first-run wizard: it picks a vault location (inside a detected cloud-sync folder when one is found), takes a password, offers a recovery key and OS-keychain storage, wires up cloud sync, then opens the app — every default chosen for you, every advanced knob one flag away. Use --preset synced-folder|rclone|local for a non-interactive run that reads the password from SEAVAULT_PASSWORD."
 }
 
+// setupFlags holds the parsed `seavault setup` flags. It is populated by
+// registerSetupFlags so cmdSetup and the --help renderer (and its test) share ONE
+// flag definition — the long-form names the usage line advertises can never drift
+// from the flags actually registered (ADM-6).
+type setupFlags struct {
+	expert        *bool
+	preset        *string
+	vaultFlag     *string
+	remoteFlag    *string
+	allowDownload *bool
+	noKeychain    *bool
+	profileName   *string
+	noOpen        *bool
+	jsonOut       *bool
+}
+
+// registerSetupFlags defines every `setup` flag on fs. It is the single source of
+// the flag set, used by cmdSetup and by writeSetupUsage/the usage test.
+func registerSetupFlags(fs *flag.FlagSet) *setupFlags {
+	return &setupFlags{
+		expert:        fs.Bool("expert", false, "show the KDF and chunk-size knobs during setup (validated against the same floor as init)"),
+		preset:        fs.String("preset", "", "non-interactive run: synced-folder | rclone | local (reads the password from SEAVAULT_PASSWORD)"),
+		vaultFlag:     fs.String("vault", "", "vault directory (required with --preset)"),
+		remoteFlag:    fs.String("remote", "", "existing rclone remote name (with --preset rclone); the remote must ALREADY exist in this machine's rclone config"),
+		allowDownload: fs.Bool("allow-download", false, "permit a --preset rclone run to download the rclone runtime if it is missing"),
+		noKeychain:    fs.Bool("no-keychain", false, "do not store the password in the OS keychain"),
+		profileName:   fs.String("profile", "", "profile name for the new vault (default: the vault folder's name)"),
+		noOpen:        fs.Bool("no-open", false, "do not open the app at the end"),
+		jsonOut:       fs.Bool("json", false, "with --preset, emit the machine-readable result as JSON instead of prose (never a secret)"),
+	}
+}
+
+// setupUsageLine is the two-line usage synopsis. It uses the double-dash long
+// flag forms so the flag block writeSetupUsage renders below it agrees (ADM-6).
+func setupUsageLine() string {
+	return "usage: seavault setup [--expert] [--no-keychain] [--profile NAME] [--no-open]\n" +
+		"       seavault setup --preset synced-folder|rclone|local --vault PATH [--remote NAME] [--allow-download] [--json] [--no-keychain] [--profile NAME] [--no-open]"
+}
+
+// setupScopeAndExitHelp documents the rclone-remote precondition (ADM-3) and the
+// exit-code contract (ADM-5/ADM-6) so an operator scripting a fleet can read both
+// from `setup --help` alone.
+func setupScopeAndExitHelp() string {
+	return "The --preset rclone form requires --remote NAME to name an rclone remote that ALREADY EXISTS in\n" +
+		"each machine's rclone config (configured with rclone, or imported via `seavault remote config import`);\n" +
+		"setup never creates or edits a remote.\n\n" +
+		"Exit codes:\n" +
+		"  0  setup completed — or, with --preset, a vault already existed at --vault and matched the\n" +
+		"     requested plan, so nothing was changed (an idempotent re-run of a provisioning loop)\n" +
+		"  1  setup failed: bad flags, a refused rclone download, an existing vault whose profile name\n" +
+		"     already points at a DIFFERENT vault, or an error while creating the vault\n"
+}
+
+// writeSetupUsage renders `setup --help`: the usage line, the synopsis, the flags
+// in their double-dash long form (matching the usage line, ADM-6), then the
+// rclone-scope statement and the exit-code contract. It renders the flags from
+// the live FlagSet so a new flag can never be missing from --help.
+func writeSetupUsage(fs *flag.FlagSet) {
+	out := fs.Output()
+	fmt.Fprintf(out, "%s\n\n%s\n\nFlags (long forms match the usage line above):\n", setupUsageLine(), setupSynopsis())
+	fs.VisitAll(func(f *flag.Flag) {
+		name := "  --" + f.Name
+		if f.DefValue != "" && f.DefValue != "false" {
+			name += "=" + f.DefValue
+		}
+		fmt.Fprintf(out, "%s\n        %s\n", name, f.Usage)
+	})
+	fmt.Fprint(out, "\n"+setupScopeAndExitHelp())
+}
+
 // cmdSetup is the first-run wizard (design §3.3). With no --preset it runs the
 // interactive flow over a stdlib prompter; with --preset it runs a fully
 // non-interactive setup that reads the password from SEAVAULT_PASSWORD only
 // (I-S1) and skips recovery (I-S3).
 func cmdSetup(args []string) error {
 	fs := flag.NewFlagSet("setup", flag.ExitOnError)
-	expert := fs.Bool("expert", false, "show the KDF and chunk-size knobs during setup (validated against the same floor as init)")
-	preset := fs.String("preset", "", "non-interactive run: synced-folder | rclone | local (reads the password from SEAVAULT_PASSWORD)")
-	vaultFlag := fs.String("vault", "", "vault directory (required with --preset)")
-	remoteFlag := fs.String("remote", "", "existing rclone remote name (with --preset rclone)")
-	allowDownload := fs.Bool("allow-download", false, "permit a --preset rclone run to download the rclone runtime if it is missing")
-	noKeychain := fs.Bool("no-keychain", false, "do not store the password in the OS keychain")
-	profileName := fs.String("profile", "", "profile name for the new vault (default: the vault folder's name)")
-	noOpen := fs.Bool("no-open", false, "do not open the app at the end")
-	fs.Usage = func() {
-		writeSubcommandUsage(fs,
-			"usage: seavault setup [--expert] [--no-keychain] [--profile NAME] [--no-open]\n"+
-				"       seavault setup --preset synced-folder|rclone|local --vault PATH [--remote NAME] [--allow-download] [--no-keychain] [--profile NAME] [--no-open]",
-			setupSynopsis())
-	}
+	f := registerSetupFlags(fs)
+	fs.Usage = func() { writeSetupUsage(fs) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -171,27 +229,63 @@ func cmdSetup(args []string) error {
 		return fmt.Errorf("setup takes no positional arguments (the vault path is --vault with --preset, or a wizard prompt otherwise)")
 	}
 
-	if strings.TrimSpace(*preset) != "" {
+	if strings.TrimSpace(*f.preset) != "" {
 		return runSetupPreset(setupPresetArgs{
-			preset:        strings.ToLower(strings.TrimSpace(*preset)),
-			vaultArg:      *vaultFlag,
-			remoteName:    *remoteFlag,
-			allowDownload: *allowDownload,
-			noKeychain:    *noKeychain,
-			profileName:   *profileName,
+			preset:        strings.ToLower(strings.TrimSpace(*f.preset)),
+			vaultArg:      *f.vaultFlag,
+			remoteName:    *f.remoteFlag,
+			allowDownload: *f.allowDownload,
+			noKeychain:    *f.noKeychain,
+			profileName:   *f.profileName,
+			jsonOut:       *f.jsonOut,
 		})
+	}
+
+	// --json describes the machine-readable result of a scripted preset run; the
+	// interactive wizard writes prompts and a human summary to stdout, where a JSON
+	// document would be meaningless, so reject the combination rather than emit
+	// garbled output.
+	if *f.jsonOut {
+		return fmt.Errorf("--json only applies to a --preset run; the interactive wizard prints a human summary")
 	}
 
 	deps := setup.DefaultDeps()
 	pr := newStdinPrompter()
-	_, err := setup.RunInteractive(pr, deps, setup.RunOptions{
-		Expert:      *expert,
-		NoKeychain:  *noKeychain,
-		ProfileName: *profileName,
-		NoOpen:      *noOpen,
+	res, err := setup.RunInteractive(pr, deps, setup.RunOptions{
+		Expert:      *f.expert,
+		NoKeychain:  *f.noKeychain,
+		ProfileName: *f.profileName,
+		NoOpen:      *f.noOpen,
 		OpenApp:     func(profile string) error { return cmdGUI([]string{profile}) },
 	})
-	return err
+	if err != nil {
+		// CLI-6/DOC-5: on a failure after the vault was already created (a cloud
+		// step, most often), tell the operator the vault exists and surface the
+		// step-branched CloudNote BEFORE the error, so a failed cloud step never
+		// looks like a lost vault. RunInteractive does not print CloudNote on the
+		// error path, so this prints it exactly once.
+		for _, line := range setupFailureLines(res) {
+			fmt.Fprintln(os.Stderr, line)
+		}
+		return err
+	}
+	return nil
+}
+
+// setupFailureLines returns the operator-facing reassurance to print BEFORE a
+// failed setup's error (CLI-6/DOC-5): a "your vault was created" line whenever a
+// vault was actually built (res.VaultID set), then the step-branched CloudNote
+// when Execute set one. Each appears at most once, so no caller double-prints the
+// CloudNote. It reads only non-secret Result fields (I-S1).
+func setupFailureLines(res setup.Result) []string {
+	var lines []string
+	if res.VaultID != "" {
+		lines = append(lines, fmt.Sprintf("Your vault was created at %s (profile %s) — the failure below is a later step; the vault is safe.", res.VaultDir, res.ProfileName))
+	}
+	if res.CloudNote != "" {
+		lines = append(lines, res.CloudNote)
+	}
+	return lines
 }
 
 type setupPresetArgs struct {
@@ -201,6 +295,39 @@ type setupPresetArgs struct {
 	allowDownload bool
 	noKeychain    bool
 	profileName   string
+	jsonOut       bool
+}
+
+// setupResultJSON is the machine-readable shape `setup --preset --json` emits
+// (ADM-1). It carries only non-secret Result fields — NEVER the password or a
+// recovery phrase (I-S1). RecoveryCreated is always false for a preset run
+// (recovery is skipped, I-S3). AlreadyExisted marks an idempotent re-run.
+type setupResultJSON struct {
+	VaultID         string `json:"vaultID"`
+	VaultDir        string `json:"vaultDir"`
+	Profile         string `json:"profile"`
+	KeychainSaved   bool   `json:"keychainSaved"`
+	RecoveryCreated bool   `json:"recoveryCreated"`
+	Cloud           string `json:"cloud"`
+	PreflightNote   string `json:"preflightNote"`
+	AlreadyExisted  bool   `json:"alreadyExisted"`
+}
+
+// emitSetupJSON writes the setup result to stdout as indented JSON (ADM-1). It is
+// the machine-readable counterpart of setup.SummaryLines and carries no secret.
+func emitSetupJSON(res setup.Result, cloud string, alreadyExisted bool) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(setupResultJSON{
+		VaultID:         res.VaultID,
+		VaultDir:        res.VaultDir,
+		Profile:         res.ProfileName,
+		KeychainSaved:   res.KeychainSaved,
+		RecoveryCreated: false,
+		Cloud:           cloud,
+		PreflightNote:   res.PreflightNote,
+		AlreadyExisted:  alreadyExisted,
+	})
 }
 
 // runSetupPreset performs a non-interactive setup (design §3.3). It reads the
@@ -208,14 +335,31 @@ type setupPresetArgs struct {
 // never generates a recovery key (a phrase nobody saw must not be committed,
 // I-S3); it prints the remedy instead. The preset-specific validation, including
 // the rclone download gate (C11), runs before the password is read so a refusal
-// is deterministic.
+// is deterministic. A re-run whose --vault already holds a matching vault is an
+// idempotent no-op that exits 0 (ADM-5), so a fleet provisioning loop is safe to
+// re-run.
 func runSetupPreset(a setupPresetArgs) error {
 	if strings.TrimSpace(a.vaultArg) == "" {
 		return fmt.Errorf("--preset requires --vault PATH")
 	}
+	switch a.preset {
+	case "synced-folder", "local", "rclone":
+	default:
+		return fmt.Errorf("unknown --preset %q; want synced-folder, rclone, or local", a.preset)
+	}
 	vaultPath, err := userpath.Abs(a.vaultArg)
 	if err != nil {
 		return err
+	}
+
+	// ADM-5 idempotent re-run: a provisioning loop re-runs the SAME command; a
+	// vault already present at --vault must not fail the loop. This check needs
+	// neither the password nor the rclone download, so it runs FIRST — before the
+	// C11 download gate and before SEAVAULT_PASSWORD is read. A vault that matches
+	// the requested plan reports and exits 0; a profile-name clash with a DIFFERENT
+	// vault is a real mismatch and keeps its non-zero exit.
+	if handled, herr := setupIdempotentRerun(vaultPath, a); handled || herr != nil {
+		return herr
 	}
 
 	deps := setup.DefaultDeps()
@@ -244,8 +388,6 @@ func runSetupPreset(a setupPresetArgs) error {
 		deps.RcloneEnsure = func() error { return setup.RcloneEnsure(func() bool { return true }) }
 		name := strings.TrimSpace(a.remoteName)
 		cloud = setup.RcloneRemote{Name: name, RemotePath: name + ":"}
-	default:
-		return fmt.Errorf("unknown --preset %q; want synced-folder, rclone, or local", a.preset)
 	}
 
 	// Password from SEAVAULT_PASSWORD ONLY (I-S1): never read from argv, never
@@ -263,18 +405,97 @@ func runSetupPreset(a setupPresetArgs) error {
 	}
 	res, err := setup.Execute(plan, password, deps)
 	if err != nil {
-		if res.CloudNote != "" {
-			fmt.Fprintln(os.Stderr, res.CloudNote)
+		// CLI-6/DOC-5: name the created vault (if any) and the step-branched
+		// CloudNote before returning; each prints at most once.
+		for _, line := range setupFailureLines(res) {
+			fmt.Fprintln(os.Stderr, line)
 		}
 		return err
 	}
 
-	// I-S3: recovery is skipped in a non-interactive run; print the remedy.
-	res.RecoveryNote = fmt.Sprintf("skipped in a non-interactive run (a recovery key nobody has seen is never created); create one with `seavault recovery generate %s`.", res.ProfileName)
+	// I-S3: recovery is skipped in a non-interactive run; print the remedy. The
+	// profile name is shell-quoted so the printed command pastes cleanly when the
+	// name (the vault folder's basename) contains spaces (preset-noninteractive-2).
+	res.RecoveryNote = fmt.Sprintf("skipped in a non-interactive run (a recovery key nobody has seen is never created); create one with `seavault recovery generate %s`.", shellQuoteArg(res.ProfileName))
+	if a.jsonOut {
+		return emitSetupJSON(res, a.preset, false)
+	}
 	for _, line := range setup.SummaryLines(res, false) {
 		fmt.Println(line)
 	}
 	return nil
+}
+
+// setupIdempotentRerun implements ADM-5: when a vault already exists at vaultPath,
+// a --preset re-run reports it and exits 0 if it matches the requested plan (the
+// requested profile name is free or already points at THIS vault), registering
+// the profile when it was missing so the machine ends fully provisioned. A
+// profile name that already points at a DIFFERENT vault is a genuine mismatch and
+// returns an error (a non-zero exit, distinct from the exit-0 match). It returns
+// handled=true when it fully handled the run (an existing vault, match or the
+// caller already got the mismatch error). handled=false means no vault exists yet
+// and normal creation should proceed. It reads no password and never downloads.
+func setupIdempotentRerun(vaultPath string, a setupPresetArgs) (handled bool, err error) {
+	resolvedName := setup.Plan{VaultDir: vaultPath, ProfileName: a.profileName}.ResolvedProfileName()
+	// Side-effect-free classification of the target dir. Only an EXISTING vault
+	// (vault.json present) is idempotent; leftovers and a clear dir fall through to
+	// the normal create path.
+	probe := setup.Plan{VaultDir: vaultPath, ProfileName: a.profileName, Cloud: setup.LocalOnly{}}
+	if verr := probe.Validate(); !errors.Is(verr, setup.ErrVaultDirNotEmpty) {
+		return false, nil
+	}
+
+	e, found, rerr := profile.Resolve(resolvedName)
+	if rerr != nil {
+		return false, rerr
+	}
+	if found && filepath.Clean(e.VaultPath) != filepath.Clean(vaultPath) {
+		return true, fmt.Errorf("a vault already exists at %s, but the profile name %q already points at a different vault (%s); re-run with a different --profile or --vault (nothing was changed)", vaultPath, resolvedName, e.VaultPath)
+	}
+	if !found {
+		// The vault is present but not registered under this name (e.g. the
+		// app-data store was reset while the vault dir survived); complete the
+		// provisioning by registering it, so the profile the loop expects exists.
+		if _, aerr := profile.Add(resolvedName, vaultPath); aerr != nil {
+			return true, aerr
+		}
+	}
+
+	res := setup.Result{
+		VaultDir:      vaultPath,
+		ProfileName:   resolvedName,
+		PreflightNote: vault.SyncClientPreflightNote(vaultPath),
+	}
+	if cfg, cerr := vault.ReadConfig(vaultPath); cerr == nil {
+		res.VaultID = cfg.VaultID
+	}
+	if a.jsonOut {
+		return true, emitSetupJSON(res, a.preset, true)
+	}
+	fmt.Printf("a vault already exists at %s (profile %s); it matches the requested --preset %s plan, so nothing was changed.\n", vaultPath, resolvedName, a.preset)
+	return true, nil
+}
+
+// shellQuoteArg renders s so it survives a copy-paste into a POSIX shell as a
+// single argument (preset-noninteractive-2). A profile name defaults to the vault
+// folder's basename, so it can hold spaces or shell metacharacters ("My Vault");
+// interpolating it raw into a printed remedy command splits it into two arguments.
+// A name of only safe characters is returned unchanged; anything else is wrapped
+// in single quotes with embedded single quotes escaped the POSIX way. It is
+// display-only (nothing here is executed) and never carries a secret.
+func shellQuoteArg(s string) string {
+	if s == "" {
+		return "''"
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_' || r == '-' || r == '.' || r == '/' || r == '@' || r == '%' || r == '+' || r == ':' || r == ',':
+		default:
+			return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+		}
+	}
+	return s
 }
 
 // stdinPrompter is the CLI implementation of setup.Prompter (design §3.2):

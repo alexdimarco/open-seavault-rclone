@@ -105,6 +105,21 @@ func RunInteractive(pr Prompter, deps Deps, opts RunOptions) (Result, error) {
 		return Result{}, err
 	}
 
+	// CLI-5: validate the chosen location immediately (side-effect-free) and offer
+	// the typed-error remedy IN PLACE — before the password and the rest of the
+	// ceremony are spent — so a collision does not waste every later prompt and
+	// then fail at Execute with a bare "error:" (design §6). profileOverride may
+	// carry a suffixed profile name chosen to dodge a name collision.
+	vaultDir, cloud, profileOverride, openedExisting, err := resolveLocationConflicts(pr, vaultDir, cloud, opts.ProfileName, home, goos, opts.OpenApp)
+	if err != nil {
+		return Result{}, err
+	}
+	if openedExisting {
+		// The user chose to open the existing vault instead of creating a new one;
+		// nothing new was built.
+		return Result{}, nil
+	}
+
 	// Step 1 (--expert): KDF + chunk knobs, validated against the floor later.
 	var expert *ExpertOptions
 	if opts.Expert {
@@ -146,7 +161,7 @@ func RunInteractive(pr Prompter, deps Deps, opts RunOptions) (Result, error) {
 
 	plan := Plan{
 		VaultDir:     vaultDir,
-		ProfileName:  opts.ProfileName,
+		ProfileName:  profileOverride,
 		SaveKeychain: saveKeychain,
 		Cloud:        cloud,
 		Expert:       expert,
