@@ -611,19 +611,27 @@ func TestStartupSANAllowlistAndSelfSigned(t *testing.T) {
 // --- Z1: no pre-U3 test deleted or edited --------------------------------
 
 // TestNoPreU3TestDeletedOrEdited (row Z1, I-T4): every _test.go file present on
-// main is byte-identical in the worktree, except cmd/seavault/main_test.go, whose
-// only sanctioned change is the guard-signature adaptation (predesign review
-// integration-seams-3); even there, no test function that existed on main may be
-// removed. New test files are permitted (additions never fail Z1).
+// main is byte-identical in the worktree, except the maintainer-authorized files
+// (cmd/seavault/main_test.go — the sanctioned guard-signature adaptation, predesign
+// review integration-seams-3; and cmd/seavault/commands_test.go — the authorized H4
+// rewrite deriving both the registry and dispatch sides from code, maintainer
+// authorization 2026-09-08); even in those, no test function that existed on main
+// may be removed. New test files are permitted (additions never fail Z1).
 func TestNoPreU3TestDeletedOrEdited(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available; Z1 diff guard skipped")
 	}
 	repoRoot := gitTopLevel(t)
 
-	// The one file whose body legitimately changed: it carries the U3 additions
-	// and the sanctioned guard-signature adaptation.
-	const guardHostFile = "cmd/seavault/main_test.go"
+	// The pre-U3 test files whose bodies legitimately changed, each under an explicit
+	// maintainer authorization. For every one of them Z1 still forbids REMOVING a
+	// test function that existed on main; only edits/additions within the file are
+	// allowed. main_test.go carries the U3 additions and the sanctioned guard-
+	// signature adaptation; commands_test.go carries the authorized H4 rewrite.
+	guardHostFiles := map[string]bool{
+		"cmd/seavault/main_test.go":     true,
+		"cmd/seavault/commands_test.go": true,
+	}
 
 	mainTestFiles := gitListTestFiles(t, repoRoot)
 	if len(mainTestFiles) == 0 {
@@ -639,7 +647,7 @@ func TestNoPreU3TestDeletedOrEdited(t *testing.T) {
 		if err != nil {
 			t.Fatalf("pre-U3 test file %s is missing from the worktree (deleted?): %v", f, err)
 		}
-		if f == guardHostFile {
+		if guardHostFiles[f] {
 			// Forbid removals of any test function that existed on main. Anchor the
 			// match to the declaration "func <name>(" so a name that is a prefix of
 			// a sibling (TestX vs TestXExtra) is not falsely counted as present.

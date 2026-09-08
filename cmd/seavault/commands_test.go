@@ -6,7 +6,9 @@ package main
 import (
 	"bytes"
 	"os"
+	"reflect"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -20,6 +22,20 @@ var singleDashFlag = regexp.MustCompile(`(^|[\s\[])-[A-Za-z]`)
 // quotedToken pulls the double-quoted subcommand names out of a `case "a", "b":`
 // line when H4 reconstructs a group's real dispatch set from source.
 var quotedToken = regexp.MustCompile(`"([^"]+)"`)
+
+// groupWiringRe matches a group's one-line dispatch wiring in the package source
+// — `func cmdX(args []string) error { return dispatchGroup("<group>", execX, args) }`
+// — capturing the group name (1) and its leaf-dispatcher function name (2). This
+// is exactly the machinery main() reaches through (run → the group parent's
+// handler → dispatchGroup → execX), parsed straight from source so H4 derives the
+// dispatch side with no hardcoded group/command list.
+var groupWiringRe = regexp.MustCompile(`func\s+\w+\(args \[\]string\) error\s*\{\s*return dispatchGroup\("([^"]+)",\s*(\w+),\s*args\)\s*\}`)
+
+// execDefRe matches a leaf-dispatcher definition — `func exec…(args []string) error {`
+// — capturing its name (1). H4 uses it to prove every exec dispatcher the package
+// defines is actually wired into dispatch (and therefore reachable from a registry
+// row): a stray exec function nothing dispatches is an unregistered handler.
+var execDefRe = regexp.MustCompile(`func\s+(exec\w+)\(args \[\]string\) error\s*\{`)
 
 // fullPath is the invocation prefix a leaf row's usage line must contain:
 // "seavault <name>" for a top-level command, "seavault <group> <name>" for a
@@ -161,65 +177,163 @@ func registryGroupNames(group string) map[string]bool {
 	return got
 }
 
-// TestRegistryEqualsDispatchBothDirections is H4 (C3): the registry names equal
-// the dispatchable names in BOTH directions, at the top level and inside every
-// group. The four commands older usage() text omitted — rclone version / rclone
-// path, remote sync / remote config — must be present, and dispatch must
-// recognize each registered name and reject a bogus one.
-func TestRegistryEqualsDispatchBothDirections(t *testing.T) {
-	// Top level: the registry's top-level names and aliases equal the specified
-	// command set (test = spec), both directions.
-	wantTop := map[string]bool{
-		"setup": true, "init": true, "put": true, "get": true, "export": true,
-		"list": true, "remove": true, "rm": true, "verify": true, "gc": true,
-		"compact": true, "stats": true, "serve": true, "gui": true,
-		"app-config": true, "config": true, "move": true, "version": true,
-		"profile": true, "vault": true, "password": true, "recovery": true,
-		"keychain": true, "rclone": true, "rsync": true, "remote": true, "ssh-key": true,
+// readPackageSource returns every non-test .go file in the cmd/seavault package
+// concatenated, so H4 parses the dispatch machinery from the WHOLE package (not
+// just main.go) and cannot be fooled by moving a dispatcher into another file.
+func readPackageSource(t *testing.T) string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
 	}
-	gotTop := map[string]bool{}
-	for _, c := range commands {
-		if c.group != "" {
+	var b strings.Builder
+	files := 0
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
 			continue
 		}
-		gotTop[c.name] = true
-		for _, a := range c.aliases {
-			gotTop[a] = true
+		src, err := os.ReadFile(n)
+		if err != nil {
+			t.Fatalf("read %s: %v", n, err)
+		}
+		b.Write(src)
+		b.WriteString("\n")
+		files++
+	}
+	if files == 0 {
+		t.Fatal("found no non-test .go sources in the package; the source parser is misconfigured")
+	}
+	return b.String()
+}
+
+// handlerFuncName resolves a registry row's handler value back to the name of the
+// function it points at (e.g. cmdSetup), via reflection over the compiled func
+// value. H4 uses it to prove a registered top-level command's handler is a real,
+// defined function — i.e. that a reachable handler actually exists behind it.
+func handlerFuncName(h func(args []string) error) string {
+	if h == nil {
+		return ""
+	}
+	f := runtime.FuncForPC(reflect.ValueOf(h).Pointer())
+	if f == nil {
+		return ""
+	}
+	full := f.Name() // ".../cmd/seavault.cmdSetup"
+	if i := strings.LastIndex(full, "."); i >= 0 {
+		return full[i+1:]
+	}
+	return full
+}
+
+// TestRegistryEqualsDispatchBothDirections is H4 (C3): the command registry and
+// the dispatch machinery agree in BOTH directions, with NO hardcoded command or
+// group list — the registry side is read from the commands.go table (the in-memory
+// `commands` slice and its helpers) and the dispatch side is PARSED from the
+// package source (the `func cmdX(...) { return dispatchGroup("g", execX, args) }`
+// wirings run() reaches through, plus each execX's real `case` labels). It goes
+// red when a registered command has no reachable handler, or a reachable handler
+// (an unregistered group, a stray exec dispatcher, or a case the table forgot) is
+// not registered. The four commands older usage() text omitted — rclone version /
+// rclone path, remote sync / remote config — must be present and dispatched.
+func TestRegistryEqualsDispatchBothDirections(t *testing.T) {
+	src := readPackageSource(t)
+
+	// ---- Dispatch side, parsed from source (no hardcoded group/command list). ----
+	// group -> its leaf dispatcher, straight from the dispatchGroup wirings.
+	groupToExec := map[string]string{}
+	for _, m := range groupWiringRe.FindAllStringSubmatch(src, -1) {
+		groupToExec[m[1]] = m[2]
+	}
+	if len(groupToExec) == 0 {
+		t.Fatal("parsed no group dispatch wirings from source; the parser or the dispatchGroup pattern changed")
+	}
+	// Every exec leaf dispatcher DEFINED in the package.
+	definedExecs := map[string]bool{}
+	for _, m := range execDefRe.FindAllStringSubmatch(src, -1) {
+		definedExecs[m[1]] = true
+	}
+	if len(definedExecs) == 0 {
+		t.Fatal("parsed no exec dispatcher definitions from source; the parser changed")
+	}
+	// Every exec dispatcher the package defines must be wired into dispatch (and so
+	// reachable from a registry row); every wiring must name a defined function. A
+	// stray exec function nothing dispatches is an unregistered reachable handler.
+	wired := map[string]bool{}
+	for _, execFn := range groupToExec {
+		wired[execFn] = true
+	}
+	for fn := range definedExecs {
+		if !wired[fn] {
+			t.Errorf("exec dispatcher %q is defined in the package but no group wires it via dispatchGroup; a reachable handler must be registered", fn)
 		}
 	}
-	assertSetsEqual(t, "top-level", wantTop, gotTop)
-
-	// Each group: the registry's recognized names equal the leaf dispatcher's
-	// real `case` labels parsed from source.
-	groups := map[string]string{
-		"profile":  "func execProfile(args []string) error {",
-		"vault":    "func execVault(args []string) error {",
-		"password": "func execPassword(args []string) error {",
-		"recovery": "func execRecovery(args []string) error {",
-		"keychain": "func execKeychain(args []string) error {",
-		"rclone":   "func execRclone(args []string) error {",
-		"rsync":    "func execRsync(args []string) error {",
-		"remote":   "func execRemote(args []string) error {",
-		"ssh-key":  "func execSSHKey(args []string) error {",
-	}
-	for group, header := range groups {
-		dispatchable := parseSwitchCases(t, header)
-		registered := registryGroupNames(group)
-		assertSetsEqual(t, group, dispatchable, registered)
-	}
-
-	// The C3 known-omission commands must be dispatch-recognized (not "unknown").
-	omissions := []struct{ group, name string }{
-		{"rclone", "version"}, {"rclone", "path"},
-		{"remote", "sync"}, {"remote", "config"},
-	}
-	for _, o := range omissions {
-		if _, ok := groupCommand(o.group, o.name); !ok {
-			t.Errorf("C3: %q %q must be in the registry so dispatch recognizes it", o.group, o.name)
+	for _, fn := range groupToExec {
+		if !definedExecs[fn] {
+			t.Errorf("a dispatchGroup wiring names exec dispatcher %q but no such function is defined in the package", fn)
 		}
 	}
 
-	// Recognition holds for every registered name; a bogus name is rejected.
+	// ---- Registry side, from the commands.go table (no hardcoded list). ----
+	// A group parent is a top-level row (group == "") that has child rows.
+	registryGroups := map[string]bool{}
+	for _, c := range commands {
+		if c.group == "" && len(groupChildren(c.name)) > 0 {
+			registryGroups[c.name] = true
+		}
+	}
+	if len(registryGroups) == 0 {
+		t.Fatal("the registry lists no group parents; the table is malformed")
+	}
+
+	// ---- Group set: dispatched groups == registered group parents, both ways. ----
+	dispatchGroupSet := map[string]bool{}
+	for g := range groupToExec {
+		dispatchGroupSet[g] = true
+	}
+	// want = dispatch side, got = registry side: loop 1 catches a dispatched group
+	// the registry forgot; loop 2 catches a registered group nothing dispatches.
+	assertSetsEqual(t, "group set", dispatchGroupSet, registryGroups)
+
+	// ---- Per group: dispatchable case labels == registered names+aliases. ----
+	for g, execFn := range groupToExec {
+		dispatchable := parseSwitchCases(t, "func "+execFn+"(args []string) error {")
+		registered := registryGroupNames(g)
+		if len(registered) == 0 {
+			t.Errorf("group %q dispatches %d subcommand(s) but the registry lists none", g, len(dispatchable))
+		}
+		assertSetsEqual(t, g, dispatchable, registered)
+	}
+
+	// ---- Top level: every registered top-level leaf has a reachable handler. ----
+	// run() dispatches top-level rows straight from the table, so a leaf is
+	// reachable exactly when its handler is a real, defined function. Group parents
+	// are covered by the group-set/per-group checks above; subcommand rows have no
+	// own handler.
+	topLevelLeaves := 0
+	for _, c := range commands {
+		if c.group != "" || len(groupChildren(c.name)) > 0 {
+			continue
+		}
+		topLevelLeaves++
+		if c.handler == nil {
+			t.Errorf("top-level command %q has a nil handler; it is registered but unreachable", c.name)
+			continue
+		}
+		fn := handlerFuncName(c.handler)
+		if fn == "" {
+			t.Errorf("top-level command %q: could not resolve its handler function name", c.name)
+			continue
+		}
+		if !strings.Contains(src, "func "+fn+"(") {
+			t.Errorf("top-level command %q dispatches to %q, which is not defined in the package source (no reachable handler)", c.name, fn)
+		}
+	}
+	if topLevelLeaves == 0 {
+		t.Fatal("the registry lists no top-level leaf commands; the table is malformed")
+	}
+
+	// ---- Recognition holds for every registered name; a bogus name is rejected. ----
 	for _, c := range commands {
 		if c.group == "" {
 			if _, ok := topLevelCommand(c.name); !ok {
@@ -236,6 +350,24 @@ func TestRegistryEqualsDispatchBothDirections(t *testing.T) {
 	}
 	if _, ok := groupCommand("rclone", "definitely-not-a-subcommand"); ok {
 		t.Error("groupCommand must reject an unregistered subcommand")
+	}
+
+	// ---- The C3 known-omission commands must be registered AND dispatched. ----
+	for _, o := range []struct{ group, name string }{
+		{"rclone", "version"}, {"rclone", "path"},
+		{"remote", "sync"}, {"remote", "config"},
+	} {
+		if _, ok := groupCommand(o.group, o.name); !ok {
+			t.Errorf("C3: %q %q must be in the registry so dispatch recognizes it", o.group, o.name)
+		}
+		execFn, ok := groupToExec[o.group]
+		if !ok {
+			t.Errorf("C3: group %q has no dispatch wiring", o.group)
+			continue
+		}
+		if !parseSwitchCases(t, "func "+execFn+"(args []string) error {")[o.name] {
+			t.Errorf("C3: %q %q is registered but %s does not dispatch it", o.group, o.name, execFn)
+		}
 	}
 }
 
