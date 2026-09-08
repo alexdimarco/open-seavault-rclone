@@ -1775,6 +1775,10 @@ func (s *Server) handleRecoveryGenerate(w http.ResponseWriter, r *http.Request) 
 		methodNotAllowed(w)
 		return
 	}
+	// This endpoint's success body carries the freshly minted recovery phrase and
+	// its 24 words. Mark every response non-cacheable BEFORE any write so no phrase
+	// is retained by a cache or the browser history (adversarial review recovery-gui-2).
+	setNoStore(w)
 	v, ok := s.currentVault(w)
 	if !ok {
 		return
@@ -1989,6 +1993,11 @@ func (s *Server) handleRecoveryRevoke(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
+	// The entry is gone from the vault: retire its device-local label record too, so
+	// a revoked key leaves no orphaned hostname/date behind (adversarial review
+	// wordlist-labels-3). Display-only and best-effort — the vault mutation already
+	// succeeded, so a store failure never fails the revoke.
+	_ = profile.DeleteRecoveryLabel(req.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -3736,6 +3745,18 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// setNoStore marks a response as non-cacheable. It MUST be called before the
+// first write (before writeJSON, which flushes the status line). It is set on
+// every response that can carry recovery-phrase material so no phrase is retained
+// by an intermediary or the browser's cache/history (adversarial review
+// recovery-gui-2). Cache-Control: no-store is the directive; Pragma: no-cache is
+// the HTTP/1.0 belt-and-braces for the same intent.
+func setNoStore(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Cache-Control", "no-store")
+	h.Set("Pragma", "no-cache")
+}
+
 func methodNotAllowed(w http.ResponseWriter) {
 	writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
 }
@@ -4285,6 +4306,8 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
 .destination-tab { border: 1px solid var(--button-border); background: var(--panel); color: var(--fg); border-radius: 999px; padding: 8px 16px; font: inherit; cursor: pointer; }
 .destination-tab.active { background: var(--button); border-color: var(--focus); font-weight: 600; }
 .advanced-toggle-row { margin: 0; }
+.welcome-redeem { margin-top: 12px; border-top: 1px solid var(--button-border); padding-top: 12px; }
+.welcome-redeem > summary { cursor: pointer; color: var(--focus); }
 .section-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 4px; }
 .section-list a { color: var(--focus); text-decoration: none; padding: 4px 0; }
 .section-list a:hover { text-decoration: underline; }
@@ -4364,6 +4387,26 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
     <a class="settings-button" href="/?create=1">Create a new vault</a>
     <a class="settings-button" href="/?app=1">Go to the full app</a>
   </p>
+  <details id="welcomeRedeem" class="welcome-redeem" ontoggle="welcomeRedeemPrefill()">
+    <summary>Forgot your password? Use a recovery key</summary>
+    <p class="hint">Use your recovery phrase to set a new password for a vault you cannot open. You do NOT need to open the vault first &mdash; the recovery phrase opens it. This consumes the recovery key.</p>
+    <div class="form-grid">
+      <label>Vault folder
+        <input id="welcomeRedeemVaultPath" placeholder="~/Nextcloud/seavault" autocomplete="off">
+        <small>The folder of the vault you want to recover. Prefilled from the folder you chose above; change it if the vault lives elsewhere.</small>
+      </label>
+      <label>Recovery phrase
+        <input id="welcomeRedeemPhrase" autocomplete="off" placeholder="24 words, or the compact XXXX-XXXX form">
+      </label>
+      <label>New password
+        <input id="welcomeRedeemNew" type="password" autocomplete="new-password" placeholder="new vault password">
+      </label>
+      <label>Confirm new password
+        <input id="welcomeRedeemNewConfirm" type="password" autocomplete="new-password" placeholder="re-enter the new password">
+      </label>
+    </div>
+    <p class="row-actions"><button type="button" class="operation" onclick="welcomeRedeem()">Set a new password with my recovery key</button></p>
+  </details>
 </section>
 
 <section id="setup-stepper" aria-label="First-run setup">
@@ -4475,7 +4518,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
     <a href="#files-panel">Browse files</a>
   </nav>
 <section id="vault-panel">
-  <h2>Open or create vault</h2>
+  <h2>Your vault</h2>
   <div class="form-grid">
     <label>Saved vault selector
       <select id="vaultSelect" onchange="selectSavedVault()">
@@ -4521,14 +4564,14 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
 </section>
 
 <section id="saved-vaults-panel">
-  <h2>Saved vault locations</h2>
+  <h2>Switch vault</h2>
   <p class="hint">These locations appear in the vault dropdown. Passwords are only stored when you save them to the OS keychain.</p>
   <p><button onclick="refreshStatus()">Refresh saved vaults</button></p>
   <div id="profiles" class="table-wrap"></div>
 </section>
 
 <section id="upload-panel">
-  <h2>Upload into encrypted archive</h2>
+  <h2>Add files</h2>
   <p class="hint">Browser uploads are encrypted directly into the vault. For very large folders, the GUI sends smaller batches. Local path ingest lets the local GUI server read the folder directly. It uses native Go import by default, or optional managed/system rsync staging when selected.</p>
   <div class="form-grid">
     <label>Virtual path or folder
@@ -4579,7 +4622,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
 </section>
 
 <section id="export-panel">
-  <h2>Export plaintext from vault</h2>
+  <h2>Get files out</h2>
   <p class="hint">Exports decrypt files from the open vault to a local destination. The destination is never inside .seavault unless you explicitly type that path, which is not recommended.</p>
   <div class="form-grid">
     <label>Selected virtual folder or file
@@ -4611,8 +4654,8 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
 </section>
 
 <section id="files-panel">
-  <h2>WebDAV file manager</h2>
-  <p class="hint">This is open-seavault-rclone's built-in WebDAV client. It talks to the local same-origin WebDAV endpoint and does not depend on Finder, Windows Explorer, GNOME Files, KDE Dolphin, davfs2, WinFsp, macFUSE, or FUSE.</p>
+  <h2>Browse files</h2>
+  <p class="hint">Browse, download, rename, and delete the files inside your open vault. This built-in WebDAV file manager works on its own &mdash; it does not need Finder, Windows Explorer, GNOME Files, KDE Dolphin, davfs2, WinFsp, macFUSE, or any FUSE mount.</p>
   <p class="row-actions">
     <button class="operation" onclick="refreshDavFiles()">Refresh folder</button>
     <button class="secondary operation" onclick="closeVaultFromWebDAV()">Close vault</button>
@@ -4655,7 +4698,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
     <a href="#keys-panel">SFTP keys</a>
   </nav>
 <section id="remote-panel">
-  <h2>Remote repositories</h2>
+  <h2>Cloud sync</h2>
   <p class="hint">Cloud sync uses the managed rclone runtime. If it is not installed yet, choose &ldquo;Check cloud runtime&rdquo; and open-seavault-rclone will ask before downloading it.</p>
   <p class="row-actions"><button type="button" class="secondary" onclick="ensureRcloneRuntime()">Check cloud runtime</button></p>
   <div id="cloudRuntimeConsent" class="notice-banner" role="status" hidden>
@@ -4686,7 +4729,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
 </section>
 
 <section id="keys-panel">
-  <h2>SSH keys for rclone SFTP</h2>
+  <h2>SFTP keys</h2>
   <div class="form-grid">
     <label>Managed key name <input id="sshKeyName" placeholder="research-sftp" autocomplete="off"></label>
     <label>Import existing private key path <input id="sshKeyPath" placeholder="optional path to import" autocomplete="off"></label>
@@ -4757,10 +4800,14 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
   <div id="recoveryList" class="table-wrap"></div>
 
   <h3>Redeem a recovery key</h3>
-  <p class="hint">Use a recovery phrase to set a new password (for example, if you lost the password). You do NOT need to open the vault first &mdash; select or enter the vault path above, then redeem. This consumes the recovery key.</p>
+  <p class="hint">Use a recovery phrase to set a new password (for example, if you lost the password). You do NOT need to open the vault first &mdash; enter the vault's folder in the field below, then redeem. This consumes the recovery key.</p>
   <div class="form-grid">
+    <label>Vault folder
+      <input id="redeemVaultPath" placeholder="~/Nextcloud/seavault" autocomplete="off">
+      <small>The folder of the vault to recover. You do not need to open it first; the recovery phrase opens it. Leave blank to use the vault already selected.</small>
+    </label>
     <label>Recovery phrase
-      <input id="redeemPhrase" autocomplete="off" placeholder="recovery phrase">
+      <input id="redeemPhrase" autocomplete="off" placeholder="24 words, or the compact XXXX-XXXX form">
     </label>
     <label>New password
       <input id="redeemNew" type="password" autocomplete="new-password" placeholder="new vault password">
@@ -4791,7 +4838,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
   </nav>
 <section id="legacy-files-panel">
   <h2>Advanced raw file list</h2>
-  <p class="hint">Debug view of virtual paths and chunk counts. Use the WebDAV file manager above for normal file browsing.</p>
+  <p class="hint">Debug view of virtual paths and chunk counts. Use Browse files in the Files tab for normal file browsing.</p>
   <p class="row-actions"><button onclick="refreshFiles()">Refresh raw list</button><button onclick="loadStats()">Stats</button></p>
   <div id="files" class="table-wrap"></div>
 </section>
@@ -5347,7 +5394,11 @@ async function redeemRecovery(){
     if(!phrase.trim()){ showError('Recovery phrase required', 'Enter the recovery phrase to redeem.'); return; }
     if(!p1){ showError('New password required', 'Enter a new vault password.'); return; }
     if(p1 !== p2){ showError('Passwords do not match', 'The new password and its confirmation differ.'); return; }
-    const vp = ($('vaultPath') && $('vaultPath').value) || (lastStatus && lastStatus.vaultPath) || ''; const res = await api('/api/recovery/redeem',{method:'POST',headers:jsonHeaders,body:JSON.stringify({vaultPath:vp,phrase:phrase,newPassword:p1})});
+    // The redeem form carries its own vault-path field so a locked-out owner does
+    // not depend on the Files-tab #vaultPath (friction GUI-D2-4/5); fall back to the
+    // Files-tab path or the open session path when it is left blank.
+    const vp = ($('redeemVaultPath') && $('redeemVaultPath').value.trim()) || ($('vaultPath') && $('vaultPath').value.trim()) || (lastStatus && lastStatus.vaultPath) || '';
+    const res = await api('/api/recovery/redeem',{method:'POST',headers:jsonHeaders,body:JSON.stringify({vaultPath:vp,phrase:phrase,newPassword:p1})});
     $('redeemPhrase').value=''; $('redeemNew').value=''; $('redeemNewConfirm').value='';
     showHuman('Recovery key redeemed', res, 'success');
     await listRecovery();
@@ -5541,6 +5592,34 @@ async function welcomeOpen(){
     await api('/api/open',{method:'POST',headers:jsonHeaders,body:JSON.stringify({vaultPath: path, password: pw, useKeychain: !pw})});
     window.location.href = '/';
   } catch(e){ if(await offerAcceptRollback(e, path, pw)) return; showError('Could not open the vault', humanFetchError(e)); }
+}
+// welcomeRedeemPrefill copies the Welcome-back folder-picker path into the redeem
+// vault-path field when the redeem disclosure is opened and that field is still
+// blank, so a returning owner who typed the folder above does not retype it.
+function welcomeRedeemPrefill(){
+  const src = $('welcomeVaultPath'), dst = $('welcomeRedeemVaultPath');
+  if(src && dst && !dst.value.trim() && src.value.trim()){ dst.value = src.value.trim(); }
+}
+// welcomeRedeem lets a locked-out returning owner redeem a recovery key straight
+// from the Welcome-back view, WITHOUT opening the vault first (design U2 §2.2,
+// friction GUI-D2-4). It posts to the EXISTING /api/recovery/redeem with the vault
+// folder, the phrase (24 words or the compact base32 form), and a new password;
+// the endpoint opens the vault via the phrase (no prior unlock), so a second-device
+// owner with zero profiles recovers by path. On success the vault is open; go to
+// the app.
+async function welcomeRedeem(){
+  const vp = ($('welcomeRedeemVaultPath') && $('welcomeRedeemVaultPath').value.trim()) || ($('welcomeVaultPath') && $('welcomeVaultPath').value.trim()) || '';
+  try {
+    const phrase = ($('welcomeRedeemPhrase') && $('welcomeRedeemPhrase').value) || '';
+    const p1 = ($('welcomeRedeemNew') && $('welcomeRedeemNew').value) || '';
+    const p2 = ($('welcomeRedeemNewConfirm') && $('welcomeRedeemNewConfirm').value) || '';
+    if(!vp){ showError('Vault folder required', 'Enter or choose the folder of the vault you want to recover.'); return; }
+    if(!phrase.trim()){ showError('Recovery phrase required', 'Enter your 24-word recovery phrase, or the compact form.'); return; }
+    if(!p1){ showError('New password required', 'Enter a new vault password.'); return; }
+    if(p1 !== p2){ showError('Passwords do not match', 'The new password and its confirmation differ.'); return; }
+    await api('/api/recovery/redeem',{method:'POST',headers:jsonHeaders,body:JSON.stringify({vaultPath:vp,phrase:phrase,newPassword:p1})});
+    window.location.href = '/';
+  } catch(e){ showError('Could not use the recovery key', humanFetchError(e)); }
 }
 // offerAcceptRollback surfaces the GUI accept-rollback affordance (design U2 §2.7):
 // when /api/open refused with the rolled-back freshness gate the error body carries
