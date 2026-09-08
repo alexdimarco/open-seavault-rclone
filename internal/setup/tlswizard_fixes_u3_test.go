@@ -317,16 +317,19 @@ func TestShowRenewalSubstitutesConcreteValues(t *testing.T) {
 		name         string
 		recipe       renewalRecipe
 		wantContains []string
+		wantCron     string // A1-c6: Tailscale is MONTHLY (re-issues unconditionally), others daily
 	}{
 		{
 			"tailscale",
 			renewalRecipe{route: routeNameTailscale, name: "myhost.tailnet.ts.net", command: "tailscale cert myhost.tailnet.ts.net"},
 			[]string{"tailscale cert myhost.tailnet.ts.net"},
+			"17 3 1 * *",
 		},
 		{
 			"lego",
 			renewalRecipe{route: routeNameLego, name: "vault.example.com", command: "lego --path /x --dns cloudflare --domains vault.example.com renew"},
 			[]string{"vault.example.com renew"},
+			"17 3 * * *",
 		},
 	}
 	if len(rows) == 0 {
@@ -345,7 +348,7 @@ func TestShowRenewalSubstitutesConcreteValues(t *testing.T) {
 					t.Fatalf("missing concrete value %q in:\n%s", w, out)
 				}
 			}
-			if !strings.Contains(out, "cron: 17 3 * * *  "+r.recipe.command) {
+			if !strings.Contains(out, "cron: "+r.wantCron+"  "+r.recipe.command) {
 				t.Fatalf("the cron snippet did not carry the concrete command:\n%s", out)
 			}
 			lo := strings.ToLower(out)
