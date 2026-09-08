@@ -371,8 +371,8 @@ func TestUsageTextServeCredentialAndVersion(t *testing.T) {
 			t.Fatalf("usage footer missing %q:\n%s", want, txt)
 		}
 	}
-	if !strings.Contains(txt, "seavault 0.17.0") {
-		t.Fatalf("usage does not report version 0.17.0:\n%s", txt)
+	if !strings.Contains(txt, "seavault "+version) {
+		t.Fatalf("usage does not report version %s:\n%s", version, txt)
 	}
 }
 
