@@ -82,26 +82,38 @@ the recovery read-back ceremony, the strict rollback gate, or the config-tamper/
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)), with the base32 **compact form** beneath it.
   The words and the compact form encode the **same** 256-bit secret — no re-wrap, no config change —
   so a phrase written down in 0.15–0.18 keeps working, and a 24-word phrase can still be redeemed on
-  a 0.17 client through its compact form. Redeem and the read-back accept either form; a single
-  mistyped word is caught by the built-in checksum with a specific message instead of a generic
-  "wrong secret". The GUI and the CLI `setup` wizard can save/print a **recovery card** (vault name,
-  date, the 24 words, the compact form); a card printed before you finish the read-back is stamped
-  **DRAFT** and re-issued clean only after you confirm.
+  a 0.17 client through its compact form. Redeem and the read-back accept either form; a mistyped or
+  unknown word is caught before any unlock — an unknown word by the wordlist lookup, a single mistype
+  by the built-in checksum — with a specific message instead of a generic "wrong secret". **Redeem is
+  single-use:** redeeming a phrase consumes that recovery entry (so a leaked phrase cannot keep
+  opening the vault), so after you redeem, mint a fresh key with `seavault recovery generate`. The
+  GUI, the CLI `setup` wizard, and `seavault recovery generate --save PATH` can save/print a
+  **recovery card** (vault name, date, the 24 words, the compact form); a card written before you
+  finish the read-back is stamped **DRAFT** and re-issued clean only after you confirm (`--save`
+  refuses a path inside the vault folder, warns and re-confirms under a detected cloud-sync folder,
+  writes owner-only `0600`, and offers to delete the DRAFT if you abandon the read-back).
 - **Recovery `generate` is interactive-only.** `seavault recovery generate` opens the vault (so it
   asks for the vault password unless it is in the OS keychain or `SEAVAULT_PASSWORD`), shows the
   phrase once, and requires a typed read-back before it commits — it is never a non-interactive
-  command. A vault with no recovery key is flagged as a persistent reminder when it is opened
-  interactively and in `seavault profile list --status`.
+  command. With stdin redirected from a file, a pipe, or a script it **refuses before opening the
+  vault or showing any phrase** — a typed error names the terminal requirement and tells you to run
+  it directly in a terminal (there is no environment override for the read-back), so a script can
+  never capture a freshly minted secret. A vault with no recovery key is flagged as a persistent
+  reminder when it is opened interactively and in `seavault profile list --status`.
 - **Four-destination GUI.** The browser GUI is reorganised into four destinations — **Files**,
   **Cloud sync**, **Security**, **Advanced** — showing one at a time instead of ~22 stacked panels,
   with a returning-user **Welcome back** unlock view (saved vaults + password, or "I already have a
   vault — choose its folder"). Every prior element id, handler, and `/api` route is unchanged; the
   restructure moves markup only.
 - **`--help` that teaches, and an exit-code change.** Every subcommand has a one-line synopsis and a
-  double-dash usage line, and group verbs (`seavault password --help`, `recovery`, `vault`, …) list
-  their subcommands. An explicit `--help` or a bare group invocation now **exits 0** (it used to
-  exit non-zero); an **unknown** subcommand still exits non-zero so error-guarding scripts detect
-  typos.
+  double-dash usage line, and the group verbs — `password`, `recovery`, `vault`, `keychain`,
+  `rclone`, `rsync`, `remote`, `ssh-key`, and `profile` — list their subcommands. An explicit
+  `--help` or a bare invocation of one of those group verbs now **exits 0** (it used to exit
+  non-zero); an **unknown** subcommand still exits non-zero, and an unknown top-level command exits
+  2, so error-guarding scripts detect typos. **If a script relied on a bare group verb's old
+  non-zero exit, invoke an explicit subcommand instead** (a bare `seavault recovery` is now success,
+  not an error). `app-config` and `gui` are not group verbs: `gui` with no vault argument launches
+  the app, and `app-config` still requires a subcommand (though `app-config --help` exits 0).
 - **`SEAVAULT_NEW_PASSWORD`.** `password change` and `recovery redeem` read the *new* password from
   `SEAVAULT_NEW_PASSWORD` when it is set, so a rotation can be scripted without a prompt (the *old*
   password still comes from `SEAVAULT_PASSWORD`/keychain/prompt; neither password is ever on argv).
@@ -502,7 +514,7 @@ seavault stats [flags] VAULT_DIR_OR_PROFILE
 seavault serve [--addr 127.0.0.1:8765] [--user seavault] [--password-file PATH] [--quiet-credentials] [--allow-host NAME] [--drop-os-junk] [--no-keychain] [--insecure-bind] VAULT_DIR_OR_PROFILE
 seavault gui [--addr 127.0.0.1:8787] [--no-open] [--allow-host NAME] [--exit-on-browser-close] [--insecure-bind] [VAULT_DIR_OR_PROFILE]
 seavault rclone status|install|check-update|update|rollback|version|path|verify-runtime
-seavault remote add|list|show|delete|test|dry-run|push|pull|check|config
+seavault remote add|edit|list|show|delete|test|dry-run|push|pull|check|sync|config
 seavault ssh-key generate|import|list|public
 ```
 

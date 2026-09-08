@@ -102,3 +102,46 @@ tracked backlog. Verify at re-review that the last-key gate is shared between GU
 path is signposted from Welcome-back with its own vault-path field, that `recovery generate` refuses a non-tty
 before emitting the phrase, that `remote config create --help` no longer writes to disk, and that the Files/Cloud
 panel headings carry the design's job-named copy.
+
+---
+
+## Fix-tranche addendum (post-build)
+
+The build was **HIGH_FRICTION_NOT_SHIPPABLE** on six Type II items (one drove
+`functions=no`). All six are resolved on `feature/u2-gui-restructure`; every behavioural
+fix shipped red-first with no pre-U2 test edited. The 22 Type III items are tracked
+backlog, with the doc/copy subset applied by F-D here.
+
+### Type II (all resolved)
+
+| # | item (cell) | fix commit | disposition |
+|---|-------------|-----------|-------------|
+| 1 | CLI last-key revoke has no gate (CLI-5; `functions=no`) | 9f520e6 (F-B) | FIXED — a shared last-key check refuses the last key without an interactive y/N or `--yes`; cmd-level S1 regression added. |
+| 2 | Redeem golden path unsignposted on a second device (GUI-D2 4/5) | 4949221 (F-C) | FIXED — Welcome-back gains "Forgot your password? Use a recovery key" with its OWN vault-path field; the Security redeem panel gets its own field and the stale "above" copy is gone. |
+| 3 | `recovery generate` leaks the phrase non-interactively (DOCS-1) | 9f520e6 (F-B) + F-D docs | FIXED — refuses a non-interactive stdin BEFORE opening the vault or printing any phrase (real isatty; no env override); the changelog + recovery docs now state this. |
+| 4 | `remote config create --help` writes rclone.conf (DOCS-6) | 9f520e6 (F-B) | FIXED — `--help` anywhere in the nested path renders usage and runs nothing. |
+| 5 | Files golden path still shows old jargon (GUI-OWN 1) | 4949221 (F-C) | FIXED — Files/Cloud panel `<h2>` headings renamed by job (element ids unchanged; I-U1 presence test green). |
+| 6 | `recovery generate` cannot save/print a card (CLI-2) | 9f520e6 (F-B) + F-D docs | FIXED — `recovery generate --save PATH` writes the DRAFT→confirmed card (0600, refused in-vault, warned under a sync folder, offer-to-delete on abandon); documented in README. |
+
+### Type III (22 rows — tracked backlog; doc/copy subset applied)
+
+**Applied by F-D (docs, this commit):**
+
+- **CLI-6** — the bare-group exit-0 change is called out in the changelog with explicit migration guidance for scripts that shelled out to bare group verbs.
+- **DOCS-1 (doc leg)** — the changelog's "bare group exits 0" is qualified to the nine group verbs (`app-config`/`gui` are not group verbs); the `recovery generate` non-interactive refusal is stated with its remedy.
+- **DOCS-2 (doc leg)** — redeem's single-use retirement is documented with the prompt to re-mint; the mistyped-vs-unknown-word wording is corrected (an unknown word is caught by the wordlist lookup, a single mistype by the checksum).
+- **DOCS-6 (doc leg)** — the README CLI overview lists `remote edit` and `remote sync`.
+
+**Deferred (with why):**
+
+- **GUI copy/behaviour** — GUI-OWN 4 (token-by-token read-back diff), GUI-OWN 5 (drop raw-ID column), GUI-OWN 6 (GUI-neutral rollback wording + label), GUI-D2 1 (clear `setupSkipped`), GUI-D2 2 (reword "choose its folder"), GUI-D2 3 (match hint / name-this-key input), GUI-D2 5 (redeem placeholder), GUI-D2 6 (relabel the advanced toggle): all `internal/webui`, owned by the GUI leg — polish the review sanctions as backlog, not doc/copy in F-D's ownership.
+- **CLI copy/behaviour** — CLI-1 (leaf `--help` polish remainder / unknown-subcommand exit code), CLI-4 (`cmdInit` leftover classification): `cmd/seavault`, owned by the CLI leg.
+- **DOCS-1 (code leg)** — `keychain delete` still returns the raw backend error (no plain "no keychain entry" line, no `--debug` gate); a `cmd/seavault` change owned by the CLI leg, not a doc fix. Deferred.
+- **DOCS-2 (GUI copy leg)** — the read-back disclaimer's "usability aid, not a security control" wording lives in `internal/webui/server.go` and is pinned by matrix M1; a reword belongs to the GUI leg. Deferred.
+
+**Post-tranche verdict.** All six Type II items resolved. The last-key gate is shared
+between GUI and CLI; the redeem golden path is signposted from Welcome-back with its own
+vault-path field; `recovery generate` refuses a non-tty before emitting a phrase;
+`remote config create --help` writes nothing; the Files/Cloud headings carry the design's
+job-named copy. The six re-review preconditions are met. The 22 Type III rows remain
+tracked backlog (doc/copy subset applied). Recommend re-review → **SHIPPABLE**.

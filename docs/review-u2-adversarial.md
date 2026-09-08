@@ -41,3 +41,39 @@ None. Every candidate carried into the skeptic pass reproduced. (0 refuted.)
 **Tranche 3 — hardening & hygiene (low, batchable).** Invariant hardening: word-encoding-1, wordlist-labels-2, recovery-gui-2. Lifecycle/robustness: wordlist-labels-3, word-encoding-2. CLI help/flag surface: registry-cli-1/2/3. Docs: sweep-docs-3.
 
 Every fix follows prove-fail → prove-pass; wiring-1 and the sweep-docs-1 create side effect must ship with a regression seen red.
+
+---
+
+## Fix-tranche addendum (post-build)
+
+The 13 confirmed findings were resolved across four fix commits on
+`feature/u2-gui-restructure`; every behavioural fix shipped red-first (regression seen
+fail for the right reason, then pass) and no pre-U2 test was edited (matrix Z1).
+
+| id | sev | fix commit | disposition |
+|----|-----|-----------|-------------|
+| wiring-1 | high | 9f520e6 (F-B) | FIXED — `recovery revoke` gates the LAST recovery key (interactive y/N, or `--yes` non-interactively); `--yes` added to the flag set/usage; CLI S1 regression added. |
+| cli-label-gap | med | 9f520e6 (F-B) | FIXED — `recovery generate` records the device-local label; `recovery list` prints the stable 4-hex handle + label/creation detail + full ID; `recovery revoke` deletes the label. |
+| sweep-docs-1 | med | 9f520e6 (F-B) | FIXED — a `--help` anywhere in `remote config`/`app-config` renders usage and runs NOTHING; `remote config create --help` no longer writes rclone.conf (H5 rows). |
+| sweep-docs-2 | med | 9f520e6 (F-B) | FIXED — every top-level leaf renders the registry double-dash usage + synopsis on `--help` (H1 driven through the real `<cmd> --help` path). |
+| word-encoding-1 | low | 22ef5fe (F-A) | FIXED — `RecoveryPhraseWords` rejects a non-canonical base32 phrase, so the word form and the base32 form can never name different wrap secrets. |
+| word-encoding-2 | low | 22ef5fe (F-A) | FIXED — the discriminator gates even the 24-token count on a wordlist majority; a base32 phrase split into 24 chunks falls through to base32, and a single mistyped word keeps a 23/24 majority so C1 stands. |
+| wordlist-labels-2 | low | 22ef5fe (F-A) | FIXED — profiles.json and recovery-labels.json are forced to 0600 (dir 0700) even over a pre-existing 0644 file, via a shared device-local writer. |
+| wordlist-labels-3 | low | 22ef5fe (F-A) + 9f520e6 (F-B) + 4949221 (F-C) | FIXED — `DeleteRecoveryLabel` + orphan pruning in core; both revoke paths (CLI and GUI) call it after a successful revoke. |
+| recovery-gui-2 | low | 4949221 (F-C) | FIXED — `/api/recovery/generate` sets `Cache-Control: no-store` + `Pragma: no-cache` before the first write. |
+| registry-cli-1 | low | 9f520e6 (F-B) | FIXED — `remote add`/`edit` usage lists `--config` and `--fast-list`. |
+| registry-cli-2 | low | 9f520e6 (F-B) | FIXED — undocumented `gui`/`app-config` sub-action aliases dropped (accepted set == documented set, H4-style leaf parser). |
+| registry-cli-3 | low | 9f520e6 (F-B) | FIXED — `version` rejects stray args (exit 2). |
+| sweep-docs-3 | low | 22ef5fe (F-A) | FIXED — the stale providers.go caveat comment is corrected; the doc mirrors the catalog under the DOC-3 drift guard and the code stays authoritative. |
+
+**Docs/final (F-D, this commit).** The v0.19 README was reconciled to the shipped
+behaviour: `recovery generate`'s non-interactive refusal and the `--save` DRAFT card,
+the group-verb exit-0 scope + script-migration note, single-use redeem, and the
+`remote edit`/`sync` overview rows. The `recovery generate` registry usage line now
+advertises `--save` so `--help` matches the docs (regression
+`TestRecoveryGenerateHelpAdvertisesSaveFlag`, red-first).
+
+**Post-tranche verdict.** All 13 confirmed findings **FIXED**; 0 open. The one
+high-severity finding (wiring-1, CLI last-key gap) is closed and the gate is shared
+with the GUI. Unfiltered `go test -race -count=1 ./...` green; windows/amd64 and
+darwin/arm64 cross-builds clean; `scripts/smoke-test.sh` passes against a fresh build.

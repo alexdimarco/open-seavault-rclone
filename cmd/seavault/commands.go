@@ -305,7 +305,7 @@ func init() {
 		{group: "password", name: "change", synopsis: "Change the vault password without rewriting chunks.", usage: "seavault password change [--no-keychain] [--accept-rollback] VAULT_DIR_OR_PROFILE"},
 
 		// recovery subcommands.
-		{group: "recovery", name: "generate", synopsis: "Mint a recovery phrase (shown once, with a read-back).", usage: "seavault recovery generate [--no-keychain] [--accept-rollback] VAULT_DIR_OR_PROFILE"},
+		{group: "recovery", name: "generate", synopsis: "Mint a recovery phrase (shown once, with a read-back).", usage: "seavault recovery generate [--no-keychain] [--accept-rollback] [--save PATH] VAULT_DIR_OR_PROFILE"},
 		{group: "recovery", name: "redeem", synopsis: "Redeem a recovery phrase to set a new password.", usage: "seavault recovery redeem [--accept-rollback] VAULT_DIR_OR_PROFILE"},
 		{group: "recovery", name: "revoke", synopsis: "Retire one recovery entry by its ID.", usage: "seavault recovery revoke [--no-keychain] [--accept-rollback] [--yes] VAULT_DIR_OR_PROFILE ENTRY_ID"},
 		{group: "recovery", name: "list", synopsis: "List recovery entry IDs available to revoke.", usage: "seavault recovery list [--no-keychain] [--accept-rollback] VAULT_DIR_OR_PROFILE"},
