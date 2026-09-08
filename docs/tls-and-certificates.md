@@ -79,6 +79,23 @@ Every route below except Tailscale uses DNS-01.
 
 ---
 
+## Which route fits your situation?
+
+Pick the row that matches you, then jump to that route. The one situation with no
+public route is a home LAN with no domain and no VPN: a public CA cannot issue for a
+name only your LAN resolves, so either stand up a small local CA (Route D) and install
+its root on every client, or adopt a VPN that brings its own trusted name (Route A).
+
+| Your situation | Route |
+|---|---|
+| Your devices are already on a **Tailscale** tailnet | **Route A — Tailscale.** No domain, DNS token, or open port needed; the tailnet name is issued for you. |
+| You control a **public domain** and its DNS, and want **no root** on this machine | **Route B — Let's Encrypt with `lego`** (DNS-01). |
+| You control a public domain, **root is available**, and you prefer distro packaging | **Route C — certbot** (DNS-01). |
+| Your organization runs an **internal / corporate CA** (or you already hold a cert) | **Route D — your own CA.** Point the app at the files; install the CA root on every client. |
+| **Home LAN, no public domain, no VPN** | **Route D with a local CA:** mint a leaf from a small internal CA (`mkcert`, `step-ca`, or `openssl`) and install *that* CA's root on every device — or adopt **Route A (Tailscale)** to get a trusted name without running a CA. A public CA (Routes B/C) cannot issue for a LAN-only name. Whichever you choose, you must also make the name resolve on the LAN — see [Making the certificate name resolve on the LAN](#making-the-certificate-name-resolve-on-the-lan). |
+
+---
+
 ## Route A — Tailscale
 
 If your devices are already on a [Tailscale](https://tailscale.com) tailnet, this is
@@ -106,7 +123,10 @@ machine's MagicDNS name (`your-host.your-tailnet.ts.net`).
 
 **Renewal.** Tailscale certificates are short-lived (~90 days). Re-run `tailscale
 cert <name>` before expiry; the app reloads the renewed pair within 30 seconds with
-no restart. See [Renewal and hot-reload](#renewal-and-hot-reload) for a timer.
+no restart. Schedule it **about monthly, not daily** — `tailscale cert` re-issues a
+fresh certificate on every run (it is not an idempotent renew), so a daily job wastes
+issuances and can hit rate limits. See [Renewal and hot-reload](#renewal-and-hot-reload)
+for the per-tool cadence and timer snippets.
 
 ---
 
@@ -266,14 +286,34 @@ service) is the strictest client and the main reason to get a real certificate:
   Raise the registry value
   `HKLM\SYSTEM\CurrentControlSet\Services\WebClient\Parameters\FileSizeLimitInBytes`
   (max `4294967295`, ~4 GB) and restart the WebClient service for larger files.
-- **Map the drive** once the certificate is trusted and `seavault serve --tls` is
-  running:
+- **Start the WebClient service first.** The Map-network-drive path goes through the
+  WebClient (WebDAV Redirector) service, which is **Manual / trigger-started** by
+  default. Start it, and set it to start automatically so the drive reconnects at
+  logon:
 
   ```bat
-  net use Z: https://vault.example.com:8765\ /user:seavault
+  net start WebClient
+  sc config WebClient start= auto
   ```
 
-  Start the WebClient service first (`net start WebClient`) if it is not running.
+  (The space after `start=` is required by `sc`.) If `net start WebClient` reports the
+  service is disabled, enable it in `services.msc` first.
+- **Map the drive** once the certificate is trusted (chains to a root the machine
+  trusts), the name resolves to the server (see
+  [Making the certificate name resolve on the LAN](#making-the-certificate-name-resolve-on-the-lan)),
+  and `seavault serve --tls` is running. Use the UNC form Microsoft documents for a
+  WebDAV drive:
+
+  ```bat
+  net use Z: \\vault.example.com@SSL@8765\ /user:seavault *
+  ```
+
+  `@SSL` selects HTTPS; `@8765` is the port (omit `@port` for 443); the trailing `\`
+  names the WebDAV root; the trailing `*` prompts for the password. The plain URL form
+  (`net use Z: https://vault.example.com:8765/ /user:seavault *`) also works on current
+  Windows builds, but the `\\host@SSL@port\` UNC form is the one Microsoft documents and
+  is the most portable across builds. Connect by the **name**, never a bare IP — the
+  certificate is valid for the name, and Windows WebDAV refuses a name mismatch.
 
 ---
 
@@ -293,6 +333,90 @@ service) is the strictest client and the main reason to get a real certificate:
 
 In every case, connect to a **name the certificate is valid for** (a DNS SAN), not to
 a bare IP address, or verification fails with a name mismatch.
+
+---
+
+## Making the certificate name resolve on the LAN
+
+Your certificate is valid for a **name** (a DNS SAN such as `vault.example.com`), not
+for a bare IP address. Every client must connect to that name, and the name must
+resolve to the server's LAN IP **on each device**. **Connecting by bare IP cannot
+work with a name-only certificate** — the client verifies the name against the SAN and
+fails with `NET::ERR_CERT_COMMON_NAME_INVALID` (and Windows WebDAV refuses the mount
+outright). A Tailscale certificate (Route A) needs none of this — MagicDNS resolves the
+tailnet name on every device automatically. On a plain LAN with no internal DNS, make
+the name resolve one of two ways:
+
+**Option 1 — a router / local-DNS A record (best for more than a couple of devices).**
+Add an `A` record mapping the certificate name to the server's LAN IP in your router's
+DNS or your local DNS server (for example, a Pi-hole or `dnsmasq` entry
+`address=/vault.example.com/192.168.1.10`). Every device on the LAN then resolves the
+name with no per-device setup.
+
+**Option 2 — a `hosts` file entry on each client (no DNS server needed).** Add one line
+mapping the name to the server's LAN IP on every device that connects. Use the server's
+actual LAN IP — the same address you pass to `seavault ... --addr` (find it with
+`ip addr` on Linux, `ifconfig` on macOS, or `ipconfig` on Windows):
+
+- **Windows** — edit `C:\Windows\System32\drivers\etc\hosts` in an **Administrator**
+  editor, add the line, then flush the cache:
+
+  ```text
+  192.168.1.10   vault.example.com
+  ```
+
+  ```bat
+  ipconfig /flushdns
+  ```
+- **macOS** — edit `/etc/hosts` with `sudo`, add the same line, then flush:
+
+  ```bash
+  sudo sh -c 'echo "192.168.1.10   vault.example.com" >> /etc/hosts'
+  sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+  ```
+- **Linux** — edit `/etc/hosts` with `sudo` and add the same line (no flush needed on
+  most distributions):
+
+  ```bash
+  sudo sh -c 'echo "192.168.1.10   vault.example.com" >> /etc/hosts'
+  ```
+
+Whichever option you use, keep typing the **name** in every URL and mount command; the
+`hosts`/DNS entry only makes that name reach the server — it does not make a bare-IP
+URL verify.
+
+---
+
+## Reaching a headless host from a phone
+
+The GUI authenticates only through the rotating **launch link** —
+`https://<name>:<port>/?launch=<secret>` — that `seavault gui` prints to the **host
+terminal** on every start. There is no separate username/password login page for the
+GUI, and the launch secret **rotates on every start**, so a phone needs that exact URL
+from the start you will actually connect to. WebDAV (`seavault serve`) uses Basic auth
+instead and needs no launch link — this note is about the GUI.
+
+Get the current launch link onto the phone one of these ways:
+
+- **As text.** Copy the whole `https://<name>:<port>/?launch=<secret>` line and send it
+  to yourself (a message or email, or a clipboard-sharing tool), then open it in the
+  phone's browser.
+- **As a QR code.** Turn the URL into a QR code and scan it with the phone camera. On
+  the host, `qrencode` prints a scannable code right in the terminal:
+
+  ```bash
+  qrencode -t ANSI "https://vault.example.com:8787/?launch=<secret>"
+  ```
+
+  (install `qrencode` from your package manager), or paste the URL into any offline QR
+  generator. Because the secret rotates each launch, generate the code **after** the
+  `seavault gui` start you will use; a stale link will not open.
+
+For either path the name in the URL must resolve on the phone (see
+[Making the certificate name resolve on the LAN](#making-the-certificate-name-resolve-on-the-lan);
+on Tailscale, MagicDNS handles it) and the phone must trust the certificate — a
+CA-issued one just works, while an internal-CA root (Route D) must be installed in the
+phone's trust store first.
 
 ---
 
@@ -330,11 +454,45 @@ network-facing before you do it:
   credential become reachable from every device that can route to the bind address.
   Anyone who can reach the port can attempt the login. Rate limiting and account
   lockout are a later phase — see [SECURITY.md](../SECURITY.md).
+- **A direct non-loopback bind exposes the login to the whole network segment.**
+  Binding to a LAN address or `0.0.0.0` puts the GUI launch-link login and the WebDAV
+  Basic-auth credential in front of **every host that can route to that address**, with
+  no rate limiting and no account lockout (a later phase). Treat a bind to an open LAN,
+  and especially to `0.0.0.0` (every interface, including docker/libvirt bridges), as
+  publishing the login to everything on that network. **Prefer a VPN (Tailscale or
+  WireGuard):** it keeps the listener off the untrusted LAN entirely and brings a
+  trusted name with it. If you must bind an open LAN address, bind the single most
+  specific interface and firewall the port to the exact subnet even then.
 - **Bind to as little as possible.** Prefer a single interface address
   (`--addr 192.168.1.10:8787`) over `0.0.0.0` (every interface). Binding to every
   interface is logged as `listening on every interface`.
-- **Firewall the port.** Restrict the GUI/WebDAV port to the devices and subnets that
-  need it.
+- **Firewall the port to the LAN subnet.** Restrict the GUI/WebDAV port
+  (`8787`/`8765` here — use your own) to the exact devices or subnet that need it, and
+  deny it elsewhere. Concrete examples, scoped to `192.168.1.0/24`:
+
+  ```bash
+  # Linux — ufw
+  sudo ufw allow from 192.168.1.0/24 to any port 8765 proto tcp
+  sudo ufw allow from 192.168.1.0/24 to any port 8787 proto tcp
+
+  # Linux — firewalld
+  sudo firewall-cmd --permanent --zone=internal --add-source=192.168.1.0/24
+  sudo firewall-cmd --permanent --zone=internal --add-port=8765/tcp
+  sudo firewall-cmd --permanent --zone=internal --add-port=8787/tcp
+  sudo firewall-cmd --reload
+  ```
+
+  ```bat
+  REM Windows — netsh advfirewall, scoped to the LAN subnet
+  netsh advfirewall firewall add rule name="SeaVault WebDAV" dir=in action=allow protocol=TCP localport=8765 remoteip=192.168.1.0/24
+  netsh advfirewall firewall add rule name="SeaVault GUI"    dir=in action=allow protocol=TCP localport=8787 remoteip=192.168.1.0/24
+  ```
+
+  On **macOS** there is no simple per-port UI; use the packet filter `pf`. Add a rule
+  to `/etc/pf.conf` such as `block in proto tcp to any port 8765` followed by
+  `pass in proto tcp from 192.168.1.0/24 to any port 8765`, then load it with
+  `sudo pfctl -f /etc/pf.conf -e`. The simpler answer on macOS is to prefer a VPN so
+  the port is never on the open LAN in the first place.
 - **Prefer a VPN over an open LAN.** Tailscale or WireGuard gives you a private
   network and a trusted name, so the listener is never exposed to an untrusted LAN or
   the internet.
@@ -350,13 +508,25 @@ The app watches the configured certificate and key files and reloads a renewed p
 **within 30 seconds, with no restart**. It never swaps in an invalid pair, and it
 never downgrades a valid live certificate to an expired or not-yet-valid renewal.
 
-Automate the renew command for your route with a scheduler:
+**Cadence — daily for lego/certbot, monthly for Tailscale.** A `lego renew` /
+`certbot renew` is **idempotent**: a scheduled run only acts when the certificate is
+near expiry and is otherwise a quick no-op, so running it **daily** is both safe and
+recommended (it never re-issues early and catches the renewal window without you
+watching). `tailscale cert <name>`, by contrast, **re-issues a fresh certificate on
+every run** — it is *not* an idempotent renew — so a daily job would re-issue every day
+and can hit issuance rate limits; schedule Tailscale **about monthly** (a ~90-day
+certificate has ample margin) or gate the re-run on days-left. The `seavault tls setup`
+wizard prints the concrete renew command for your route; drop it into a scheduler at
+the cadence for that route:
 
 - **systemd timer** — put the renew command in a `.service` unit and pair it with a
-  daily `.timer` (`OnCalendar=daily`, `Persistent=true`).
-- **cron** — `17 3 * * * <renew command>` renews daily at 03:17.
+  `.timer`: `OnCalendar=daily` for lego/certbot, `OnCalendar=monthly` for Tailscale
+  (`Persistent=true` in both).
+- **cron** — `17 3 * * * <renew command>` runs lego/certbot daily at 03:17; use
+  `0 3 1 * * <renew command>` (03:00 on the 1st) for a monthly Tailscale re-issue.
 - **Windows Task Scheduler** —
-  `schtasks /Create /SC DAILY /TN SeaVaultCertRenew /TR "<renew command>" /ST 03:17`.
+  `schtasks /Create /SC DAILY /TN SeaVaultCertRenew /TR "<renew command>" /ST 03:17`
+  for lego/certbot; use `/SC MONTHLY` for Tailscale.
 
 **Staleness warning.** A renewal timer that silently stops changes no file, so the
 app cannot see it stop by watching mtimes. To make that visible, the running server
@@ -375,8 +545,14 @@ last 2 days` when the file is stale (a listener that stopped, or a renewal that 
 took effect). For an unattended `seavault serve --tls` daemon with no operator
 watching the logs, monitor the certificate's `NotAfter` externally as well.
 
-`seavault tls check` validates the configured pair and exits non-zero on any error —
-use it in a health check.
+`seavault tls check` validates the configured pair and **exits non-zero on any error —
+including an expired or not-yet-valid certificate.** An out-of-window leaf is a
+health-check failure even though the pair is otherwise well-formed: `tls check` prints
+the expiry (or the not-before time) and the certificate path and returns a non-zero
+status, so it is safe to wire into a health check that must catch a lapsed renewal — the
+single most important failure, since an expired certificate makes the Windows mount
+refuse. With **nothing configured** it reports so and exits 0 (there is nothing to
+validate). It never prints key material.
 
 ---
 

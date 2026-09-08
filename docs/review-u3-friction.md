@@ -73,3 +73,49 @@ The security **controls themselves all held** (Type I, keep as-is): exact-match 
 ## Bottom line
 
 The TLS crypto path and its security controls work and are well-surfaced. What is **not shippable** is the post-issuance lifecycle the feature advertises: hot-reload, `serving.json`/`tls status` monitoring, and `tls check` health-checking are all promised in the wizard and docs but are either **unwired** (reloader never started — one root cause behind three of the driving Type II items) or **wrong** (`tls check` passes expired certs). Fixing the reloader wiring (start it from cmdServe/cmdGUI, plus an integration test) and the `tls check` expiry gate clears the two golden paths; the EOF livelock and the every-interface default should ride along. The 16 Type III items are documentation/UX backlog once the Type II blockers land.
+
+---
+
+## Fix-tranche addendum (feature/u3-tls)
+
+The two golden paths are cleared: the reloader is wired into `cmdServe`/`cmdGUI`,
+`serving.json` is written at runtime, and `tls check` fails an out-of-window leaf.
+The verdict blockers (Type II) are resolved in code; the Type III backlog is landed
+in the wizard (F-C) and the guide (F-D). Each behavioural fix shipped prove-fail ->
+prove-pass with real listeners/certs; the mock seam is limited to the tool boundary
+and closed stdin.
+
+### Type II
+
+| Cell(s) | finding | fix commit(s) | tranche |
+|---|---|---|---|
+| A2-c6 / A1-c1 / A1-c6 / A3-c6 | Reloader never started; 30s/no-restart hot-reload never delivered | `a67fed0` (start `resolved.Reloader(...).Run(ctx)` in both commands + end-to-end integration test); `b6e9e30` (teardown joined) | F-A |
+| A1-c6 / A2-c6 / A3-c6 | `serving.json` never written -> `tls status` "none seen" while serving; heartbeat inert | `a67fed0` (reloader writes serving.json on load + daily heartbeat; the < 14-day warning fires in-process) | F-A |
+| A3-c6 | `tls check` exits 0 on an expired / not-yet-valid cert | `a67fed0` (out-of-window leaf is a non-zero exit; names path + time, never key material) | F-A |
+| A2-c1 | wizard livelocks on EOF / closed stdin | `43716d0` (Select/Text/Confirm propagate `io.EOF`; the route loop is bounded and aborts with a clear message) | F-C |
+| A1-c4 | listen-step default `:8787` is every-interface | `43716d0` (defaults to the single most-specific interface addr — the Tailscale addr when detected) | F-C |
+| A1-c4 | 16 non-loopback addresses dumped as a bare list | `43716d0` (filters docker/bridge/virtual/link-local; annotates interface names; flags Tailscale) | F-C |
+| A1-c6 | scheduler snippets print bare `<renew command>`/`<name>` | `43716d0` (concrete renew command + name substituted into every snippet) | F-C |
+| A2-c6 | unattended daemon gets no runtime expiry signal | `a67fed0` (in-process heartbeat + < 14-day warning). **Residual:** an opt-in `serve --tls` strict mode is not added; monitor `NotAfter` externally, documented in the guide. | F-A |
+| A3-c1 | Windows LAN: name must be used but no how-to for making the SAN resolve without internal DNS | **F-D docs (this commit)** — new "Making the certificate name resolve on the LAN" section (router/local-DNS A record; per-OS `hosts`-file lines; bare IP cannot work with a name-only cert) | F-D |
+
+### Type III
+
+| Cell | finding | fix commit / disposition | tranche |
+|---|---|---|---|
+| A1-c2 | raw `exit status 1` prefix above tool stderr | `43716d0` | F-C |
+| A1-c2 | remedy "re-run tls setup" though wizard sits at the menu | `43716d0` | F-C |
+| A1-c3 | allowlist-prompt jargon; 403 consequence unstated | `43716d0` | F-C |
+| A1-c4 | printed serve port derived only from `:8787` | `43716d0` | F-C |
+| A1-c5 | launch link host-terminal-only; no phone guidance | **F-D docs (this commit)** — "Reaching a headless host from a phone" (URL as text / QR via `qrencode`; secret rotates; name must resolve + cert trust). The wizard step-5 output line is F-C's surface. | F-D |
+| A1-c6 | `tailscale cert` re-issues unconditionally; a daily cron over-issues | **F-D docs (this commit)** — renewal-cadence guidance: `lego`/`certbot` `renew` is idempotent (daily is safe/recommended), `tailscale cert` is not (schedule ~monthly or gate on days-left). **Residual:** the wizard still prints a daily-cron *template* for every route (its output is pinned by `TestShowRenewalSubstitutesConcreteValues`, `cron: 17 3 * * *`); per-route cadence in the wizard would require changing that F-C test and is left as a wizard-side follow-up. | F-D |
+| A2-c2 | wait loop re-prints the whole guidance block | `43716d0` | F-C |
+| A2-c2 | file check -> spurious "still waiting" | `43716d0` | F-C |
+| A2-c3 | BYO route printed the self-signed renewal recipe | `43716d0` | F-C |
+| A3-c1 | no decision aid mapping situation -> route | **F-D docs (this commit)** — "Which route fits your situation?" table (home LAN/no domain -> Route D + client-root, Tailscale, public domain w/o root, corporate CA) | F-D |
+| A3-c2 | `net use` uses the atypical trailing-backslash `https://` form | **F-D docs (this commit)** — `\\host@SSL@port\` UNC form + WebClient prerequisites (`net start WebClient`, `sc config WebClient start= auto`) | F-D |
+| A3-c3 | self-signed names render duplicate `127.0.0.1` | `43716d0` | F-C |
+| A3-c3 | keep-self-signed on "other devices" cannot mount a Windows drive | `43716d0` (redirect line added) | F-C |
+| A3-c4 | bind-refusal steers to `--insecure-bind` even with a cert configured | `43716d0` (leads with the TLS route; `--insecure-bind` last resort) | F-C |
+| A3-c5 | "firewall the port" is generic, no concrete command | **F-D docs (this commit)** — per-OS firewall commands (ufw, firewalld, macOS `pf`, Windows `netsh advfirewall`) + stronger direct-non-loopback wording | F-D |
+| A3-c5 | DECRYPTED-content / prefer-VPN framing only in the wizard, not at serve/gui CLI startup | **Residual (not F-D ownership):** emitting the note at `serve`/`gui` startup for any non-loopback bind is a `cmd/seavault/main.go` change owned by the CLI-surface fixer. The bind-*refusal* message already names DECRYPTED content + the TLS route; the *allowed* non-loopback-with-TLS startup emission is a follow-up. The guide now carries the stronger wording. | — |

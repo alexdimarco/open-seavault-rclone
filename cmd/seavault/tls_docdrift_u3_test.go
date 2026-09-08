@@ -172,3 +172,52 @@ func mustReadRepoFile(t *testing.T, path string) string {
 	}
 	return string(b)
 }
+
+// TestTLSDocsDriftD1FixTranche extends the §7 D1 drift guard to the doc sections
+// added by the U3 F-D fix tranche (friction A3-c1 / A3-c2 / A3-c5 / A1-c5 / A1-c6).
+// Each new section carries a load-bearing anchor string; the build fails if any of
+// them is removed or renamed, so the guide can never silently drop the how-to that
+// closes a filed friction finding. Every row asserts (an empty table is a failure).
+func TestTLSDocsDriftD1FixTranche(t *testing.T) {
+	doc := mustReadRepoFile(t, filepath.Join("..", "..", "docs", "tls-and-certificates.md"))
+
+	rows := []struct {
+		finding string
+		want    string
+	}{
+		// A3-c1 — decision aid mapping the reader's situation to a route.
+		{"A3-c1 decision aid", "## Which route fits your situation?"},
+		// A3-c1 (TLS-9) — make the SAN resolve on the LAN without internal DNS.
+		{"A3-c1 name-resolve section", "## Making the certificate name resolve on the LAN"},
+		{"A3-c1 bare-IP statement", "Connecting by bare IP cannot"},
+		{"A3-c1 name-only certificate", "name-only certificate"},
+		{"A3-c1 Windows hosts path", `C:\Windows\System32\drivers\etc\hosts`},
+		{"A3-c1 macOS dns flush", "dscacheutil -flushcache"},
+		{"A3-c1 router/local-DNS A record", "local-DNS A record"},
+		// A3-c2 — the net use UNC form and the WebClient prerequisites.
+		{"A3-c2 net use UNC @SSL@ form", "@SSL@"},
+		{"A3-c2 WebClient auto-start", "sc config WebClient start= auto"},
+		{"A3-c2 WebClient start", "net start WebClient"},
+		// A3-c5 — concrete per-OS firewall commands.
+		{"A3-c5 ufw", "ufw allow from"},
+		{"A3-c5 firewalld", "firewall-cmd"},
+		{"A3-c5 macOS pf", "pfctl"},
+		{"A3-c5 Windows netsh", "netsh advfirewall firewall add rule"},
+		// A1-c5 — reaching a headless host from a phone (text + QR).
+		{"A1-c5 phone section", "## Reaching a headless host from a phone"},
+		{"A1-c5 QR tool", "qrencode"},
+		// A1-c6 — renewal cadence (daily lego/certbot vs monthly Tailscale) and the
+		// tls check non-zero exit on an expired leaf (after F-A).
+		{"A1-c6 tailscale not-idempotent", "not an idempotent renew"},
+		{"A1-c6 monthly cadence", "OnCalendar=monthly"},
+		{"A1-c6 tls check expiry exit", "including an expired or not-yet-valid certificate"},
+	}
+	if len(rows) == 0 {
+		t.Fatal("D1 fix-tranche drift table is empty")
+	}
+	for _, r := range rows {
+		if !strings.Contains(doc, r.want) {
+			t.Errorf("D1 (fix tranche): docs/tls-and-certificates.md is missing the %s anchor %q", r.finding, r.want)
+		}
+	}
+}

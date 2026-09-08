@@ -41,3 +41,26 @@ None. Every claim carried into synthesis was reproduced end-to-end or (for `relo
 **Tranche 3 — paste-me / external-input hardening.** (6) `wizard-tools-1` (copy-paste RCE). (7) `wizard-tools-2` (tailscale name validation).
 
 **Tranche 4 — advisory completeness (low).** (8) `guard-warning-allzero-1`. (9) `launch-hint-loopback-1`.
+
+---
+
+## Fix-tranche addendum (feature/u3-tls)
+
+All nine confirmed findings are closed by the U3 fix tranche. Each row maps the finding
+to the commit(s) that fixed it; every behavioural fix shipped prove-fail -> prove-pass
+with real listeners and real in-test certificates.
+
+| id | sev | fix commit(s) | tranche |
+|----|-----|---------------|---------|
+| reload-not-wired-1 | high | `a67fed0` (Reloader constructed/run in cmdGUI/cmdServe + end-to-end serving.json/renewed-pair integration test); `b6e9e30` (reloader teardown joined before the command returns; reload_test de-flaked) | F-A |
+| reload-races-2 | medium | `a67fed0` (reload() emits validated warnings after a successful swap, de-duped against the expiry line) | F-A |
+| reload-races-3 | low | `a67fed0` (single-read C6 gate: the downgrade gate and the served leaf come from the same bytes; fault-injection seam, red-first) | F-A |
+| guard-warning-allzero-1 | low | `a67fed0` (every-interface advisory fires for `0.0.0.0`/`::`/`[::]` via `net.ParseIP(host).IsUnspecified()`) | F-A |
+| launch-allowlist-1 | high | `521fb14` (cmdGUI merges `tls.allowHosts` into the launch-name list; `firstConfirmedName` skips wildcards in both lists and falls back to the bind addr; wildcard startup guidance points at the concrete names) | F-B |
+| config-precedence-1 | high | `521fb14` (settings GET/POST reconciles against a fresh `appconfig.Load()` and refreshes `s.config` from disk; a Save no longer wipes a CLI-added `tls.*` nor resurrects a CLI-removed cert) | F-B |
+| launch-hint-loopback-1 | low | `521fb14` (`LoginHintURL` set to the address actually served for both http and https; no hardcoded `127.0.0.1:8787`) | F-B |
+| wizard-tools-1 | medium | `43716d0` (DNS-01 domain validated/normalized; every interpolated value shell-quoted in the printed lego AND certbot commands) | F-C |
+| wizard-tools-2 | low | `43716d0` (tailscale MagicDNS name validated against a DNS-label grammar; `filepath.Join` kept in-tree; name passed after a `--` terminator) | F-C |
+
+The refuted set stays empty. The design STATUS line (`docs/design-u3-tls-certificates.md`)
+records the same tranche commits.
