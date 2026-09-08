@@ -48,81 +48,10 @@ import (
 const version = "0.18.0"
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-
-	var err error
-	switch os.Args[1] {
-	case "setup":
-		err = cmdSetup(os.Args[2:])
-	case "init":
-		err = cmdInit(os.Args[2:])
-	case "put":
-		err = cmdPut(os.Args[2:])
-	case "get":
-		err = cmdGet(os.Args[2:])
-	case "export":
-		err = cmdExport(os.Args[2:])
-	case "list":
-		err = cmdList(os.Args[2:])
-	case "remove", "rm":
-		err = cmdRemove(os.Args[2:])
-	case "verify":
-		err = cmdVerify(os.Args[2:])
-	case "gc":
-		err = cmdGC(os.Args[2:])
-	case "compact":
-		err = cmdCompact(os.Args[2:])
-	case "stats":
-		err = cmdStats(os.Args[2:])
-	case "serve":
-		err = cmdServe(os.Args[2:])
-	case "gui":
-		err = cmdGUI(os.Args[2:])
-	case "app-config", "config":
-		err = cmdAppConfig(os.Args[2:])
-	case "profile":
-		err = cmdProfile(os.Args[2:])
-	case "move":
-		err = cmdMove(os.Args[2:])
-	case "vault":
-		err = cmdVault(os.Args[2:])
-	case "password":
-		err = cmdPassword(os.Args[2:])
-	case "recovery":
-		err = cmdRecovery(os.Args[2:])
-	case "keychain":
-		err = cmdKeychain(os.Args[2:])
-	case "rclone":
-		err = cmdRclone(os.Args[2:])
-	case "rsync":
-		err = cmdRsync(os.Args[2:])
-	case "remote":
-		err = cmdRemote(os.Args[2:])
-	case "ssh-key":
-		err = cmdSSHKey(os.Args[2:])
-	case "version":
-		fmt.Println(version)
-		return
-	default:
-		usage()
-		os.Exit(2)
-	}
-
-	if err != nil {
-		// A command that wants a specific, non-1 process exit code (e.g. the gc
-		// dry-run "action required" code 3) returns an
-		// *exitCodeError. It carries its own exit code and has already written any
-		// human message itself, so main neither prints "error:" nor forces exit 1.
-		var ec *exitCodeError
-		if errors.As(err, &ec) {
-			os.Exit(ec.code)
-		}
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
-	}
+	// main() dispatches FROM the command registry (commands.go). All command
+	// wiring, the exit-code contract, and usage rendering live there, so a single
+	// table is the one source of truth and run() stays testable without os.Exit.
+	os.Exit(run(os.Args[1:]))
 }
 
 // exitCodeError lets a command request a specific process exit code without the
@@ -1689,7 +1618,9 @@ func cmdMove(args []string) error {
 	return nil
 }
 
-func cmdProfile(args []string) error {
+func cmdProfile(args []string) error { return dispatchGroup("profile", execProfile, args) }
+
+func execProfile(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault profile add [--save-password] NAME VAULT_DIR | save [--save-password] NAME VAULT_DIR | move [--replace] [--update-remotes=true] NAME NEW_VAULT_DIR | list [--status] | remove NAME")
 	}
@@ -1811,7 +1742,9 @@ func keychainStatusLine(serviceReachable bool, getErr error) (line string, isErr
 // cmdPassword implements `seavault password change`: rotate
 // the vault password by rewrapping the same master||index bundle (no chunk or
 // manifest rewrite) and refreshing the OS keychain entry when one exists.
-func cmdPassword(args []string) error {
+func cmdPassword(args []string) error { return dispatchGroup("password", execPassword, args) }
+
+func execPassword(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault password change [--no-keychain] [--accept-rollback] VAULT_DIR_OR_PROFILE")
 	}
@@ -1858,7 +1791,9 @@ func cmdPasswordChange(args []string) error {
 // ): the recovery-key lifecycle. generate mints a phrase with a
 // mandatory read-back; redeem consumes a phrase to set a new password; revoke
 // retires one entry; list shows the entry IDs to revoke.
-func cmdRecovery(args []string) error {
+func cmdRecovery(args []string) error { return dispatchGroup("recovery", execRecovery, args) }
+
+func execRecovery(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault recovery generate|redeem|revoke|list VAULT_DIR_OR_PROFILE")
 	}
@@ -2018,7 +1953,9 @@ func cmdRecoveryList(args []string) error {
 // reversal. seal-format retires open-seavault-rclone 0.16 and older by bumping the on-disk
 // Version to 3 and raising MinReader to 3 in one MAC'd rewrite; unseal-format
 // reverses it while no A3 directory-ID re-key has run.
-func cmdVault(args []string) error {
+func cmdVault(args []string) error { return dispatchGroup("vault", execVault, args) }
+
+func execVault(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault vault seal-format|unseal-format [flags] VAULT_DIR_OR_PROFILE")
 	}
@@ -2135,7 +2072,9 @@ func confirmPrompt(prompt string) (bool, error) {
 	}
 }
 
-func cmdKeychain(args []string) error {
+func cmdKeychain(args []string) error { return dispatchGroup("keychain", execKeychain, args) }
+
+func execKeychain(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault keychain store VAULT_DIR_OR_PROFILE | status VAULT_DIR_OR_PROFILE | delete VAULT_DIR_OR_PROFILE")
 	}
@@ -2208,7 +2147,9 @@ func cmdKeychain(args []string) error {
 	}
 }
 
-func cmdRsync(args []string) error {
+func cmdRsync(args []string) error { return dispatchGroup("rsync", execRsync, args) }
+
+func execRsync(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault rsync status|install|check-update|update|rollback|verify-runtime|path")
 	}
@@ -2295,7 +2236,9 @@ func cmdRsync(args []string) error {
 	}
 }
 
-func cmdRclone(args []string) error {
+func cmdRclone(args []string) error { return dispatchGroup("rclone", execRclone, args) }
+
+func execRclone(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault rclone status|install|check-update|update|rollback|version|path|verify-runtime")
 	}
@@ -2391,7 +2334,9 @@ func cmdRclone(args []string) error {
 	}
 }
 
-func cmdRemote(args []string) error {
+func cmdRemote(args []string) error { return dispatchGroup("remote", execRemote, args) }
+
+func execRemote(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault remote add|list|show|edit|delete|test|dry-run|push|pull|sync|check|config")
 	}
@@ -2610,7 +2555,9 @@ func cmdRemoteConfig(args []string) error {
 	}
 }
 
-func cmdSSHKey(args []string) error {
+func cmdSSHKey(args []string) error { return dispatchGroup("ssh-key", execSSHKey, args) }
+
+func execSSHKey(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: seavault ssh-key generate NAME | list | public PRIVATE_KEY_OR_NAME | import NAME PRIVATE_KEY")
 	}
@@ -2800,57 +2747,4 @@ func openBrowser(url string) error {
 	default:
 		return exec.Command("xdg-open", url).Start()
 	}
-}
-
-func usage() {
-	fmt.Fprint(os.Stderr, usageText())
-}
-
-func usageText() string {
-	return fmt.Sprintf(`seavault %s
-
-Cloud-folder client-side encrypted storage.
-
-Usage:
-  seavault setup [--expert] [--no-keychain] [--profile NAME] [--no-open]
-  seavault setup --preset synced-folder|rclone|local --vault PATH [--remote NAME] [--allow-download] [flags]
-  seavault init [flags] VAULT_DIR
-  seavault put [--method auto|native|managed-rsync|system-rsync|rsync] [flags] VAULT_DIR_OR_PROFILE SOURCE_PATH [VIRTUAL_PATH]
-  seavault get [flags] VAULT_DIR_OR_PROFILE VIRTUAL_PATH DEST_PATH
-  seavault export [--overwrite fail|skip|replace] [--zip] [--dry-run] VAULT_DIR_OR_PROFILE VIRTUAL_PATH DEST_LOCAL_FOLDER_OR_ZIP
-  seavault list [flags] VAULT_DIR_OR_PROFILE
-  seavault remove [flags] VAULT_DIR_OR_PROFILE VIRTUAL_PATH
-  seavault verify [flags] VAULT_DIR_OR_PROFILE
-  seavault gc [--confirm] [--fence 72h] [--json] [flags] VAULT_DIR_OR_PROFILE
-  seavault compact [flags] VAULT_DIR_OR_PROFILE
-  seavault stats [flags] VAULT_DIR_OR_PROFILE
-  seavault serve [--addr 127.0.0.1:8765] [--user seavault] [--password-file PATH] [--quiet-credentials] [--allow-host NAME] [--drop-os-junk] [flags] VAULT_DIR_OR_PROFILE
-  seavault gui [--addr 127.0.0.1:8787] [--no-open] [--allow-host NAME] [flags] [VAULT_DIR_OR_PROFILE]
-  seavault gui reset-config | reset-login | config-path
-  seavault app-config path | reset | reset-gui-login
-  seavault profile add [--save-password] NAME VAULT_DIR
-  seavault profile save [--save-password] NAME VAULT_DIR
-  seavault profile move [--replace] [--update-remotes=true] NAME NEW_VAULT_DIR
-  seavault move [--profile NAME] [--replace] SOURCE_VAULT_DIR_OR_PROFILE DEST_VAULT_DIR
-  seavault profile list [--status]
-  seavault profile remove NAME
-  seavault password change [--no-keychain] [--accept-rollback] VAULT_DIR_OR_PROFILE
-  seavault recovery generate | redeem | list VAULT_DIR_OR_PROFILE
-  seavault recovery revoke VAULT_DIR_OR_PROFILE ENTRY_ID
-  seavault vault seal-format [--yes] VAULT_DIR_OR_PROFILE
-  seavault vault unseal-format VAULT_DIR_OR_PROFILE
-  seavault keychain store VAULT_DIR_OR_PROFILE
-  seavault keychain status VAULT_DIR_OR_PROFILE
-  seavault keychain delete VAULT_DIR_OR_PROFILE
-  seavault rclone status | install | check-update | update | rollback | verify-runtime
-  seavault rsync status | install | check-update | update | rollback | verify-runtime | path
-  seavault remote add NAME VAULT_DIR_OR_PROFILE RCLONE_REMOTE_PATH
-  seavault remote list | show NAME | test NAME | dry-run NAME | push NAME | pull NAME | check NAME
-  seavault ssh-key generate NAME | list | public NAME | import NAME PRIVATE_KEY
-
-VAULT_DIR is the encrypted folder. Put it inside any local cloud-sync directory.
-Passwords are read from SEAVAULT_PASSWORD, then OS keychain, then a hidden prompt.
-The serve command uses a separate WebDAV credential: SEAVAULT_SERVE_PASSWORD or --password-file (otherwise generated and printed once).
-A bare "seavault gc" is a dry run: if it finds chunks it would reclaim, it writes an advisory to stderr and exits 3 (action required, not an error) so scripted callers detect that nothing was reclaimed without --confirm.
-`, version)
 }
