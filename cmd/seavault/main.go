@@ -2026,10 +2026,13 @@ func cmdGUI(args []string) error {
 // wizard plus the non-interactive companions use/status/check/reset. Every
 // mutating command prints the status summary (C12); no command ever prints key
 // material (I-T2).
-func cmdTLS(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("%s", tlsUsage())
-	}
+func cmdTLS(args []string) error { return dispatchGroup("tls", execTLS, args) }
+
+// execTLS is the tls group's leaf dispatcher. dispatchGroup (commands.go) has
+// already rendered group help for a bare or `--help` invocation and rejected an
+// unknown subcommand against the registry, so execTLS only ever sees a
+// registered subcommand; H4 proves this switch and the registry never drift.
+func execTLS(args []string) error {
 	switch args[0] {
 	case "setup":
 		return cmdTLSSetup(args[1:])
