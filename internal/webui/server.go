@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -209,6 +210,14 @@ type openRequest struct {
 	Password     string `json:"password"`
 	UseKeychain  bool   `json:"useKeychain"`
 	SavePassword bool   `json:"savePassword"`
+	// AcceptRollback is the GUI accept-rollback affordance (design U2 §2.7): a
+	// rolled-back config makes vault.Open refuse with ErrConfigRolledBack, and the
+	// page then offers an explicit "I restored this from a backup" re-submit that
+	// sets this AND re-supplies the password. The server passes AcceptRollback into
+	// vault.OpenWithOptions ONLY for such a request, and rejects an acceptRollback
+	// without a re-entered password (the same rule the CLI follows: acceptance
+	// always re-supplies the credential).
+	AcceptRollback bool `json:"acceptRollback,omitempty"`
 	// These are accepted so older browser pages that reused the create form
 	// payload can still open existing vaults without hitting DisallowUnknownFields.
 	Profile string `json:"profile,omitempty"`
@@ -1521,6 +1530,14 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
+	// Accept-rollback (design U2 §2.7) always re-supplies the credential: an
+	// acceptRollback:true request WITHOUT a re-entered password is rejected (400)
+	// before any keychain fallback, so a rollback can never be accepted on a saved
+	// keychain secret alone.
+	if req.AcceptRollback && strings.TrimSpace(req.Password) == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "re-enter the vault password to accept a restored backup; a rollback cannot be accepted without re-supplying the password"})
+		return
+	}
 	password := req.Password
 	cfg, cfgErr := vault.ReadConfig(vaultPath)
 	if strings.TrimSpace(password) == "" && req.UseKeychain {
@@ -1543,8 +1560,25 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "password is required unless the OS keychain has this vault"})
 		return
 	}
-	v, err := vault.Open(vaultPath, password)
+	var v *vault.Vault
+	if req.AcceptRollback {
+		// The operator has explicitly acknowledged a restore-from-backup: pass
+		// AcceptRollback into Open so the strict freshness gate clears the anchor and
+		// re-TOFUs, for THIS request only. checkFreshness and the non-interactive
+		// path are untouched (I-U5).
+		v, err = vault.OpenWithOptions(vaultPath, password, vault.OpenOptions{AcceptRollback: true})
+	} else {
+		v, err = vault.Open(vaultPath, password)
+	}
 	if err != nil {
+		// A rolled-back config surfaces the accept-rollback affordance: the page
+		// reads canAcceptRollback and offers "I restored this from a backup", which
+		// re-submits with acceptRollback:true AND the re-entered password (design
+		// U2 §2.7). The error text still carries the strict-gate instructions.
+		if errors.Is(err, vault.ErrConfigRolledBack) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "canAcceptRollback": true})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
@@ -1663,11 +1697,26 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 type recoveryEntryDTO struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
+	// Handle is the stable 4-hex display handle (design U2 §2.6 / review C4): it
+	// is shown in the list on EVERY device regardless of a local label record, so
+	// a targeted revoke can never retire the wrong key even after earlier revokes
+	// renumber the ordinals. Ordinal is the 1-based on-disk position; Label /
+	// Created / Device come from the device-local store when a record exists;
+	// Display is the ready-to-render human label. All are display-only and never
+	// enter vault.json.
+	Handle    string `json:"handle,omitempty"`
+	Ordinal   int    `json:"ordinal,omitempty"`
+	HasRecord bool   `json:"hasRecord"`
+	Label     string `json:"label,omitempty"`
+	Created   string `json:"created,omitempty"`
+	Device    string `json:"device,omitempty"`
+	Display   string `json:"display,omitempty"`
 }
 
-// handleRecoveryList returns the recovery-entry IDs registered for the open vault
-//
-//	so the panel can offer them for revoke. Secret-free: IDs only.
+// handleRecoveryList returns the recovery entries registered for the open vault,
+// joined with this device's label store so the panel can show the stable handle
+// and the device-local label (design U2 §2.6). Secret-free: IDs, handles, and
+// display metadata only — never wrap ciphertext, salts, or any phrase.
 func (s *Server) handleRecoveryList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -1677,13 +1726,44 @@ func (s *Server) handleRecoveryList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	out := []recoveryEntryDTO{}
-	for _, ref := range v.WrapEntryRefs() {
-		if ref.Type == vault.WrapTypeRecovery {
-			out = append(out, recoveryEntryDTO{ID: ref.ID, Type: ref.Type})
+	ids := recoveryEntryIDs(v)
+	views, err := profile.LabelledRecoveryKeys(ids)
+	if err != nil {
+		// The label store is device-local and best-effort: a read error degrades to
+		// the bare handles rather than failing the list (design §6).
+		views = make([]profile.RecoveryKeyView, 0, len(ids))
+		for i, id := range ids {
+			views = append(views, profile.RecoveryKeyView{ID: id, Handle: profile.Handle(id), Ordinal: i + 1})
 		}
 	}
+	out := []recoveryEntryDTO{}
+	for _, view := range views {
+		out = append(out, recoveryEntryDTO{
+			ID:        view.ID,
+			Type:      vault.WrapTypeRecovery,
+			Handle:    view.Handle,
+			Ordinal:   view.Ordinal,
+			HasRecord: view.HasRecord,
+			Label:     view.Label,
+			Created:   view.Created,
+			Device:    view.Device,
+			Display:   view.Display(),
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": out})
+}
+
+// recoveryEntryIDs returns the IDs of the open vault's recovery wrap entries in
+// on-disk order (the appended one is last), the input to LabelledRecoveryKeys and
+// to the last-key revoke gate.
+func recoveryEntryIDs(v *vault.Vault) []string {
+	ids := []string{}
+	for _, ref := range v.WrapEntryRefs() {
+		if ref.Type == vault.WrapTypeRecovery {
+			ids = append(ids, ref.ID)
+		}
+	}
+	return ids
 }
 
 // handleRecoveryGenerate mints a recovery phrase and parks it as the pending
@@ -1704,10 +1784,19 @@ func (s *Server) handleRecoveryGenerate(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
 	}
+	// The GUI shows the 24 numbered words by default (design U2 §2.5), with the
+	// base32 compact form beneath. The words are a pure re-encoding of the SAME
+	// 256-bit secret the phrase already carries — no new secret, no re-wrap,
+	// nothing written to vault.json.
+	words, err := vault.RecoveryPhraseWords(phrase)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
 	s.mu.Lock()
 	s.pendingRecovery = &pendingRecovery{phrase: phrase, commit: commit}
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "phrase": phrase})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "phrase": phrase, "words": words})
 }
 
 type recoveryCommitRequest struct {
@@ -1723,7 +1812,8 @@ func (s *Server) handleRecoveryCommit(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if _, ok := s.currentVault(w); !ok {
+	v, ok := s.currentVault(w)
+	if !ok {
 		return
 	}
 	var req recoveryCommitRequest
@@ -1737,8 +1827,13 @@ func (s *Server) handleRecoveryCommit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "no recovery generation is pending; generate a phrase first"})
 		return
 	}
-	if !vault.RecoveryPhraseMatches(pend.phrase, req.Readback) {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "the re-entered phrase did not match; nothing was written — check the phrase and try again"})
+	// Verify the read-back through RecoveryPhraseCheck (not the boolean
+	// RecoveryPhraseMatches) so a word-shaped read-back with a single mistyped or
+	// misordered word surfaces the specific checksum/word message with the
+	// usability-aid disclaimer, instead of the generic wrong-phrase line (design
+	// U2 §2.5 / review C1). A base32-shaped mismatch keeps the generic message.
+	if err := vault.RecoveryPhraseCheck(pend.phrase, req.Readback); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: recoveryReadbackMessage(err)})
 		return
 	}
 	if err := pend.commit(); err != nil {
@@ -1748,8 +1843,47 @@ func (s *Server) handleRecoveryCommit(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.pendingRecovery = nil
 	s.mu.Unlock()
+	// The read-back matched and the entry is durable: record the device-local label
+	// for the just-appended recovery entry (design U2 §2.6). It is display-only,
+	// best-effort, and never touches vault.json — a failure never fails the commit.
+	handle := recordRecoveryLabel(v)
 	// recoverySaved drives the plain-language humanize() sentence (design U2 §2.4).
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "recoverySaved": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "recoverySaved": true, "handle": handle})
+}
+
+// recoveryReadbackMessage renders the commit read-back failure message. A
+// word-shaped read-back that fails strict decode (an unknown, miscounted,
+// mistyped, or misordered word) gets the specific typed message plus the
+// disclaimer that the built-in checksum is a usability aid, not a security
+// control (design U2 §2.5 / matrix M1). A base32-shaped mismatch keeps the
+// generic line. The message never contains either secret.
+func recoveryReadbackMessage(err error) string {
+	switch {
+	case errors.Is(err, vault.ErrRecoveryChecksum), errors.Is(err, vault.ErrRecoveryWordUnknown), errors.Is(err, vault.ErrRecoveryWordCount):
+		return err.Error() + ". This checksum is a usability aid, not a security control. Nothing was written — check the words against your saved copy and try again."
+	default:
+		return "the re-entered phrase did not match; nothing was written — check the phrase and try again"
+	}
+}
+
+// recordRecoveryLabel writes the device-local label record for the recovery entry
+// just appended to v (design U2 §2.6): the created date and this device's
+// hostname, keyed by the entry's full ID. It returns the entry's stable 4-hex
+// handle for the commit response. Display-only and best-effort — a store write
+// failure is swallowed (the entry is already durable) and never surfaces the
+// error to the phrase-bearing commit response.
+func recordRecoveryLabel(v *vault.Vault) string {
+	ids := recoveryEntryIDs(v)
+	if len(ids) == 0 {
+		return ""
+	}
+	id := ids[len(ids)-1]
+	host, _ := os.Hostname()
+	_ = profile.SetRecoveryLabel(id, profile.RecoveryKeyLabel{
+		Created: time.Now().Format("2006-01-02"),
+		Device:  host,
+	})
+	return profile.Handle(id)
 }
 
 type recoveryRedeemRequest struct {
@@ -1815,9 +1949,18 @@ func (s *Server) handleRecoveryRedeem(w http.ResponseWriter, r *http.Request) {
 
 type recoveryRevokeRequest struct {
 	ID string `json:"id"`
+	// Confirm is the explicit acknowledgement required to revoke the LAST recovery
+	// key (design U2 §2.7 / I-U4): revoking it leaves the vault with no recovery
+	// path, so without Confirm the server refuses with 409 and a body naming the
+	// consequence. It is ignored when other recovery keys remain.
+	Confirm bool `json:"confirm"`
 }
 
-// handleRecoveryRevoke retires one recovery entry by ID.
+// handleRecoveryRevoke retires one recovery entry by ID. Revoking the LAST
+// recovery key requires an explicit confirm flag (I-U4): without it the request
+// is refused with 409 and a body that names the consequence (no recovery path; a
+// forgotten password cannot be recovered), so the destructive step is never taken
+// unacknowledged.
 func (s *Server) handleRecoveryRevoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -1833,6 +1976,13 @@ func (s *Server) handleRecoveryRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.ID) == "" {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "a recovery entry ID is required"})
+		return
+	}
+	// Last-key gate: when the vault holds only one recovery key, revoking it (the
+	// only recovery entry) removes the vault's last recovery path. Refuse unless the
+	// request carries an explicit confirm flag.
+	if len(recoveryEntryIDs(v)) <= 1 && !req.Confirm {
+		writeJSON(w, http.StatusConflict, apiError{Error: "This is the last recovery key. Revoking it leaves the vault with no recovery path; a forgotten password cannot be recovered. Re-send the revoke with confirm set to proceed."})
 		return
 	}
 	if err := v.RevokeRecovery(req.ID); err != nil {
@@ -4506,6 +4656,16 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
   </nav>
 <section id="remote-panel">
   <h2>Remote repositories</h2>
+  <p class="hint">Cloud sync uses the managed rclone runtime. If it is not installed yet, choose &ldquo;Check cloud runtime&rdquo; and open-seavault-rclone will ask before downloading it.</p>
+  <p class="row-actions"><button type="button" class="secondary" onclick="ensureRcloneRuntime()">Check cloud runtime</button></p>
+  <div id="cloudRuntimeConsent" class="notice-banner" role="status" hidden>
+    <span class="notice-title">Cloud runtime needed</span>
+    <p id="cloudRuntimeConsentText">The rclone runtime is not installed. Download rclone from rclone.org to enable cloud sync?</p>
+    <p class="row-actions">
+      <button type="button" class="operation" onclick="cloudRuntimeInstall()">Download and install rclone</button>
+      <button type="button" class="secondary" onclick="cloudRuntimeConsentDismiss()">Not now</button>
+    </p>
+  </div>
   <div class="form-grid">
     <label>Name <input id="remoteName" placeholder="research-b2-ca" autocomplete="off"></label>
     <label>Type <select id="remoteType"><option value="rclone">rclone</option><option value="local">local folder copy</option></select></label>
@@ -4564,15 +4724,19 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
   </p>
   <div id="recoveryPhraseBox" hidden>
     <div id="recoveryPhraseStep">
-      <p class="hint">Write this recovery phrase on paper now. It is shown ONCE and never stored. When you have written it down, continue to confirm it &mdash; the phrase is hidden before you re-enter it.</p>
+      <p class="hint">Write these 24 numbered words on paper now, in order. They are shown ONCE and never stored. When you have written them down, continue to confirm them &mdash; the words are hidden before you re-enter them.</p>
+      <ol id="recoveryWords" class="recovery-words"></ol>
+      <p class="hint">Compact form (base32) &mdash; the same key, for anyone who prefers it or is redeeming on an older version:</p>
       <pre id="recoveryPhrase" class="table-wrap" style="white-space:pre-wrap;word-break:break-all;"></pre>
       <p class="row-actions">
+        <button class="secondary" onclick="recoveryPrintCard()">Print recovery card</button>
         <button class="operation" onclick="recoveryWrittenDown()">I have written it down &mdash; continue</button>
         <button class="secondary" onclick="cancelRecovery()">Cancel</button>
       </p>
     </div>
     <div id="recoveryReadbackStep" hidden>
       <p class="hint">Re-enter the recovery phrase from your written copy to confirm before it is saved. Paste is disabled so the re-entry proves you captured it off-screen.</p>
+      <p class="hint">If a word is mistyped or out of order, the built-in checksum will usually catch it and say so. That checksum is a usability aid, not a security control.</p>
       <div class="form-grid">
         <label>Re-enter the recovery phrase to confirm
           <input id="recoveryReadback" autocomplete="off" onpaste="return false" ondrop="return false" ondragover="return false" placeholder="type the phrase from your written copy">
@@ -4583,6 +4747,12 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
         <button class="secondary" onclick="cancelRecovery()">Cancel</button>
       </p>
     </div>
+  </div>
+  <div id="recoveryConfirmedCard" hidden>
+    <p class="hint">Recovery key confirmed. You can print a clean copy of the card (no draft stamp) for safekeeping. Keep it on paper, away from this computer.</p>
+    <p class="row-actions">
+      <button class="secondary" onclick="recoveryPrintConfirmedCard()">Print confirmed card</button>
+    </p>
   </div>
   <div id="recoveryList" class="table-wrap"></div>
 
@@ -4870,7 +5040,7 @@ async function api(path, opts){
   let body;
   if(ct.indexOf('application/json') >= 0){ body = await res.json(); } else { body = await res.text(); }
   if(body && body.browserToken) updateSessionToken(body.browserToken);
-  if(!res.ok) throw new Error((body && body.error) || body || res.statusText);
+  if(!res.ok){ const err = new Error((body && body.error) || body || res.statusText); err.body = body; err.status = res.status; throw err; }
   return body;
 }
 function showHuman(title, obj, level){
@@ -5040,25 +5210,84 @@ async function listRecovery(){
     const box = $('recoveryList');
     if(!box) return;
     if(rows.length === 0){ box.innerHTML = '<p class="hint">No recovery keys are registered.</p>'; return; }
-    box.innerHTML = '<table><thead><tr><th>Recovery key ID</th><th></th></tr></thead><tbody>' +
-      rows.map(r => '<tr><td>'+esc(r.id)+'</td><td><button class="secondary" onclick="revokeRecovery(\''+esc(r.id)+'\')">Revoke</button></td></tr>').join('') +
+    // Show the stable handle and the device-local label (design U2 §2.6); the
+    // full entry ID drives revoke. isLast is passed so the last remaining key
+    // triggers the consequence-naming confirmation before its revoke.
+    const isLast = rows.length === 1;
+    box.innerHTML = '<table><thead><tr><th>Recovery key</th><th>ID</th><th></th></tr></thead><tbody>' +
+      rows.map(r => '<tr><td>'+esc(r.display || ('Recovery key #' + (r.handle||'')))+'</td><td><code>'+esc(r.id)+'</code></td><td><button class="secondary" onclick="revokeRecovery(\''+esc(r.id)+'\','+(isLast?'true':'false')+')">Revoke</button></td></tr>').join('') +
       '</tbody></table>';
   } catch(e){ showError('Could not list recovery keys', e.message); }
+}
+// recoveryCardWords / recoveryCardHandle hold the just-generated phrase in memory
+// so the printable card (design U2 §2.5) can be rendered client-side. They are
+// retained only until the panel is closed (cancel clears them) and never re-fetched
+// from the server, which does not re-serve the phrase after commit or cancel.
+let recoveryCardWords = [];
+let recoveryCardHandle = '';
+function recoveryCardVaultName(){
+  const p = (lastStatus && lastStatus.vaultPath) || '';
+  if(!p) return 'your vault';
+  return p.split('/').pop().split('\\').pop() || 'your vault';
+}
+// recoveryCardHTML builds the printable card markup. The pre-commit card (draft
+// true) is stamped DRAFT; the confirmed reprint (draft false) carries no stamp
+// (review C6). Rendered entirely client-side from the words already on screen.
+function recoveryCardHTML(draft){
+  const words = recoveryCardWords || [];
+  const rows = words.map((w,i) => '<li>' + esc(w) + '</li>').join('');
+  const stamp = draft ? '<div class="draft-stamp" style="border:2px solid #b00;color:#b00;padding:6px;font-weight:bold;margin-bottom:10px">DRAFT &mdash; not confirmed until you complete the read-back; destroy this card if you cancel.</div>' : '';
+  const handleLine = recoveryCardHandle ? '<p>Recovery key #' + esc(recoveryCardHandle) + '</p>' : (draft ? '<p>Recovery key handle: assigned when you confirm the read-back.</p>' : '');
+  return '<div style="font-family:sans-serif;font-size:14px">' + stamp +
+    '<h2>open-seavault-rclone recovery card</h2>' +
+    '<p>Vault: ' + esc(recoveryCardVaultName()) + '</p>' +
+    '<p>Printed: ' + esc(new Date().toISOString().slice(0,10)) + '</p>' +
+    handleLine +
+    '<ol style="font-size:16px;line-height:1.6">' + rows + '</ol>' +
+    '<p>Keep this on paper, away from the computer. Anyone holding it can open the vault.</p>' +
+    '</div>';
+}
+function recoveryPrintWindow(html){
+  const win = window.open('', '_blank');
+  if(!win){ showError('Print blocked', 'The browser blocked the print window. Allow pop-ups to print the recovery card, or write the words down.'); return; }
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  win.print();
+}
+function recoveryPrintCard(){
+  if(!(recoveryCardWords && recoveryCardWords.length)){ showError('Nothing to print', 'Generate a recovery key first.'); return; }
+  recoveryPrintWindow(recoveryCardHTML(true));
+}
+function recoveryPrintConfirmedCard(){
+  if(!(recoveryCardWords && recoveryCardWords.length)){ showError('Nothing to print', 'The confirmed card is available only right after you save the key, before the panel is closed.'); return; }
+  recoveryPrintWindow(recoveryCardHTML(false));
+}
+function renderRecoveryWords(words){
+  const box = $('recoveryWords');
+  if(!box) return;
+  box.innerHTML = (words || []).map(w => '<li>' + esc(w) + '</li>').join('');
 }
 async function generateRecovery(){
   try {
     const res = await api('/api/recovery/generate',{method:'POST',headers:jsonHeaders,body:JSON.stringify({})});
+    recoveryCardWords = (res && res.words) || [];
+    recoveryCardHandle = '';
+    renderRecoveryWords(recoveryCardWords);
     $('recoveryPhrase').textContent = (res && res.phrase) || '';
     $('recoveryReadback').value = '';
     $('recoveryPhraseStep').hidden = false;
     $('recoveryReadbackStep').hidden = true;
+    if($('recoveryConfirmedCard')) $('recoveryConfirmedCard').hidden = true;
     $('recoveryPhraseBox').hidden = false;
-    showHuman('Recovery phrase generated', 'Write it down on paper. It is shown only once; the next step hides it and asks you to re-type it.', 'info');
+    showHuman('Recovery phrase generated', 'Write down the 24 numbered words on paper, in order. They are shown only once; the next step hides them and asks you to re-type them.', 'info');
   } catch(e){ showError('Could not generate a recovery key', e.message); }
 }
 function recoveryWrittenDown(){
-  // Hide and clear the phrase BEFORE the read-back appears, so a correct read-back
-  // evidences an off-screen (paper) capture rather than an on-screen copy.
+  // Hide and clear the words BEFORE the read-back appears, so a correct read-back
+  // evidences an off-screen (paper) capture rather than an on-screen copy. The
+  // words stay in memory (recoveryCardWords) only for the confirmed reprint.
+  renderRecoveryWords([]);
   $('recoveryPhrase').textContent = '';
   $('recoveryPhraseStep').hidden = true;
   $('recoveryReadbackStep').hidden = false;
@@ -5069,27 +5298,45 @@ async function commitRecovery(){
     const readback = $('recoveryReadback').value;
     if(!readback.trim()){ showError('Read-back required', 'Re-enter the recovery phrase to confirm you saved it.'); return; }
     const res = await api('/api/recovery/commit',{method:'POST',headers:jsonHeaders,body:JSON.stringify({readback:readback})});
-    $('recoveryPhraseBox').hidden = true;
-    $('recoveryPhraseStep').hidden = false;
+    recoveryCardHandle = (res && res.handle) || '';
+    $('recoveryPhraseStep').hidden = true;
     $('recoveryReadbackStep').hidden = true;
     $('recoveryPhrase').textContent = '';
     $('recoveryReadback').value = '';
+    renderRecoveryWords([]);
+    // The read-back is complete: offer the clean (no DRAFT stamp) confirmed reprint.
+    // The words remain in memory for it until the panel is closed.
+    if($('recoveryConfirmedCard')) $('recoveryConfirmedCard').hidden = false;
     showHuman('Recovery key saved', res, 'success');
     await listRecovery();
   } catch(e){ showError('Recovery key not saved', e.message); }
 }
 function cancelRecovery(){
+  // Cancel destroys the draft card material: the words are cleared from screen AND
+  // from memory, so no card survives a cancelled generation (review C6).
+  recoveryCardWords = [];
+  recoveryCardHandle = '';
+  renderRecoveryWords([]);
   $('recoveryPhraseBox').hidden = true;
   $('recoveryPhraseStep').hidden = false;
   $('recoveryReadbackStep').hidden = true;
+  if($('recoveryConfirmedCard')) $('recoveryConfirmedCard').hidden = true;
   $('recoveryPhrase').textContent = '';
   $('recoveryReadback').value = '';
   showHuman('Recovery generation cancelled', 'No recovery key was saved.', 'info');
 }
-async function revokeRecovery(id){
+async function revokeRecovery(id, isLast){
   try {
-    if(!window.confirm('Revoke recovery key ' + id + '? It will no longer be able to unlock the vault.')) return;
-    const res = await api('/api/recovery/revoke',{method:'POST',headers:jsonHeaders,body:JSON.stringify({id:id})});
+    let confirmFlag = false;
+    if(isLast){
+      // Last recovery key: name the consequence and require an explicit
+      // acknowledgement (I-U4). The server also refuses with 409 without confirm.
+      if(!window.confirm('This is the last recovery key. Revoking it leaves the vault with no recovery path — a forgotten password cannot be recovered. Revoke it anyway?')) return;
+      confirmFlag = true;
+    } else {
+      if(!window.confirm('Revoke recovery key ' + id + '? It will no longer be able to unlock the vault.')) return;
+    }
+    const res = await api('/api/recovery/revoke',{method:'POST',headers:jsonHeaders,body:JSON.stringify({id:id,confirm:confirmFlag})});
     showHuman('Recovery key revoked', res, 'success');
     await listRecovery();
   } catch(e){ showError('Revoke failed', e.message); }
@@ -5293,7 +5540,23 @@ async function welcomeOpen(){
     if(!path){ showError('Vault folder required', 'Enter or choose the folder of the vault you want to open.'); return; }
     await api('/api/open',{method:'POST',headers:jsonHeaders,body:JSON.stringify({vaultPath: path, password: pw, useKeychain: !pw})});
     window.location.href = '/';
-  } catch(e){ showError('Could not open the vault', humanFetchError(e)); }
+  } catch(e){ if(await offerAcceptRollback(e, path, pw)) return; showError('Could not open the vault', humanFetchError(e)); }
+}
+// offerAcceptRollback surfaces the GUI accept-rollback affordance (design U2 §2.7):
+// when /api/open refused with the rolled-back freshness gate the error body carries
+// canAcceptRollback. Offer "I restored this from a backup" and, on confirm, re-submit
+// /api/open with acceptRollback:true AND the re-entered password (never a keychain
+// secret). Returns true when it handled the error so the caller does not also show
+// the generic failure. A rollback refusal with no password re-entered asks for one.
+async function offerAcceptRollback(e, path, password){
+  if(!(e && e.body && e.body.canAcceptRollback)) return false;
+  if(!password){ showError('Password needed to accept a restored backup', 'Re-enter the vault password, then open again and choose "I restored this from a backup".'); return true; }
+  if(!window.confirm('I restored this from a backup.\n\nThis vault looks older than this device last saw it. If you deliberately restored it from a backup, open it and re-establish freshness?')) return true;
+  try {
+    await api('/api/open',{method:'POST',headers:jsonHeaders,body:JSON.stringify({vaultPath: path, password: password, acceptRollback: true})});
+    window.location.href = '/';
+  } catch(e2){ showError('Could not open the restored vault', e2.message); }
+  return true;
 }
 // renderWelcomeVaults fills the Welcome-back saved-vault list from /api/status.
 function renderWelcomeVaults(s){
@@ -5460,7 +5723,7 @@ async function saveCurrentVaultProfile(){
   } catch(e){ showError('Could not save vault', e.message); }
 }
 async function initVault(){ try { const warn = localPathWarning(); if(warn){ showError('Invalid vault path', warn); return; } const res = await api('/api/init',{method:'POST',headers:jsonHeaders,body:JSON.stringify(initPayload())}); $('password').value=''; const status = await api('/api/status'); status.lastAction = res; lastStatus = status; renderVaultSelector(status); renderAvailableVaults(status); renderTopVaultStrip(status); renderKeychainStatus(status); renderDependencies(status); renderWebDAVStatus(status); renderWebDAVQuick(status); renderAppConfig(status); showHuman('Vault created and opened', status, 'success'); showNotices(res.warnings); await refreshFiles(); await refreshDavFiles(); await loadProfiles(); } catch(e){ showError('Could not create vault', e.message); } }
-async function openVault(useKeychain){ try { const warn = localPathWarning(); if(warn){ showError('Invalid vault path', warn); return; } const res = await api('/api/open',{method:'POST',headers:jsonHeaders,body:JSON.stringify(openPayload(useKeychain))}); $('password').value=''; const status = await api('/api/status'); status.lastAction = res; lastStatus = status; renderVaultSelector(status); renderAvailableVaults(status); renderTopVaultStrip(status); renderKeychainStatus(status); renderDependencies(status); renderWebDAVStatus(status); renderWebDAVQuick(status); renderAppConfig(status); showHuman('Vault opened', status, 'success'); showNotices(res.warnings); await refreshFiles(); await refreshDavFiles(); await loadProfiles(); } catch(e){ showError('Could not open vault', e.message); } }
+async function openVault(useKeychain){ try { const warn = localPathWarning(); if(warn){ showError('Invalid vault path', warn); return; } const res = await api('/api/open',{method:'POST',headers:jsonHeaders,body:JSON.stringify(openPayload(useKeychain))}); $('password').value=''; const status = await api('/api/status'); status.lastAction = res; lastStatus = status; renderVaultSelector(status); renderAvailableVaults(status); renderTopVaultStrip(status); renderKeychainStatus(status); renderDependencies(status); renderWebDAVStatus(status); renderWebDAVQuick(status); renderAppConfig(status); showHuman('Vault opened', status, 'success'); showNotices(res.warnings); await refreshFiles(); await refreshDavFiles(); await loadProfiles(); } catch(e){ if(await offerAcceptRollback(e, $('vaultPath').value, $('password').value)) return; showError('Could not open vault', e.message); } }
 function clearWebDAVUI(message){
   currentDavPath = 'content';
   selectedDavPath = '';
@@ -6092,6 +6355,34 @@ async function loadProfiles(){
 function selectMoveProfile(name,path){ $('moveProfile').value=name; $('moveSource').value=path; $('moveDest').value=''; showHuman('Move source selected', 'Selected saved vault ' + name + '. Enter the new vault location, then click Move vault location.'); location.hash='move-panel'; }
 async function deleteProfile(name){ try { await api('/api/profile?name='+encodeURIComponent(name),{method:'DELETE',headers:jsonHeaders}); showHuman('Saved vault removed', 'Removed saved vault location ' + name + '. The vault files and keychain password were not deleted.', 'success'); await refreshStatus(); } catch(e){ showError('Could not remove saved vault', e.message); } }
 async function rcloneStatus(check){ try { const s = await api('/api/rclone/status?checkUpdate='+(check?'1':'0')); $('rcloneStatus').textContent = JSON.stringify(s,null,2); } catch(e){ $('rcloneStatus').textContent = e.message; } }
+// ensureRcloneRuntime is the Cloud sync runtimes-on-demand flow (design U2 §2.3):
+// it consults the EXISTING /api/rclone/status and, when the runtime is missing,
+// reveals a consent step that calls the EXISTING /api/rclone/install. No new
+// download path is introduced. Returns true when the runtime is present.
+async function ensureRcloneRuntime(){
+  try {
+    const st = await api('/api/rclone/status');
+    if(st && st.installed){
+      cloudRuntimeConsentDismiss();
+      showHuman('Cloud runtime ready', 'The rclone runtime is installed. Cloud sync is available.', 'success');
+      return true;
+    }
+    const box = $('cloudRuntimeConsent');
+    if(box) box.hidden = false;
+    return false;
+  } catch(e){ showError('Could not check the cloud runtime', e.message); return false; }
+}
+function cloudRuntimeConsentDismiss(){ const box = $('cloudRuntimeConsent'); if(box) box.hidden = true; }
+async function cloudRuntimeInstall(){
+  // Consent granted: call the EXISTING install endpoint (no new download path).
+  try {
+    const res = await api('/api/rclone/install',{method:'POST',headers:jsonHeaders,body:JSON.stringify({channel:'stable'})});
+    cloudRuntimeConsentDismiss();
+    if($('rcloneStatus')) $('rcloneStatus').textContent = JSON.stringify(res,null,2);
+    showHuman('Cloud runtime installed', res, 'success');
+    return true;
+  } catch(e){ showError('Could not install the cloud runtime', e.message); return false; }
+}
 async function rcloneInstall(){ try { const req={version:$('rcloneVersion').value, channel:'stable', fromBinary:$('rcloneFromBinary').value, signature:$('rcloneSignature').value}; const res=await api('/api/rclone/install',{method:'POST',headers:jsonHeaders,body:JSON.stringify(req)}); $('rcloneStatus').textContent=JSON.stringify(res,null,2); showHuman('Rclone install/register complete', res, 'success'); } catch(e){ $('rcloneStatus').textContent=e.message; showError('Rclone install/register failed', e.message); } }
 async function rcloneUpdate(){ try { const req={version:$('rcloneVersion').value, channel:'stable', signature:$('rcloneSignature').value}; const res=await api('/api/rclone/update',{method:'POST',headers:jsonHeaders,body:JSON.stringify(req)}); $('rcloneStatus').textContent=JSON.stringify(res,null,2); showHuman('Rclone update complete', res, 'success'); } catch(e){ $('rcloneStatus').textContent=e.message; showError('Rclone update failed', e.message); } }
 async function rcloneRollback(){ try { const res=await api('/api/rclone/rollback',{method:'POST',headers:jsonHeaders,body:'{}'}); $('rcloneStatus').textContent=JSON.stringify(res,null,2); showHuman('Rclone rollback complete', res, 'success'); } catch(e){ $('rcloneStatus').textContent=e.message; showError('Rclone rollback failed', e.message); } }
