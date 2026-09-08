@@ -469,14 +469,25 @@ type stdinPrompter struct {
 	in *bufio.Reader
 }
 
-func newStdinPrompter() *stdinPrompter { return &stdinPrompter{in: bufio.NewReader(os.Stdin)} }
+func newStdinPrompter() *stdinPrompter { return newStdinPrompterFrom(os.Stdin) }
 
-func (p *stdinPrompter) readLine() string {
+// newStdinPrompterFrom builds a prompter over an arbitrary reader; the tests use
+// it to drive a closed/exhausted stdin without touching os.Stdin.
+func newStdinPrompterFrom(r io.Reader) *stdinPrompter {
+	return &stdinPrompter{in: bufio.NewReader(r)}
+}
+
+// readLine returns the next line with the newline trimmed. It DISTINGUISHES a
+// closed/exhausted stdin: when ReadString hits EOF (or a read error) with nothing
+// buffered, it returns that error so the caller can abort rather than loop
+// forever treating EOF as "accept the default" (A2-c1). A final line WITHOUT a
+// trailing newline is still delivered (its EOF is not raised until the next read).
+func (p *stdinPrompter) readLine() (string, error) {
 	line, err := p.in.ReadString('\n')
-	if err != nil && line == "" {
-		return "" // EOF with nothing typed: accept the default
+	if line == "" && err != nil {
+		return "", err
 	}
-	return strings.TrimRight(line, "\r\n")
+	return strings.TrimRight(line, "\r\n"), nil
 }
 
 func (p *stdinPrompter) Select(title string, options []setup.Option, defaultIdx int) (int, error) {
@@ -492,7 +503,11 @@ func (p *stdinPrompter) Select(title string, options []setup.Option, defaultIdx 
 		}
 	}
 	fmt.Printf("Choose [1-%d] (default %d): ", len(options), defaultIdx+1)
-	line := strings.TrimSpace(p.readLine())
+	raw, err := p.readLine()
+	if err != nil {
+		return defaultIdx, err
+	}
+	line := strings.TrimSpace(raw)
 	if line == "" {
 		return defaultIdx, nil
 	}
@@ -509,7 +524,11 @@ func (p *stdinPrompter) Confirm(question string, defaultYes bool) (bool, error) 
 		hint = "y/N"
 	}
 	fmt.Printf("%s [%s]: ", question, hint)
-	switch strings.ToLower(strings.TrimSpace(p.readLine())) {
+	raw, err := p.readLine()
+	if err != nil {
+		return defaultYes, err
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "y", "yes":
 		return true, nil
 	case "n", "no":
@@ -525,7 +544,11 @@ func (p *stdinPrompter) Text(label, def string) (string, error) {
 	} else {
 		fmt.Printf("%s: ", label)
 	}
-	line := strings.TrimSpace(p.readLine())
+	raw, err := p.readLine()
+	if err != nil {
+		return def, err
+	}
+	line := strings.TrimSpace(raw)
 	if line == "" {
 		return def, nil
 	}
@@ -1336,9 +1359,9 @@ func ensureLoopbackBind(addr string, insecureBind, tlsOn, selfSigned bool) ([]st
 		return nil, nil
 	}
 	if isEveryInterface(host) {
-		return nil, fmt.Errorf("refusing to bind %q: an unspecified host listens on all interfaces and would expose decrypted content; use 127.0.0.1 or pass --insecure-bind", addr)
+		return nil, fmt.Errorf("refusing to bind %q: an unspecified host listens on every interface and would expose DECRYPTED content. To reach other devices, set up TLS first: run `seavault tls setup` (or pass --tls-cert/--tls-key), then bind a specific address. As a last resort, pass --insecure-bind to serve plaintext (not recommended)", addr)
 	}
-	return nil, fmt.Errorf("refusing to bind %q: %q is not a loopback address, and this endpoint serves DECRYPTED content. Keep it on 127.0.0.1/localhost, or pass --insecure-bind to override (not recommended)", addr, host)
+	return nil, fmt.Errorf("refusing to bind %q: %q is not a loopback address, and this endpoint serves DECRYPTED content. To reach other devices, set up TLS first: run `seavault tls setup` (or pass --tls-cert/--tls-key). As a last resort, pass --insecure-bind to serve plaintext on this address (not recommended)", addr, host)
 }
 
 // repeatableString collects a repeatable string flag (e.g. --allow-host NAME).
