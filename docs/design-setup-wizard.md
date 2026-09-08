@@ -1,6 +1,6 @@
 # Design — Phase U1: the setup wizard (`seavault setup` + GUI first-run stepper)
 
-STATUS: Built. Phase U1 shipped on `feature/setup-wizard` in four slices: S1 `internal/setup` detect/plan/execute (4c626f7), S2 the interactive wizard + `seavault setup` CLI (1592909), S3 the GUI first-run stepper + `/api/setup/*` (f756328), and S4 docs + final verification (this commit). The 14 conditions of the pre-code review (`docs/review-setup-wizard-predesign.md`, GO_WITH_CONDITIONS) are applied below and in §9; the T1–T15 matrix in §7 is implemented and the unfiltered `go test -race ./...` suite is green.
+STATUS: Built, reviewed, and fix-tranche applied. Phase U1 shipped on `feature/setup-wizard` in four slices: S1 `internal/setup` detect/plan/execute (4c626f7), S2 the interactive wizard + `seavault setup` CLI (1592909), S3 the GUI first-run stepper + `/api/setup/*` (f756328), and S4 the Quick-start docs + built status (6c25dba). The 14 conditions of the pre-code review (`docs/review-setup-wizard-predesign.md`, GO_WITH_CONDITIONS) are applied below and in §9; the T1–T15 matrix in §7 is implemented and the unfiltered `go test -race ./...` suite is green. The built wizard was then reviewed twice — adversarial (14 confirmed / 1 refuted, `docs/review-setup-wizard-adversarial.md`) and friction (24 cells / 14 Type II, `docs/review-setup-wizard-friction.md`), both filed in 44c6c5c — and the confirmed findings were fixed red-first in a four-fixer tranche on this branch: F-A profile-collision orphan + detection/preflight single-source + recovery-save safety + rclone argv/stderr (a60aa1c); F-B CLI typed-error affordances + failure summary + fleet `--json`/idempotent rerun + `--help` contract (4e5a701); F-C GUI stepper soft-failure + recovery reminder + guided return + copy/inline validation (e42c1e5); and F-D this docs sweep + final verification (this commit).
 
 ## 1. Goal and scope
 
@@ -171,10 +171,19 @@ com~apple~CloudDocs`, Windows `iCloudDrive`; Google Drive macOS
 Nextcloud `Nextcloud`; Syncthing `Sync`. (Box, pCloud and MEGA are dropped from U1's
 Provider enum until they have a verified caveat, C7.) Globs are expanded; a hit requires an
 existing directory. Detection is advisory: it changes the default, never silently
-selects. The caveat catalog is the ONE source of truth and lives in code, `internal/setup/providers.go`
-(a table of Provider → caveat), because `docs/cloud-provider-notes.md` contains no caveat
-text today (C7); that doc gains a section that points at the catalog. T1/T7 assert the
-catalog strings.
+selects. iCloud Drive and Google Drive are detected only on macOS and Windows (they have no
+Linux consumer client); Dropbox, OneDrive, Nextcloud and (marker-gated) Syncthing are
+detected on every platform. The directory check is `os.Stat`, which follows symlinks:
+**symlinked provider folders are accepted** — a symlinked `~/Dropbox` pointing anywhere is
+reported as a sync root and its children are offered the "already synced" outcome. This is a
+deliberate, documented residual (detection-preflight-3): detection only ever reads (it never
+writes), so a misleading suggestion is the whole downside; it is not a security boundary. The
+caveat catalog is the ONE source of truth and lives in code, `internal/setup/providers.go`
+(a table of Provider → caveat). `docs/cloud-provider-notes.md` carries a **verbatim mirror**
+of that catalog (the caveat text copied under each provider), and a drift-guard test
+(`TestDocsMirrorCaveatCatalog`) fails if the doc text and the code catalog ever disagree, so
+the code stays authoritative while readers still get the text in the doc (C7, DOC-3). T1/T7
+assert the catalog strings.
 
 ## 5. Security invariants (proven by the tests in §7 unless labeled)
 
@@ -191,8 +200,20 @@ catalog strings.
   the remedy, not a failure).
 - **I-S5** Footprint: the wizard writes only the chosen vault dir, the app-data profile
   entry, the keychain entry, and (rclone path) the runtime + remote config the user chose.
-  A failure leaves no half-vault (vault.Create is already atomic) and the summary states
-  exactly what exists.
+  A failure leaves no half-vault locally (vault.Create is already atomic) and the summary
+  states exactly what exists.
+  **Residual (sync-race-1):** the vault is staged in a temp sibling
+  (`os.MkdirTemp(parent, …)`) inside the SAME parent as the target and `os.Rename`d into
+  place, so when the parent is an actively-synced folder the staging directory exists
+  transiently *within the sync scope*. A build that fails after the sync client has already
+  begun uploading (or snapshotting) that staging directory can leave a partial,
+  never-completed vault fragment in the cloud that the local `RemoveAll` on failure cannot
+  un-upload. At that point `vault.json` holds only wrapped keys — no plaintext — so this is
+  a footprint/hygiene residual, not a confidentiality one. Same-parent staging is
+  deliberate: it keeps the final `os.Rename` atomic on a single filesystem (staging on
+  another filesystem would break that atomicity). U1 accepts this residual rather than
+  fixing it; it is documented here so the "leaves no half-vault" clause is read as
+  *local* footprint.
 - **I-S6** Provider placement surfaces the provider caveat; the wizard never enables a
   transport, runtime, or remote the user did not pick.
 - **I-S7** `/api/setup/*` sit behind the same session auth as every `/api` route; a request
