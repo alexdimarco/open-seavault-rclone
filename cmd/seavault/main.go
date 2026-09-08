@@ -1293,15 +1293,30 @@ const selfSignedTrustWarning = "clients will show a trust prompt; Windows WebDAV
 // knows the listener is reachable on every interface, not just one.
 const everyInterfaceWarning = "listening on every interface"
 
+// isEveryInterface reports whether host binds every interface: an empty host, or
+// an unspecified address (0.0.0.0, ::, [::]). The advisory must fire for the
+// explicit wildcard forms too, not only the empty host (guard-warning-allzero-1).
+func isEveryInterface(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return true
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		return true
+	}
+	return false
+}
+
 // ensureLoopbackBind decides whether the GUI / WebDAV listener (which serves
 // DECRYPTED vault content) may bind addr, and returns any advisory warnings for
 // an admitted non-loopback bind. Loopback and "localhost" are always fine. A
-// non-loopback or empty host is admitted when tlsOn (the wire is encrypted) —
-// with the self-signed trust warning when selfSigned, and the every-interface
-// warning when the host is empty. Without TLS it is refused exactly as before
-// unless insecureBind overrides. Plaintext therefore never reaches a
-// non-loopback address without the explicit override (I-T1); the guard relaxes
-// only for a TLS listener.
+// non-loopback or every-interface host is admitted when tlsOn (the wire is
+// encrypted) — with the self-signed trust warning when selfSigned, and the
+// every-interface warning when the host binds all interfaces (empty, 0.0.0.0,
+// ::, [::]). Without TLS it is refused exactly as before unless insecureBind
+// overrides. Plaintext therefore never reaches a non-loopback address without
+// the explicit override (I-T1); the guard relaxes only for a TLS listener.
 func ensureLoopbackBind(addr string, insecureBind, tlsOn, selfSigned bool) ([]string, error) {
 	host := hostOf(addr)
 	if isLoopbackOrLocalhost(host) {
@@ -1312,7 +1327,7 @@ func ensureLoopbackBind(addr string, insecureBind, tlsOn, selfSigned bool) ([]st
 		if selfSigned {
 			warnings = append(warnings, selfSignedTrustWarning)
 		}
-		if host == "" {
+		if isEveryInterface(host) {
 			warnings = append(warnings, everyInterfaceWarning)
 		}
 		return warnings, nil
@@ -1320,8 +1335,8 @@ func ensureLoopbackBind(addr string, insecureBind, tlsOn, selfSigned bool) ([]st
 	if insecureBind {
 		return nil, nil
 	}
-	if host == "" {
-		return nil, fmt.Errorf("refusing to bind %q: an empty host listens on all interfaces and would expose decrypted content; use 127.0.0.1 or pass --insecure-bind", addr)
+	if isEveryInterface(host) {
+		return nil, fmt.Errorf("refusing to bind %q: an unspecified host listens on all interfaces and would expose decrypted content; use 127.0.0.1 or pass --insecure-bind", addr)
 	}
 	return nil, fmt.Errorf("refusing to bind %q: %q is not a loopback address, and this endpoint serves DECRYPTED content. Keep it on 127.0.0.1/localhost, or pass --insecure-bind to override (not recommended)", addr, host)
 }
@@ -1609,6 +1624,43 @@ func keychainUnavailableNote(err error) string {
 	return fmt.Sprintf("OS keychain unavailable (%s); falling back to SEAVAULT_PASSWORD or the hidden prompt", msg)
 }
 
+// tlsReloadInterval overrides the hot-reloader poll interval for gui/serve. Zero
+// (production) falls back to tlsconfig.DefaultPollInterval; the integration tests
+// inject a short interval to drive a renewal swap deterministically. It is a test
+// seam only.
+var tlsReloadInterval time.Duration
+
+// serveTestHook / guiTestHook, when non-nil, are invoked by cmdServe / cmdGUI
+// with the live http.Server and its bound address just after the listener comes
+// up, so an integration test can dial the real TLS listener and later Shutdown
+// it (which lets the command return and cancels the reloader). Production nil.
+var (
+	serveTestHook func(srv *http.Server, addr string)
+	guiTestHook   func(srv *http.Server, addr string)
+)
+
+// startTLSReloader constructs and runs the hot-reloader for a resolved TLS
+// source so a renewed on-disk pair is served within the poll and serving.json is
+// maintained at runtime (design §2/C11, I-T3). It is a no-op when resolved is nil
+// or its source is none (nothing to reload). The reloader stops when ctx is
+// cancelled (on server shutdown). Its log lines carry only path/name/time
+// diagnostics — never key material — and are prefixed with the purpose.
+func startTLSReloader(ctx context.Context, resolved *tlsconfig.Resolved, purpose string) {
+	if resolved == nil || resolved.Source == tlsconfig.SourceNone {
+		return
+	}
+	rl := resolved.Reloader(tlsconfig.ReloaderOptions{
+		Interval: tlsReloadInterval,
+		Logf: func(format string, a ...any) {
+			fmt.Fprintf(os.Stderr, purpose+" TLS: "+format+"\n", a...)
+		},
+	})
+	if rl == nil {
+		return
+	}
+	go rl.Run(ctx)
+}
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", "127.0.0.1:8765", "local address for the WebDAV-compatible endpoint")
@@ -1687,7 +1739,16 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return listenErrorHint(*addr, err)
 	}
+	// Start the TLS hot-reloader so a renewed pair is served within the poll and
+	// serving.json is written for `tls status` (reload-not-wired-1). It stops when
+	// this command returns (defer cancel), so no goroutine outlives the listener.
+	reloadCtx, cancelReload := context.WithCancel(context.Background())
+	defer cancelReload()
+	startTLSReloader(reloadCtx, resolved, "serve")
 	srv := buildLoopbackServer(*addr, dav)
+	if serveTestHook != nil {
+		serveTestHook(srv, ln.Addr().String())
+	}
 	return listenErrorHint(*addr, serveOn(ln, srv, resolved))
 }
 
@@ -1871,7 +1932,17 @@ func cmdGUI(args []string) error {
 	if err != nil {
 		return listenErrorHint(*addr, err)
 	}
+	// Start the TLS hot-reloader so a renewed pair is served within the poll and
+	// serving.json is written for `tls status` (reload-not-wired-1). It stops when
+	// this command returns (defer cancel), covering both the serveErr and the
+	// browser-close shutdown exits below.
+	reloadCtx, cancelReload := context.WithCancel(context.Background())
+	defer cancelReload()
+	startTLSReloader(reloadCtx, resolved, "gui")
 	srv := buildLoopbackServer(*addr, s)
+	if guiTestHook != nil {
+		guiTestHook(srv, ln.Addr().String())
+	}
 	serveErr := make(chan error, 1)
 	go func() {
 		serveErr <- serveOn(ln, srv, resolved)
@@ -2015,8 +2086,26 @@ func cmdTLSCheck(args []string) error {
 		fmt.Println("tls check: self-signed floor — a certificate is generated when the GUI first starts over https")
 		return nil
 	}
-	if _, err := tlsconfig.Validate(cert, key); err != nil {
+	info, err := tlsconfig.Validate(cert, key)
+	if err != nil {
 		return err // exit 1
+	}
+	// An out-of-window leaf is a health-check failure, not a pass: the docs say
+	// `tls check` "exits non-zero on any error — use it in a health check", and an
+	// expired leaf is the single most important thing a health check must catch
+	// (the Windows mount refuses it). Exit non-zero by default (A3-c6). Messages
+	// name the certificate path and the times only — never key material (I-T2).
+	now := time.Now()
+	if now.After(info.NotAfter) {
+		return fmt.Errorf("tls check: certificate expired on %s (%s)", info.NotAfter.UTC().Format(time.RFC3339), cert)
+	}
+	if now.Before(info.NotBefore) {
+		return fmt.Errorf("tls check: certificate is not valid until %s (%s)", info.NotBefore.UTC().Format(time.RFC3339), cert)
+	}
+	// A still-valid leaf passes (exit 0); surface any soft warnings (expiring
+	// soon, a group/world-readable key) so an operator sees them without failing.
+	for _, w := range info.Warnings {
+		fmt.Printf("tls check: warning: %s\n", w)
 	}
 	fmt.Printf("tls check: OK — %s\n", cert)
 	return nil

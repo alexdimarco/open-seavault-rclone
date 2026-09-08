@@ -12,11 +12,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/alexdimarco/open-seavault-rclone/internal/appdir"
 )
+
+// reloadTOCTOUHook, when non-nil, is invoked inside reload() AFTER the validate
+// read and BEFORE the load read. It is a fault-injection seam for the
+// reload-races-3 regression only: a test swaps the on-disk pair here to prove
+// the C6 downgrade gate is evaluated on the bytes actually LOADED and served,
+// not on the earlier validate read. Production leaves it nil (no behaviour).
+var reloadTOCTOUHook func()
 
 // DefaultPollInterval is how often the reloader stats the pair. It is portable
 // (Windows has no SIGHUP) and injectable for tests via ReloaderOptions.Interval.
@@ -153,7 +161,8 @@ func (rl *Reloader) tick() {
 }
 
 // reload validates the changed pair and swaps it in unless it is invalid or a
-// downgrade. On any refusal it keeps the current pair and logs one warning.
+// downgrade. On any refusal it keeps the current pair and logs one warning. On a
+// successful swap it surfaces the validated non-temporal warnings (reload-races-2).
 func (rl *Reloader) reload() {
 	now := rl.now()
 	info, err := validateAt(rl.certPath, rl.keyPath, now)
@@ -161,21 +170,53 @@ func (rl *Reloader) reload() {
 		rl.logf("tls reload: keeping the current certificate; the new pair was rejected: %v", err)
 		return
 	}
-	// No live downgrade (C6): never replace a still-valid serving leaf with a
-	// candidate that is expired or not yet valid.
-	serving := rl.holder.leaf()
-	candidateOutOfWindow := now.After(info.NotAfter) || now.Before(info.NotBefore)
-	if candidateOutOfWindow && serving != nil && withinWindow(serving, now) {
-		rl.logf("tls reload: keeping the current certificate; the new leaf is expired or not yet valid while the serving leaf is still valid")
-		return
+	if reloadTOCTOUHook != nil {
+		reloadTOCTOUHook()
 	}
 	cert, lerr := loadCertificate(rl.certPath, rl.keyPath)
 	if lerr != nil {
 		rl.logf("tls reload: keeping the current certificate; the new pair failed to load: %v", lerr)
 		return
 	}
+	// No live downgrade (C6), evaluated on the leaf we are ABOUT TO SERVE
+	// (cert.Leaf) rather than on the separately-read validateAt bytes: a file
+	// swapped between the validate read and the load read cannot smuggle an
+	// out-of-window leaf past the gate (reload-races-3). loadCertificate's
+	// X509KeyPair also re-confirms the key matches these exact bytes, so the
+	// served pair is always internally consistent.
+	serving := rl.holder.leaf()
+	if candidateOutOfWindow(cert.Leaf, now) && serving != nil && withinWindow(serving, now) {
+		rl.logf("tls reload: keeping the current certificate; the new leaf is expired or not yet valid while the serving leaf is still valid")
+		return
+	}
 	rl.holder.store(cert)
 	rl.onServing(cert.Leaf)
+	// Surface the validated warnings on a successful swap (reload-races-2):
+	// onServing already logs the serving leaf's expiry/days-left line, so drop
+	// the temporal warnings here (de-duplicated against that line) and emit the
+	// rest — notably a chmod-600 notice when a renewal landed a group/world-
+	// readable key (I-T2), which would otherwise be dropped on a hot reload.
+	for _, w := range info.Warnings {
+		if isExpiryWarning(w) {
+			continue
+		}
+		rl.logf("tls reload: %s", w)
+	}
+}
+
+// candidateOutOfWindow reports whether leaf is expired or not yet valid at now.
+// A nil leaf is treated as out of window (there is nothing valid to serve).
+func candidateOutOfWindow(leaf *x509.Certificate, now time.Time) bool {
+	return leaf == nil || now.After(leaf.NotAfter) || now.Before(leaf.NotBefore)
+}
+
+// isExpiryWarning reports whether w is one of Validate's temporal warnings
+// (expired / not yet valid / expiring soon) — they all begin "certificate ".
+// onServing logs the serving leaf's days-left line, so reload() skips these to
+// avoid a duplicate while still surfacing non-temporal warnings (e.g. the
+// chmod-600 key-permission notice, which begins "key file ").
+func isExpiryWarning(w string) bool {
+	return strings.HasPrefix(w, "certificate ")
 }
 
 // onServing writes serving.json for the given leaf and logs the expiry warning
