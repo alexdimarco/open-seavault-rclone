@@ -484,7 +484,16 @@ func OpenWithRecovery(root string, phrase string, opts OpenOptions) (*Vault, str
 	if err != nil {
 		return nil, "", err
 	}
-	keys, entryID, err := cfg.recoveryEntryFor(canonicalRecovery(phrase))
+	// Discriminate a word phrase from a base32 phrase and reduce it to the wrap
+	// secret. A word-shaped phrase that fails strict decode surfaces the typed
+	// word error HERE (design U2 §2.5 / review C1) — before recoveryEntryFor — so a
+	// single mistyped word is reported as such and never routed to base32 stripping
+	// that would surface only the generic wrong-secret error.
+	canon, err := canonicalRecoverySecret(phrase)
+	if err != nil {
+		return nil, "", err
+	}
+	keys, entryID, err := cfg.recoveryEntryFor(canon)
 	if err != nil {
 		return nil, "", err
 	}

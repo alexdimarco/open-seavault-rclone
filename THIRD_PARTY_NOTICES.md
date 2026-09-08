@@ -25,3 +25,32 @@ MIT License (rclone):
 ## rsync (optional managed runtime)
 
 This project can download and run [rsync](https://rsync.samba.org) as an external ingest runtime. rsync is Copyright (C) Wayne Davison and others and is licensed under the GNU General Public License, version 3 or later — the same license as this project (see [LICENSE](LICENSE)). It is not modified by this project; it is executed as a separate program. Its complete corresponding source is available from <https://rsync.samba.org> and <https://github.com/WayneD/rsync>.
+
+## BIP-39 English wordlist (recovery phrases)
+
+`internal/vault/recovery_words.go` vendors the canonical **BIP-39 English wordlist**
+(2048 words) verbatim as the alphabet for word-based recovery phrases. The bytes are
+byte-identical to `bip-0039/english.txt` in the Bitcoin BIPs repository
+(<https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt>); the same list
+ships in the reference implementation at <https://github.com/trezor/python-mnemonic>.
+Provenance is pinned in `recovery_words_test.go` by a SHA-256 of the reconstructed
+list:
+
+    2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda
+
+plus a published BIP-39 golden test vector, so a silent re-vendor that would make
+already-printed recovery cards unredeemable turns the test suite red.
+
+BIP-39 ("Mnemonic code for generating deterministic keys", Marek Palatinus, Pavol
+Rusnak, Aaron Voisine, Sean Bowe) is licensed under the 2-clause BSD license:
+
+> Redistribution and use in source and binary forms, with or without modification,
+> are permitted provided that the following conditions are met: (1) Redistributions
+> of source code must retain the above copyright notice, this list of conditions and
+> the following disclaimer. (2) Redistributions in binary form must reproduce the
+> above copyright notice, this list of conditions and the following disclaimer in the
+> documentation and/or other materials provided with the distribution. THIS SOFTWARE
+> IS PROVIDED "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES ARE DISCLAIMED.
+
+The wordlist is data, not modified, and is used only to encode/decode a recovery
+secret this project already generates; no BIP-39 key-derivation (PBKDF2 seed) is used.
