@@ -71,6 +71,57 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 
 Vendored and bundled third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The GPL does not grant trademark rights: the **open-seavault-rclone** and **Crescendum** names, logos, icons, favicons, wordmarks, and visual identity remain reserved &mdash; see [TRADEMARKS.md](TRADEMARKS.md).
 
+## What changed in v0.21 (authentication rate limiting + lockout, and the polish backlog)
+
+Phase U4 hardens the credential surfaces that Phase U3 made reachable from other devices, and
+clears the accumulated UX polish backlog. A user who does nothing sees no change: the limiter is
+on by default with sensible thresholds, and nothing about how a credential is verified changes.
+
+- **Authentication rate limiting and lockout.** A dependency-free, per-process limiter now stands
+  in front of every credential-checking surface — WebDAV Basic auth, the GUI login form,
+  launch-link redemption, the vault-password open, and recovery-phrase redeem. It is **on by
+  default on every bind, including loopback**, and never weakens verification: a locked key is
+  denied *before* any credential is examined, and unlock happens only by the passage of time. The
+  defaults are 5 consecutive failures in a 15-minute window → a 30 s lock doubling to a 15-minute
+  cap, plus a higher **per-account** ceiling (20) that catches an attacker rotating source
+  addresses against one username. The peer is the TCP source address (an IPv6 peer is keyed by its
+  /64), never a proxy header. WebDAV Basic and the vault open answer `429 Too Many Requests` with
+  `Retry-After` when locked (Basic withholds the `WWW-Authenticate` challenge so native clients
+  stop re-prompting); the GUI login re-renders with a minutes countdown. The **launch link and
+  recovery redeem are throttled but never locked**, so the only bootstrap path and the last-resort
+  recovery path always succeed with the correct secret. Lock lines are logged in plain operator
+  words and never contain a credential. See [SECURITY.md](SECURITY.md) (guarantees I-R1…I-R10 and
+  the residuals) and [docs/tls-and-certificates.md](docs/tls-and-certificates.md).
+- **An emergency off switch.** `--auth-limit off` on `seavault gui` and `seavault serve` (or
+  `auth.limits.enabled=false` in the app config) disables the limiter for an incident. It is never
+  the default and is deliberately loud: a startup warning names the flag, a config-file disable is
+  dated and re-warned about hourly while the server runs, and `seavault tls status` shows
+  `auth limits: OFF since <date>` with the re-enable remedy.
+- **Startup exposure line.** `gui` and `serve` print one line for any non-loopback bind — that
+  decrypted content is served beyond this machine, to prefer a VPN/Tailscale over an open LAN, and
+  the current auth-limit state.
+- **Polish backlog cleared.** The GUI names the first differing word on a recovery read-back
+  (without echoing any phrase material), clears the skipped-setup state on close, and tidies key
+  and rollback wording; the CLI/`tls setup` wizard gets clearer error remedies, a monthly Tailscale
+  renewal cadence, and de-duplicated names; and the docs gain a "which route am I?" decision aid,
+  the `net use` UNC form, per-OS firewall commands, and a phone-reach how-to.
+
+### Migration for scripts (CLI 6)
+
+Following the v0.19 exit-code work, **an unknown subcommand now exits `2`** — the same usage-error
+code an unknown top-level command already returns (it previously exited 1); **a bare group verb still exits `0`**
+(a bare `seavault recovery` prints help and succeeds, unchanged from v0.19). A
+script that guards for a mistyped subcommand should test for a non-zero exit as before; one that
+distinguished exit 1 from exit 2 on a group's subcommand should now expect 2. `app-config` and
+`gui` are not group verbs and are unchanged.
+
+### Recovery phrases: redeem is single-use (DOCS 2)
+
+**Redeem is single-use:** redeeming a recovery phrase consumes that recovery entry (so a leaked
+phrase cannot keep opening the vault). After you redeem, the old phrase no longer works — mint a
+fresh one with `seavault recovery generate` (or the GUI's **Generate recovery key**) and store the
+new card. A vault left with no recovery key is flagged as a persistent reminder when it is opened.
+
 ## What changed in v0.20 (TLS certificates for the GUI and WebDAV)
 
 Phase U3 lets the GUI and WebDAV endpoint serve a CA-trusted certificate so other devices can

@@ -1,6 +1,6 @@
 # Design — Phase U4: rate limiting and lockout for network-exposed auth, and the polish backlog
 
-STATUS: Revision 2 — the 7 conditions of the pre-code review (`docs/review-u4-predesign.md`, GO_WITH_CONDITIONS; 56 judged / 46 refuted / 0 blockers) are applied below and in §8. Ready to build.
+STATUS: BUILT — Revision 2 (the 7 conditions of the pre-code review, `docs/review-u4-predesign.md`, GO_WITH_CONDITIONS; 56 judged / 46 refuted / 0 blockers, applied below and in §8) is fully built. Slice commits: R1 `3b7a3e5` (authlimit core, L1–L4), R2 `bae9f89` (wire every surface + flags/config/startup note; B1/G1/H1/S1/O1/L5/K1/W1/W2/X1), P1 `3877bae` (Track P GUI rows), P2 `7afe263` + `298514c` (Track P CLI/wizard rows, incl. A1-c6), P3 (this commit — Track P docs: SECURITY.md I-R1…I-R10 + residuals, the TLS-guide auth-limit section, the README v0.21 changelog, the extended D1 drift guard `TestU4DocsP3*`, and the final unfiltered `-race` verify + smoke + wiring sweep). The `dca9122` doc commit sanctioned the A1-c6 test-expectation change (Z1). P-DOCS rows A3-c1/A3-c2/A3-c5/A1-c5 were delivered in the U3 F-D tranche (guide sections guarded by `TestTLSDocsDriftD1FixTranche`) and re-anchored for U4 by `TestU4DocsP3DeliveredTLSDocRows`.
 
 ## 1. Goal and scope
 

@@ -213,12 +213,82 @@ mode*, and it carries these guarantees:
 **Residuals.** Turning on network-exposed mode widens the attack surface in two ways
 that this phase does not close:
 
-- Exposure hardening of the authentication endpoints is out of scope:
-  the GUI login and WebDAV Basic auth become network-facing (rate limiting and lockout are a later phase).
-  Firewall the port and prefer a VPN.
+- Exposure hardening of the authentication endpoints. Through v0.20 (Phase U3) this residual read: "the GUI login and WebDAV Basic auth become network-facing (rate limiting and lockout are a later phase)." **v0.21 (Phase U4) closes it** — see [Authentication rate limiting and lockout](#authentication-rate-limiting-and-lockout) below for the guarantees (I-R1…I-R10) and the residuals that remain. Firewall the port and prefer a VPN.
 - Trust-on-first-use is inherent to self-signed certificates:
   clients that accept a self-signed prompt are MITM-able on first connect.
   Use a CA-issued certificate for any cross-device use.
+
+## Authentication rate limiting and lockout
+
+v0.21 (Phase U4) adds a dependency-free, per-process rate limiter and lockout in front
+of every credential-checking surface network-exposed mode reaches — WebDAV **Basic**
+auth, the GUI **login** form, launch-link redemption, the vault-password **open**, and
+recovery-phrase **redeem**. It is **on by default on every bind, including loopback**
+(a misbehaving local client is the most common source of a retry storm), and it never
+touches how a credential is verified — it only bounds how often a wrong one may be
+tried. It carries these guarantees:
+
+- **I-R1** The limiter never weakens authentication: a locked key is denied *before*
+  any credential is examined; unlock happens only by the passage of time; the peer is
+  the TCP remote address, never `X-Forwarded-For` or any other header.
+- **I-R2** No credential, password hash, launch secret, or recovery phrase appears in
+  any limiter log line or any `429` body — the only identifiers held are the surface,
+  the peer IP (or IPv6 /64), the account username, and counters.
+- **I-R3** Memory is bounded by `maxKeys` (default 10 000) with oldest-idle eviction; a
+  spray of 20 000 distinct source addresses leaves at most `maxKeys` entries, and a
+  locked key is never evicted before its lock expires.
+- **I-R4** The limiter is on by default on every bind including loopback; the off
+  switch (`--auth-limit off`, or `auth.limits.enabled=false`) is explicit, logged
+  loudly at startup and re-warned while it runs, and shows in `seavault tls status`.
+- **I-R5** The constant-time WebDAV Basic compare and the argon2id GUI-login
+  verification are unchanged; their pre-U4 behaviour and tests are untouched.
+- **I-R6** `Success` resets only its own key: one client's correct credential never
+  unlocks another peer or another account.
+- **I-R7** Limits are per process and in memory: a restart clears them (a labelled
+  residual below — an attacker who can restart the process already has local control).
+- **I-R8** An IPv6 peer is keyed by its **/64** prefix and every account has a global
+  failure **ceiling** (`accountFailuresBeforeLock`, default 20), so per-attempt source
+  rotation — which any IPv6 host can do within its own /64 — cannot keep an account
+  unprotected.
+- **I-R9** The **launch** and **redeem** surfaces are throttled but never locked: the
+  256-bit launch secret and a high-entropy recovery phrase are the defence, so the
+  correct secret and a correct phrase always succeed immediately after any burst — a
+  fumbled 24-word phrase can never lock the last-resort recovery path.
+- **I-R10** `failuresBeforeLock` is an upper bound on credential verifications per lock
+  cycle even under concurrency: `Check` reserves an in-flight attempt, so N concurrent
+  requests for one key cannot all pass the pre-check and all reach verification (which
+  against `/api/open` would otherwise multiply the 64 MiB-per-attempt KDF cost).
+
+When a key locks, the operator sees one line in plain words — for example
+`auth-limit: locked WebDAV auth for 192.0.2.7 (user "vault") for 2 minutes after 5
+failures; unlocks automatically, or restart with --auth-limit off for an incident` —
+with durations in whole minutes and never a credential. A locked `basic`/`open`
+response carries `Retry-After` (and, for JSON surfaces, `{error, retryAfterSeconds}`);
+the GUI login re-renders its HTML form with a minutes countdown and `Retry-After`.
+
+**Residuals.** These trade-offs remain and are accepted:
+
+- **Per-process reset.** Limits are held per process and in memory, so they **reset on restart**.
+  This is intentional — the limiter is exposure hygiene, not a persistent security boundary.
+- **Shared NAT and /64 sharing.** The peer key is the TCP source address, and an IPv6
+  peer is keyed by **a whole /64**. A **shared NAT**, a household, a hosting tenant, or
+  a misbehaving loopback client can therefore lock legitimate clients that share that
+  key for up to `lockMax`. The lock line names the peer and account, the `Retry-After`
+  header and no-session page tell the caller, and the off switch exists for an incident.
+- **The account-ceiling lever.** The per-account global ceiling (I-R8) protects an
+  account against source rotation, but **the per-account ceiling is itself a lever**:
+  an attacker who knows a username can lock that account for everyone, from rotating
+  sources, for up to `lockMax`. Its higher threshold (20 vs 5) and the `lockMax` cap
+  bound the harm; that is the deliberate trade for closing the rotation bypass.
+- **Distributed attacks are out of scope.** A source rotating across **many** /64s or
+  many IPv4 addresses still meets the account ceiling but is otherwise a
+  **distributed attack**, which a per-process limiter does not defend and which is
+  out of scope for this phase (labelled). Prefer a VPN for any exposed deployment.
+- **Banner coverage.** The GUI's in-page lock banner reports the viewer's own lock
+  state for **only the post-login** surfaces (`open`, `redeem`). The `basic`, `login`,
+  and `launch` surfaces **cannot show a banner** — there is no logged-in page to render
+  it on — so for those the operator learns of a lock from the log line, the
+  `Retry-After` header, and the no-session page.
 
 ## Production work still required
 

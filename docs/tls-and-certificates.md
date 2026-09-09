@@ -452,12 +452,15 @@ network-facing before you do it:
 
 - **What is exposed.** The GUI's launch-link login and the WebDAV **Basic auth**
   credential become reachable from every device that can route to the bind address.
-  Anyone who can reach the port can attempt the login. Rate limiting and account
-  lockout are a later phase — see [SECURITY.md](../SECURITY.md).
+  Anyone who can reach the port can attempt the login. Since v0.21 an
+  [authentication rate limiter and lockout](#authentication-rate-limiting-and-lockout)
+  stands in front of every credential surface — on by default — but a firewall and a
+  VPN remain the primary controls; see [SECURITY.md](../SECURITY.md).
 - **A direct non-loopback bind exposes the login to the whole network segment.**
   Binding to a LAN address or `0.0.0.0` puts the GUI launch-link login and the WebDAV
-  Basic-auth credential in front of **every host that can route to that address**, with
-  no rate limiting and no account lockout (a later phase). Treat a bind to an open LAN,
+  Basic-auth credential in front of **every host that can route to that address**. The
+  built-in rate limiter throttles and locks repeated failures, but it is per-process
+  hygiene, not a substitute for network controls. Treat a bind to an open LAN,
   and especially to `0.0.0.0` (every interface, including docker/libvirt bridges), as
   publishing the login to everything on that network. **Prefer a VPN (Tailscale or
   WireGuard):** it keeps the listener off the untrusted LAN entirely and brings a
@@ -499,6 +502,48 @@ network-facing before you do it:
 
 See the "Network-exposed mode" section of [SECURITY.md](../SECURITY.md) for the exact
 guarantees (I-T1..I-T6) and residuals.
+
+### Authentication rate limiting and lockout
+
+Since v0.21 every credential-checking surface — WebDAV **Basic** auth, the GUI
+**login** form, launch-link redemption, the vault-password **open**, and
+recovery-phrase **redeem** — is behind a per-process rate limiter and lockout. It is
+**on by default on every bind, including loopback**, and never changes how a credential
+is verified; it only bounds how often a wrong one may be tried. The peer is the TCP
+source address (an IPv6 peer is keyed by its /64), never a proxy header. The full
+guarantees (I-R1…I-R10) and residuals are in the
+"[Authentication rate limiting and lockout](../SECURITY.md#authentication-rate-limiting-and-lockout)"
+section of SECURITY.md.
+
+While enabled, the non-loopback startup line and `seavault tls status` read
+`auth limits: on (5 failures → 30s…15m)`. Defaults: 5 consecutive failures within a
+15-minute window lock a peer for 30 s, then doubling to a 15-minute cap; a per-account
+ceiling of 20 catches source-rotating attacks; a 250 ms throttle delays every failed
+attempt. What each surface does when a key is locked:
+
+| Surface | On repeated failures |
+|---|---|
+| WebDAV **Basic** | after the throttle, `401` as before, until the lock — then `429 Too Many Requests` + `Retry-After: <seconds>`, and the `WWW-Authenticate` challenge is withheld so native clients stop re-prompting |
+| GUI **login** | the HTML login form is re-rendered with `429`, a "try again in N minutes" countdown, and a `Retry-After` header |
+| vault **open** (`/api/open`) | `429` with a JSON body `{error, retryAfterSeconds}` and a `Retry-After` header (this also bounds the 64 MiB-per-attempt KDF cost) |
+| launch link, recovery **redeem** | **throttled but never locked**: a wrong guess is delayed by the throttle, then answered as before, and the correct launch secret or recovery phrase always redeems immediately — the last-resort recovery path is never locked out |
+
+**Turning it off (an incident only).** `--auth-limit off` on `seavault gui` and
+`seavault serve`, or `auth.limits.enabled=false` in the app config, disables the
+limiter. It is never the default and is deliberately loud: startup prints a warning
+naming the flag, and because a config-file disable survives restarts, the disable is
+dated (`auth.limits.disabledSince`) and the server **re-warns** about once an hour while
+it runs. `seavault tls status` and the GUI settings page then read
+`auth limits: OFF since <date> — re-enable with --auth-limit on or auth.limits.enabled=true`,
+so a headless daemon left unprotected after an incident cannot hide. Re-enable with
+`--auth-limit on` (or by dropping `auth.limits.enabled=false`), which clears the
+`disabledSince` stamp.
+
+**Tuning.** The knobs live in the app config under `auth.limits`
+(`failuresBeforeLock`, `accountFailuresBeforeLock`, `window`, `lockStart`, `lockMax`,
+`failureDelay`, `maxKeys`); a zero or invalid value falls back to the default, so a
+threshold can never be misconfigured to 0 (which would lock every key on its first
+attempt).
 
 ---
 
