@@ -1,6 +1,6 @@
 # Design — Phase U5: a proper macOS bundle (unsigned tier), installers, and install docs
 
-STATUS: Revision 2 — the 11 conditions of the pre-code review (`docs/review-u5-predesign.md`, GO_WITH_CONDITIONS; 55 judged / 40 refuted / 1 blocker rescued) are applied below and in §9. Ready to build.
+STATUS: BUILT — Revision 2 (the 11 conditions of the pre-code review, `docs/review-u5-predesign.md`, GO_WITH_CONDITIONS; 55 judged / 40 refuted / 1 blocker rescued) is applied below and in §9 and built across three slices. Slice commits: S1 `f5a82e1` (app-side bundle-launch — Finder-launch default M1, grace timeout + 0600 file log sink M2, single-instance relaunch M10), S2 `8c4bd67` + `7f19625` (packaging assets, the release `macos` job and `ci-macos.yml`, `verify-bundle.sh`, and the M8 file-sink smoke lock), and S3 (this slice — docs + finish-the-phase: `docs/install.md`, the README Install and v0.22 changelog sections, `docs/release-checklist.md`, the M7 docs drift guards + M11, and the final verification set). The macOS packaging rows (M3–M6, M8) run on a real `macos-latest` runner via `ci-macos.yml` on the pushed branch; the release-only rows (I-M1 tarball identity, notarization) run in the tagged release job.
 
 ## 1. Goal and scope
 
