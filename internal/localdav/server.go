@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -234,6 +235,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The narrow operator "clear lock" lever (W2-6): POST /api/auth-limits/clear
+	// releases ONE named peer or account while the limiter stays on for everyone
+	// else. It sits AFTER authorizeBasic, so it is reachable only once Basic auth
+	// has passed — from an unlocked peer such as loopback on the host — and it is
+	// refused outright when no Basic credentials are configured, so it can never be
+	// called unauthenticated.
+	if r.URL.Path == "/api/auth-limits/clear" {
+		s.handleAuthLimitClear(w, r)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodOptions:
 		w.Header().Set("Allow", "OPTIONS, PROPFIND, GET, HEAD, PUT, DELETE, MKCOL, MOVE, COPY, LOCK, UNLOCK")
@@ -319,6 +331,10 @@ func (s *Server) authorizeBasic(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "too many failed authentication attempts; retry after the lock expires", http.StatusTooManyRequests)
 		return false
 	}
+	// Defence in depth (concurrency-reservation-2b): guarantee the reservation is
+	// returned even on a panic or an early return that ran neither Fail nor
+	// Success; Release no-ops once one of those has resolved the attempt.
+	defer att.Release()
 	if s.credentialsMatch(r) {
 		att.Success()
 		return true
@@ -335,6 +351,82 @@ func (s *Server) authorizeBasic(w http.ResponseWriter, r *http.Request) bool {
 	w.Header().Set("WWW-Authenticate", `Basic realm="open-seavault-rclone", charset="UTF-8"`)
 	http.Error(w, "authentication required", http.StatusUnauthorized)
 	return false
+}
+
+// authLimitClearRequest is the body of POST /api/auth-limits/clear (W2-6): the
+// operator names exactly ONE of a peer or an account to release. It carries no
+// credential — a peer address or a username, both identifiers.
+type authLimitClearRequest struct {
+	Peer    string `json:"peer,omitempty"`
+	Account string `json:"account,omitempty"`
+}
+
+// handleAuthLimitClear serves the serve-side "clear lock" lever (W2-6): it clears
+// the lock/failure state for ONE named peer or account while leaving the limiter
+// ON for everyone else. It reaches here only after Basic auth passed (ServeHTTP),
+// so it is impossible to call without authentication. It requires the WebDAV
+// credentials to be configured AND the limiter to be running; it returns ONLY
+// what was cleared (surface/peer/account, never a credential) and logs one
+// operator line naming what was cleared and by which peer. The residual — a
+// fully-locked-out lone operator still waits or restarts — is documented in
+// SECURITY.md/§6.
+func (s *Server) handleAuthLimitClear(w http.ResponseWriter, r *http.Request) {
+	if s.Credentials == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.AuthLimiter == nil {
+		http.Error(w, "auth limits are disabled; there is nothing to clear", http.StatusBadRequest)
+		return
+	}
+	var req authLimitClearRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	peer := strings.TrimSpace(req.Peer)
+	account := strings.TrimSpace(req.Account)
+	if (peer == "") == (account == "") {
+		http.Error(w, "clear exactly one of peer or account", http.StatusBadRequest)
+		return
+	}
+	var keys []authlimit.ClearedKey
+	what := ""
+	if peer != "" {
+		keys = s.AuthLimiter.ClearPeer(peer)
+		what = "peer " + peer
+	} else {
+		keys = s.AuthLimiter.ClearAccount(account)
+		what = "account " + account
+	}
+	if s.AuthLogf != nil {
+		s.AuthLogf("auth-limit: cleared %s by %s", what, authlimit.PeerKey(r.RemoteAddr))
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"cleared": clearedKeyStrings(keys)})
+}
+
+// clearedKeyStrings renders cleared buckets as human, credential-free strings for
+// the "clear lock" response body.
+func clearedKeyStrings(keys []authlimit.ClearedKey) []string {
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		who := k.Peer
+		switch {
+		case k.Peer == "" && k.Account != "":
+			who = fmt.Sprintf("account %q (from any source)", k.Account)
+		case k.Account != "":
+			who = fmt.Sprintf("%s (user %q)", k.Peer, k.Account)
+		}
+		out = append(out, fmt.Sprintf("%s for %s", authlimit.SurfaceWords(k.Surface), who))
+	}
+	return out
 }
 
 // retryAfterSeconds converts a lock/throttle duration to a whole-seconds

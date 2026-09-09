@@ -230,7 +230,7 @@ func TestEnsureLoopbackBindGuardTable(t *testing.T) {
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
-			warnings, err := ensureLoopbackBind(r.addr, r.insecureBind, r.m.tlsOn, r.m.selfSigned)
+			warnings, err := ensureLoopbackBind(r.addr, r.insecureBind, r.m.tlsOn, r.m.selfSigned, false)
 			allowed := err == nil
 			if allowed != r.wantAllowed {
 				t.Fatalf("allowed=%v (err=%v), want allowed=%v", allowed, err, r.wantAllowed)
@@ -414,7 +414,7 @@ func TestServeTLSListenerPropfind(t *testing.T) {
 	}
 
 	// The same non-loopback bind without TLS and without the override is refused.
-	if _, err := ensureLoopbackBind("192.168.1.5:8765", false, false, false); err == nil {
+	if _, err := ensureLoopbackBind("192.168.1.5:8765", false, false, false, false); err == nil {
 		t.Fatal("plaintext non-loopback serve without --insecure-bind must be refused")
 	}
 

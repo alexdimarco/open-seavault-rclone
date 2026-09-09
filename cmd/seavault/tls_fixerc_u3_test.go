@@ -73,7 +73,7 @@ func TestBindRefusalLeadsWithTLSRoute(t *testing.T) {
 	}
 	for _, addr := range rows {
 		t.Run(addr, func(t *testing.T) {
-			_, err := ensureLoopbackBind(addr, false, false, false)
+			_, err := ensureLoopbackBind(addr, false, false, false, false)
 			if err == nil {
 				t.Fatalf("a plaintext non-loopback bind %q must be refused", addr)
 			}
@@ -88,6 +88,34 @@ func TestBindRefusalLeadsWithTLSRoute(t *testing.T) {
 			}
 			if tlsIdx > insIdx {
 				t.Fatalf("the refusal must LEAD with the TLS route, not --insecure-bind: %q", msg)
+			}
+		})
+	}
+
+	// polish-behaviour-1 (A3-c4, U4): when a certificate is ALREADY configured but
+	// --tls was omitted, the one-flag fix is --tls, so the refusal must lead with
+	// "pass --tls to serve over the configured certificate" BEFORE the generic
+	// "tls setup" route — otherwise the user who just ran `seavault tls setup` is
+	// told to do it again and never told the flag that works.
+	for _, addr := range []string{"192.168.1.5:8787", "0.0.0.0:8787", ":8787"} {
+		t.Run("cert-configured/"+addr, func(t *testing.T) {
+			_, err := ensureLoopbackBind(addr, false, false, false, true)
+			if err == nil {
+				t.Fatalf("a plaintext non-loopback bind %q with a configured cert must still be refused", addr)
+			}
+			msg := err.Error()
+			tlsFlagIdx := strings.Index(msg, "--tls ")
+			certIdx := strings.Index(msg, "configured certificate")
+			setupIdx := strings.Index(msg, "tls setup")
+			insIdx := strings.Index(msg, "--insecure-bind")
+			if tlsFlagIdx < 0 || certIdx < 0 {
+				t.Fatalf("the refusal must name `--tls` and the configured certificate: %q", msg)
+			}
+			if setupIdx >= 0 && tlsFlagIdx > setupIdx {
+				t.Fatalf("the refusal must LEAD with the --tls remedy before the generic `tls setup` route: %q", msg)
+			}
+			if insIdx < 0 || tlsFlagIdx > insIdx {
+				t.Fatalf("the refusal must still name --insecure-bind, after the --tls remedy: %q", msg)
 			}
 		})
 	}

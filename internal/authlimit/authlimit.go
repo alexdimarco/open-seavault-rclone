@@ -351,6 +351,95 @@ func (l *Limiter) release(k Key) {
 	}
 }
 
+// SelfState reports the CALLER'S OWN current lock state on a surface WITHOUT
+// reserving an attempt (unlike Check, which increments pending): it is the
+// read-only query the per-viewer GUI banner polls (§2.2 / wiring-2). It consults
+// only the caller's peer-keyed buckets — {surface, peer, ""} and, when
+// account != "", {surface, peer, account} — NEVER another peer's key and NEVER
+// the shared per-account ceiling {surface, "", account}, so one viewer can never
+// learn another peer's lock state. It creates no map entry (a poll must not grow
+// the map, and a locked key an attacker never touched must not be conjured) and
+// returns whether the caller is currently locked on this surface and the longest
+// remaining lock time. It holds and reveals no credential (I-R2).
+func (l *Limiter) SelfState(surface Surface, remoteAddr, account string) (locked bool, retryAfter time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.clock()
+	peer := PeerKey(remoteAddr)
+	keys := []Key{{Surface: surface, Peer: peer}}
+	if account != "" {
+		keys = append(keys, Key{Surface: surface, Peer: peer, Account: account})
+	}
+	for _, k := range keys {
+		st, ok := l.keys[k]
+		if !ok {
+			continue // no bucket for this key: not locked, and do not create one
+		}
+		l.refreshLocked(k, st, now)
+		if !st.lockedUntil.IsZero() && now.Before(st.lockedUntil) {
+			if ra := st.lockedUntil.Sub(now); ra > retryAfter {
+				retryAfter = ra
+				locked = true
+			}
+		}
+	}
+	return locked, retryAfter
+}
+
+// ClearedKey is a redacted description of one bucket an operator unlock removed —
+// the surface, the peer, and the account only. It carries NO credential, so a
+// "clear lock" response and its operator log line can name exactly what was freed
+// without leaking anything (I-R2).
+type ClearedKey struct {
+	Surface Surface
+	Peer    string
+	Account string
+}
+
+// ClearPeer removes every bucket keyed to ONE peer (across all surfaces and
+// accounts), so an operator can free one known-good source while every other peer
+// and every per-account ceiling stays locked — the narrow self-unlock lever
+// (friction W2-6) that keeps the limiter ON for everyone else. peer is
+// PeerKey-normalized first, so the operator may paste either a raw address or the
+// /64 form the lock line prints. It returns the cleared buckets
+// (surface/peer/account only) and never a credential; a peer with no buckets
+// clears nothing and returns nil.
+func (l *Limiter) ClearPeer(peer string) []ClearedKey {
+	norm := PeerKey(peer)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.clearMatchingLocked(func(k Key) bool { return k.Peer == norm })
+}
+
+// ClearAccount removes every bucket keyed to ONE account — the per-account
+// ceiling {surface,"",account} and every {surface,peer,account} — so an operator
+// can free a locked-out account without disarming the limiter for everyone else
+// (friction W2-6). It returns the cleared buckets and never a credential; an
+// empty account, or one with no buckets, clears nothing.
+func (l *Limiter) ClearAccount(account string) []ClearedKey {
+	if account == "" {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.clearMatchingLocked(func(k Key) bool { return k.Account == account })
+}
+
+// clearMatchingLocked deletes every bucket for which match reports true and
+// returns their redacted descriptions. The caller holds mu.
+func (l *Limiter) clearMatchingLocked(match func(Key) bool) []ClearedKey {
+	var cleared []ClearedKey
+	for k := range l.keys {
+		if match(k) {
+			cleared = append(cleared, ClearedKey{Surface: k.Surface, Peer: k.Peer, Account: k.Account})
+		}
+	}
+	for _, c := range cleared {
+		delete(l.keys, Key{Surface: c.Surface, Peer: c.Peer, Account: c.Account})
+	}
+	return cleared
+}
+
 // Attempt bundles one authentication attempt across the three keys the design
 // consults per request (§2.1): {surface, peer, ""} (the peer bucket),
 // {surface, peer, account} (this peer against this account), and

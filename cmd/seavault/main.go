@@ -230,14 +230,28 @@ func setupFailureLines(res setup.Result) []string {
 }
 
 // annotateSetupError names the remedy for a typed setup error that the
-// non-interactive --preset path would otherwise surface bare (ADM-5). A
-// leftovers directory (a non-empty target with no vault.json, from an
-// interrupted setup) gets the "remove it or choose a different --vault" remedy
-// the interactive flow offers as a prompt. Any other error is returned
-// unchanged.
+// non-interactive --preset path would otherwise surface bare (ADM-5). --preset
+// takes the `--vault` flag, so the leftovers remedy names it.
 func annotateSetupError(err error) error {
+	return annotateLeftovers(err, "--vault")
+}
+
+// annotateInitLeftovers is annotateSetupError for `init`, which takes a positional
+// VAULT_DIR rather than a --vault flag: the remedy must name the real argument so
+// it is actionable (polish-behaviour-2 / W3-3 — the shared helper must not tell an
+// `init` user to pass a `--vault` flag `init` does not have).
+func annotateInitLeftovers(err error) error {
+	return annotateLeftovers(err, "VAULT_DIR")
+}
+
+// annotateLeftovers gives a leftovers directory (a non-empty target with no
+// vault.json, from an interrupted setup) the "remove it or choose a different
+// <target>" remedy the interactive flow offers as a prompt, parameterized by how
+// the calling command names its vault-directory argument. Any other error is
+// returned unchanged.
+func annotateLeftovers(err error, targetName string) error {
 	if errors.Is(err, setup.ErrVaultDirLeftovers) {
-		return fmt.Errorf("%w — remove that directory and re-run, or choose a different --vault", err)
+		return fmt.Errorf("%w — remove that directory and re-run, or choose a different %s", err, targetName)
 	}
 	return err
 }
@@ -598,7 +612,9 @@ func cmdInit(args []string) error {
 	// case is intercepted here; an EXISTING vault and an empty/absent directory
 	// fall through to the create path exactly as before.
 	if verr := (setup.Plan{VaultDir: vaultPath, Cloud: setup.LocalOnly{}}).Validate(); errors.Is(verr, setup.ErrVaultDirLeftovers) {
-		return annotateSetupError(verr)
+		// init takes a positional VAULT_DIR, not a --vault flag; name the real
+		// argument so the remedy is actionable (polish-behaviour-2 / W3-3).
+		return annotateInitLeftovers(verr)
 	}
 	params := vault.ChunkParams{MinSize: *min, AvgSize: *avg, MaxSize: *max}
 	var kdfCfg vault.KDFConfig
@@ -1351,7 +1367,13 @@ func isEveryInterface(host string) bool {
 // ::, [::]). Without TLS it is refused exactly as before unless insecureBind
 // overrides. Plaintext therefore never reaches a non-loopback address without
 // the explicit override (I-T1); the guard relaxes only for a TLS listener.
-func ensureLoopbackBind(addr string, insecureBind, tlsOn, selfSigned bool) ([]string, error) {
+//
+// certConfigured says a certificate is already configured but the operator did
+// not pass --tls (A3-c4 / polish-behaviour-1): the one-flag fix is to add --tls,
+// so the plaintext refusal leads with that before the generic "set up TLS first"
+// route — otherwise a user who just ran `seavault tls setup` is told to do it
+// again and is never told the flag that would work.
+func ensureLoopbackBind(addr string, insecureBind, tlsOn, selfSigned, certConfigured bool) ([]string, error) {
 	host := hostOf(addr)
 	if isLoopbackOrLocalhost(host) {
 		return nil, nil
@@ -1369,10 +1391,26 @@ func ensureLoopbackBind(addr string, insecureBind, tlsOn, selfSigned bool) ([]st
 	if insecureBind {
 		return nil, nil
 	}
+	// A certificate is configured but --tls was omitted: lead with the one-flag
+	// remedy before the generic route (A3-c4 / polish-behaviour-1).
+	if certConfigured {
+		return nil, fmt.Errorf("refusing to bind %q: a certificate is already configured — pass --tls to serve over the configured certificate. Otherwise set up TLS first: run `seavault tls setup` (or pass --tls-cert/--tls-key). As a last resort, pass --insecure-bind to serve plaintext on this address (not recommended)", addr)
+	}
 	if isEveryInterface(host) {
 		return nil, fmt.Errorf("refusing to bind %q: an unspecified host listens on every interface and would expose DECRYPTED content. To reach other devices, set up TLS first: run `seavault tls setup` (or pass --tls-cert/--tls-key), then bind a specific address. As a last resort, pass --insecure-bind to serve plaintext (not recommended)", addr)
 	}
 	return nil, fmt.Errorf("refusing to bind %q: %q is not a loopback address, and this endpoint serves DECRYPTED content. To reach other devices, set up TLS first: run `seavault tls setup` (or pass --tls-cert/--tls-key). As a last resort, pass --insecure-bind to serve plaintext on this address (not recommended)", addr, host)
+}
+
+// certConfiguredFor reports whether an actual certificate pair is configured that
+// `--tls` would serve over (the shared tls.* section or the legacy gui.* pair),
+// independent of whether TLS was activated for this run. It never triggers the
+// self-signed floor's generation (configuredPair is side-effect-free), and the
+// self-signed floor is deliberately NOT counted: serve has no self-signed floor
+// (resolveServeTLS), so there is no configured cert for --tls to serve there.
+func certConfiguredFor(cfg appconfig.Config) bool {
+	_, _, source := configuredPair(cfg)
+	return source == tlsconfig.SourceConfig || source == tlsconfig.SourceLegacyGUI
 }
 
 // repeatableString collects a repeatable string flag (e.g. --allow-host NAME).
@@ -1812,7 +1850,29 @@ func startAuthLimit(cfg *appconfig.Config, flagVal, purpose string) (lim *authli
 			FailureDelay:              parseAuthDur(limits.FailureDelay),
 			MaxKeys:                   limits.MaxKeys,
 		}
-		return authlimit.New(policy, authLimitClock), limits.StatusLine(), stop, nil
+		// Render the status line from the EFFECTIVE (on) state, never the raw
+		// persisted config: when --auth-limit on overrides a persisted
+		// enabled=false + disabledSince, the limiter IS running, so every readout
+		// (the startup exposure line, /api/status, `tls status`, the settings page)
+		// must read "auth limits: on (…)", not the stale "OFF since <date>"
+		// (leakage-copy-1 / friction W3-5). And PERSIST the re-enable — set
+		// enabled=true, clear disabledSince, and save — so a later FLAGLESS restart
+		// (a systemd unit that just runs `seavault serve`) comes back protected, as
+		// the docs promise `--auth-limit on` does (C7 / friction W2-3/W4-2). Persist
+		// only when the persisted config actually disabled it, so a normal
+		// on-by-default start writes nothing.
+		effective := limits
+		on := true
+		effective.Enabled = &on
+		effective.DisabledSince = ""
+		if !cfg.Auth.Limits.IsEnabled() || strings.TrimSpace(cfg.Auth.Limits.DisabledSince) != "" {
+			cfg.Auth.Limits.Enabled = &on
+			cfg.Auth.Limits.DisabledSince = ""
+			if saveErr := appconfig.Save(*cfg); saveErr != nil {
+				authLimitLogf("auth-limit: could not persist the re-enabled state: %v", saveErr)
+			}
+		}
+		return authlimit.New(policy, authLimitClock), effective.StatusLine(), stop, nil
 	}
 
 	// Disabled: build the effective (possibly dated) view for the status line.
@@ -1886,6 +1946,28 @@ func maybePrintExposureLine(addr, statusLine string) {
 	authLimitLogf("serving DECRYPTED content beyond this machine; prefer a VPN/Tailscale over an open LAN; %s", statusLine)
 }
 
+// defaultServeUser is the WebDAV Basic-auth username `serve` uses when --user is
+// blank. It is public knowledge, so on a network-exposed bind it removes the
+// "attacker must know a username" precondition on the per-account lockout lever
+// (lockout-dos-2): anyone can drive the {basic,"",seavault} account ceiling.
+const defaultServeUser = "seavault"
+
+// maybeWarnDefaultServeUser warns, at startup, when `serve` binds a non-loopback
+// address with the DEFAULT WebDAV username (lockout-dos-2, code half). Naming a
+// non-default username with --user removes the precondition an attacker needs to
+// aim the per-account ceiling at the owner's account from rotating sources. It is
+// silent on a loopback bind (the account lever is not reachable off-box) and when
+// the operator already chose a non-default --user. It names no credential.
+func maybeWarnDefaultServeUser(addr, user string) {
+	if isLoopbackOrLocalhost(hostOf(addr)) {
+		return
+	}
+	if user != defaultServeUser {
+		return
+	}
+	authLimitLogf("WARNING: serving beyond this machine with the DEFAULT WebDAV username %q; an attacker who assumes that public default can drive the per-account lockout against you from rotating sources — restart with --user NAME using a non-default username to remove that precondition", defaultServeUser)
+}
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", "127.0.0.1:8765", "local address for the WebDAV-compatible endpoint")
@@ -1923,7 +2005,7 @@ func cmdServe(args []string) error {
 	}
 	tlsOn := resolved != nil && resolved.Source != tlsconfig.SourceNone
 	selfSigned := resolved != nil && resolved.SelfSigned
-	warnings, err := ensureLoopbackBind(*addr, *insecureBind, tlsOn, selfSigned)
+	warnings, err := ensureLoopbackBind(*addr, *insecureBind, tlsOn, selfSigned, certConfiguredFor(cfg))
 	if err != nil {
 		return err
 	}
@@ -1959,6 +2041,7 @@ func cmdServe(args []string) error {
 	fmt.Printf("serving local WebDAV-compatible vault at %s://%s/\n", scheme, *addr)
 	fmt.Println("bind is local by default; do not expose this listener on an untrusted network")
 	maybePrintExposureLine(*addr, authStatusLine)
+	maybeWarnDefaultServeUser(*addr, credUser)
 	logTLSStartup(os.Stdout, "serve", resolved, dav.AllowedHosts)
 	if printCredentials {
 		fmt.Printf("WebDAV credentials: %s / %s\n", credUser, credPassword)
@@ -2126,7 +2209,10 @@ func cmdGUI(args []string) error {
 		return err
 	}
 	tlsOn := resolved.Source != tlsconfig.SourceNone
-	warnings, err := ensureLoopbackBind(*addr, *insecureBind, tlsOn, resolved.SelfSigned)
+	// gui auto-activates a configured cert (tlsOn is already true then), so
+	// certConfigured only matters for the refusal path when no cert exists; pass
+	// the real state for consistency with serve (polish-behaviour-1).
+	warnings, err := ensureLoopbackBind(*addr, *insecureBind, tlsOn, resolved.SelfSigned, certConfiguredFor(cfg))
 	if err != nil {
 		return err
 	}

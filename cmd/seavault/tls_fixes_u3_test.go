@@ -56,7 +56,7 @@ func TestEnsureLoopbackBindEveryInterfaceAdvisory(t *testing.T) {
 		t.Run(r.name, func(t *testing.T) {
 			// tlsOn, CA (not self-signed): admitted, and the every-interface
 			// advisory must be present.
-			warnings, err := ensureLoopbackBind(r.addr, false, true, false)
+			warnings, err := ensureLoopbackBind(r.addr, false, true, false, false)
 			if err != nil {
 				t.Fatalf("a TLS bind to %q must be admitted: %v", r.addr, err)
 			}
@@ -67,7 +67,7 @@ func TestEnsureLoopbackBindEveryInterfaceAdvisory(t *testing.T) {
 	}
 
 	// A concrete LAN IP must not over-fire the advisory.
-	w, err := ensureLoopbackBind("192.168.1.5:8787", false, true, false)
+	w, err := ensureLoopbackBind("192.168.1.5:8787", false, true, false, false)
 	if err != nil {
 		t.Fatalf("a TLS bind to a LAN IP must be admitted: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestEnsureLoopbackBindEveryInterfaceAdvisory(t *testing.T) {
 	}
 
 	// Without TLS, an unspecified bind is still refused (I-T1 unchanged).
-	if _, err := ensureLoopbackBind("0.0.0.0:8787", false, false, false); err == nil {
+	if _, err := ensureLoopbackBind("0.0.0.0:8787", false, false, false, false); err == nil {
 		t.Fatal("plaintext 0.0.0.0 without --insecure-bind must be refused")
 	}
 }
