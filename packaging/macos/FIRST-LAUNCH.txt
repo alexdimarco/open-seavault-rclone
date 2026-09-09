@@ -3,17 +3,29 @@ open-seavault-rclone — first launch on macOS
 This build is not yet signed with an Apple Developer ID, so macOS will refuse to
 open it the first time. Two ways to allow it, once:
 
-  1. macOS 13 Ventura, 14 Sonoma, 15 Sequoia:
+  1. macOS 13 Ventura and later (including macOS 26 Tahoe):
      open the app once (it will be blocked), then open
      System Settings -> Privacy & Security, scroll to Security, click
      "Open Anyway" next to open-seavault-rclone, and confirm with Touch ID or
-     your password.
+     your password. On macOS 15 Sequoia and later, macOS shows one more
+     confirmation dialog right after that — click "Open Anyway" (or "Open") in it
+     to finish.
 
-  2. Any version, in Terminal:
+  2. Any version, in Terminal (drag the app into /Applications first — this
+     command targets it there):
      xattr -dr com.apple.quarantine /Applications/open-seavault-rclone.app
 
+If you double-click "Install command-line tool.command" from the DMG and macOS
+blocks it too, Control-click it -> Open -> Open to run it that once.
+
 On macOS 11-12 only, Control-click the app -> Open -> Open also works. For the
-installer package: Control-click the .pkg -> Open (all versions).
+installer package: Control-click the .pkg -> Open (all versions). An app installed
+from the .pkg usually carries no quarantine flag, so it often opens with no
+first-launch prompt at all.
+
+Once it opens, the interface is your web browser: there is no separate window and
+no Dock icon (the app runs as a macOS agent), and it quits on its own when you
+close the browser tab.
 
 Signed and notarized builds will remove this step once an Apple Developer ID is
 in place. This artifact's exact signing state is recorded in SIGNING.txt.

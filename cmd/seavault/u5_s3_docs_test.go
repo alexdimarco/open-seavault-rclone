@@ -169,6 +169,11 @@ func TestInstallDocUninstallIsPrecise(t *testing.T) {
 		{"forget the PKG receipt", "sudo pkgutil --forget io.github.alexdimarco.open-seavault-rclone"},
 		{"delete the app-data directory", "Library/Application Support/open-seavault-rclone"},
 		{"states vaults are untouched", "vaults"},
+		// friction B/C4: `pkill -f open-seavault-rclone` misses a Terminal-started
+		// `seavault gui` (argv0 = seavault), so the quit guidance must name that
+		// case and its recourse (Ctrl-C in that Terminal).
+		{"names a Terminal-started gui (friction B/C4)", "seavault gui"},
+		{"stops a Terminal-started gui with Ctrl-C (friction B/C4)", "Ctrl-C"},
 	}
 	for _, r := range rows {
 		if !strings.Contains(install, r.substr) {
@@ -291,5 +296,19 @@ func TestInstallDocNewTerminalAndPathNotes(t *testing.T) {
 	// The doc must show the concrete PATH-fix command (the same one the script echoes).
 	if !strings.Contains(install, `export PATH="/usr/local/bin:$PATH"`) {
 		t.Error("docs/install.md must show the concrete `export PATH=\"/usr/local/bin:$PATH\"` fix (M11)")
+	}
+
+	// friction B/C3: the PATH guidance must cover BOTH the zsh default (~/.zprofile)
+	// AND a bash login shell (~/.bash_profile) — the old copy named only ~/.zprofile,
+	// silently wrong for bash — and be idempotent (grep before append) so running it
+	// twice adds nothing.
+	for _, want := range []struct{ name, substr string }{
+		{"the zsh profile (~/.zprofile)", "~/.zprofile"},
+		{"the bash login profile (~/.bash_profile)", "~/.bash_profile"},
+		{"an idempotent grep-before-append guard", `grep -qxF 'export PATH="/usr/local/bin:$PATH"'`},
+	} {
+		if !strings.Contains(install, want.substr) {
+			t.Errorf("docs/install.md PATH guidance must cover %s (%q) (friction B/C3)", want.name, want.substr)
+		}
 	}
 }

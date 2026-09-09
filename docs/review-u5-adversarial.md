@@ -66,3 +66,28 @@ lock token but never authenticates the RESPONDER. Merged into `relaunch-lock-log
 
 **Tranche 5 — CI coverage completeness (low).**
 (8) `release-ci-secrets-2` — idempotent prepend. (9) `release-ci-secrets-3` — add the two internal dirs to the ci-macos paths filter.
+
+## Fix-tranche addendum (post-review)
+
+The confirmed findings were fixed in a three-fixer tranche on `feature/u5-macos-bundle`.
+Each maps to the commit that carries its fix and its regression test:
+
+| id | sev | fix commit | what landed |
+|----|-----|-----------|-------------|
+| relaunch-lock-log-1 | high | F-A `c98b020` | responder HMAC auth over the launchURL verified before openBrowser; loopback/port/scheme validation; SIGINT/SIGTERM RemoveLock; stale-lock removal after a failed relaunch (regression tests `internal/bundlelaunch/relaunch_auth_test.go`, `internal/webui/relaunch_mac_u5_test.go`) |
+| relaunch-silent-1 | medium | F-A `c98b020` | the bind-fail path writes its exit reason to the 0600 `gui.log` sink before returning the error (I-M8), and posts a user notification |
+| release-ci-secrets-1 | high | F-B `e319546` | the Gatekeeper gate is an ANCHORED per-tag table-row grep (`^\|…tag…\|`) moved into the `release` job BEFORE `gh release create`; the `v0.0.0-EXAMPLE` row deleted (u5_fix_b/u5_s3_docs guards) |
+| installer-scripts-1 | medium | F-B `e319546` | golden symlink uses `ln -sfn` with a `readlink` verify; the `.command`/postinstall no longer dereference a pre-planted symlink-to-dir |
+| installer-scripts-2 | medium | F-B `e319546` | `verify-bundle.sh` now `cmp`s the DMG `.command` byte-for-byte against the golden, matching the PKG-postinstall coverage |
+| release-ci-secrets-4 | medium | F-B `e319546` | `have_devid` accounts for the Installer cert; the PKG is notarized only when productsigned, so an app-cert-only config no longer aborts the release |
+| release-ci-secrets-2 | medium | F-B `e319546` | the release-body first-launch prepend is idempotent (guards on the body already beginning with the note); a macos re-run no longer doubles it |
+| installer-scripts-3 | low | F-B `e319546` | the FIRST-LAUNCH note is tier-gated off `have_devid` (`FIRST-LAUNCH-SIGNED.txt` on the Developer-ID path) so SIGNING.txt, the note, and the Release body agree |
+| release-ci-secrets-3 | low | F-B `e319546` | `internal/bundlelaunch/**` and `internal/webui/**` added to the `ci-macos.yml` paths filter so the M8 smoke's inputs trigger it |
+
+The refuted finding (`stale-lock-signal-1`) stays refuted: its enabling precondition is
+folded into `relaunch-lock-log-1`, whose fix also installs the SIGINT/SIGTERM cleanup, so
+the documented quit no longer leaves a stale lock.
+
+**Post-tranche verdict:** all 9 confirmed findings fixed, each red-first with a permanent
+regression test; the unfiltered `go test -race -count=1 ./...` suite is green on Linux and
+the `ci-macos.yml` run on the pushed branch is green. No finding deferred.

@@ -112,11 +112,16 @@ running changes, and Terminal use is unchanged.
   same artifact names either way. Each artifact records its exact signing state inside it
   (`SIGNING.txt`); the unsigned state is declared in the docs and in the GitHub Release body,
   never implied by a filename.
+- **Version stamped from the release tag.** `seavault version` and the bundle's `Info.plist` both
+  report the git tag the release was cut from: the workflow injects it at link time
+  (`-ldflags "-X main.version=&hellip;"`), so there is no separately hand-maintained version
+  constant to drift out of step with the tag, the artifact names, or these notes. A locally built
+  binary keeps a `-dev` version so it is never mistaken for a release.
 - **Install docs, front and center.** New [docs/install.md](docs/install.md) leads with the
-  one-time macOS "Open Anyway" / `xattr` unlock written for macOS 13&ndash;15 (with the `xattr`
-  command as a version-independent fallback and Control-click &rarr; Open kept only for macOS
-  11&ndash;12), then the CLI, what launching does, where data and the log live, a precise
-  uninstall, and the Linux and Windows steps (including the Windows SmartScreen note). A
+  one-time macOS "Open Anyway" / `xattr` unlock written for macOS 13 Ventura and later (with the
+  `xattr` command as a version-independent fallback, and Control-click &rarr; Open kept only for
+  the older macOS 11&ndash;12), then the CLI, what launching does, where data and the log live, a
+  precise uninstall, and the Linux and Windows steps (including the Windows SmartScreen note). A
   per-release manual Gatekeeper sign-off
   ([packaging/macos/GATEKEEPER-CHECK.md](packaging/macos/GATEKEEPER-CHECK.md), enforced by the
   release job and recorded in the [release checklist](docs/release-checklist.md)) keeps the

@@ -1,6 +1,8 @@
 # Design — Phase U5: a proper macOS bundle (unsigned tier), installers, and install docs
 
-STATUS: BUILT — Revision 2 (the 11 conditions of the pre-code review, `docs/review-u5-predesign.md`, GO_WITH_CONDITIONS; 55 judged / 40 refuted / 1 blocker rescued) is applied below and in §9 and built across three slices. Slice commits: S1 `f5a82e1` (app-side bundle-launch — Finder-launch default M1, grace timeout + 0600 file log sink M2, single-instance relaunch M10), S2 `8c4bd67` + `7f19625` (packaging assets, the release `macos` job and `ci-macos.yml`, `verify-bundle.sh`, and the M8 file-sink smoke lock), and S3 (this slice — docs + finish-the-phase: `docs/install.md`, the README Install and v0.22 changelog sections, `docs/release-checklist.md`, the M7 docs drift guards + M11, and the final verification set). The macOS packaging rows (M3–M6, M8) run on a real `macos-latest` runner via `ci-macos.yml` on the pushed branch; the release-only rows (I-M1 tarball identity, notarization) run in the tagged release job.
+STATUS: BUILT + REVIEWED + FIX-TRANCHE — Revision 2 (the 11 conditions of the pre-code review, `docs/review-u5-predesign.md`, GO_WITH_CONDITIONS; 55 judged / 40 refuted / 1 blocker rescued) is applied below and in §9 and built across three slices. Slice commits: S1 `f5a82e1` (app-side bundle-launch — Finder-launch default M1, grace timeout + 0600 file log sink M2, single-instance relaunch M10), S2 `8c4bd67` + `7f19625` (packaging assets, the release `macos` job and `ci-macos.yml`, `verify-bundle.sh`, and the M8 file-sink smoke lock), and S3 `ed04264` (docs + finish-the-phase: `docs/install.md`, the README Install and v0.22 changelog sections, `docs/release-checklist.md`, the M7 docs drift guards + M11, and the final verification set). The macOS packaging rows (M3–M6, M8) run on a real `macos-latest` runner via `ci-macos.yml` on the pushed branch; the release-only rows (I-M1 tarball identity, notarization) run in the tagged release job.
+
+The BUILT phase was then reviewed and fixed. The filed reviews are `docs/review-u5-adversarial.md` (9 confirmed / 1 refuted) and `docs/review-u5-friction.md` (Type II 11 / Type III 37, verdict SHIPPABLE_WITH_BACKLOG); their confirmed findings and Type II/III rows were fixed in a three-fixer tranche: **F-A `c98b020`** (relaunch responder HMAC auth + URL validation + SIGINT/SIGTERM lock cleanup, bundle bind-fail exit-logging, launch/grace notifications, linker version), **F-B `e319546`** (anchored per-tag Gatekeeper gate moved before publish, fail-closed/all-or-nothing signing, tier-gated FIRST-LAUNCH note, idempotent release-body prepend, `ln -sfn` + guarded installer, DMG `.command` byte-compare, `-X main.version` injection, ci-macos paths), and **F-C** (this docs + final commit: the open-ended FIRST-LAUNCH/GATEKEEPER/install wording, the M7 drift guard, `docs/release-checklist.md`, README, and the per-finding fix→commit addenda at the foot of both review files). Each finding maps to its fix commit in those addenda.
 
 ## 1. Goal and scope
 
@@ -136,13 +138,23 @@ verbatim (drift-guarded):
 
 > **This build is not yet signed with an Apple Developer ID, so macOS will refuse to open it the
 > first time.** Two ways to allow it, once:
-> 1. **macOS 13 Ventura, 14 Sonoma, 15 Sequoia:** open the app once (it will be blocked), then
->    open **System Settings → Privacy & Security**, scroll to *Security*, click **Open Anyway**
->    next to open-seavault-rclone, and confirm with Touch ID or your password.
-> 2. **Any version, in Terminal:** `xattr -dr com.apple.quarantine /Applications/open-seavault-rclone.app`
+> 1. **macOS 13 Ventura and later (including macOS 26 Tahoe):** open the app once (it will be
+>    blocked), then open **System Settings → Privacy & Security**, scroll to *Security*, click
+>    **Open Anyway** next to open-seavault-rclone, and confirm with Touch ID or your password. On
+>    macOS 15 Sequoia and later, click through the extra confirmation dialog that follows.
+> 2. **Any version, in Terminal (drag the app into /Applications first):**
+>    `xattr -dr com.apple.quarantine /Applications/open-seavault-rclone.app`
 >
-> On macOS 11–12 only, Control-click the app → Open → Open also works. For the installer package:
-> Control-click the .pkg → Open (all versions).
+> If the DMG's `Install command-line tool.command` is itself blocked, Control-click it → Open. On
+> macOS 11–12 only, Control-click the app → Open → Open also works. For the installer package:
+> Control-click the .pkg → Open (all versions) — though a `.pkg`-installed app usually carries no
+> quarantine and opens with no prompt. Once open, the interface is the browser (no Dock icon, an
+> agent) and the app quits when the page closes.
+
+The header is **open-ended by version floor, never a closed enumeration** (durability condition
+C1; friction A/C2): "macOS 13 Ventura and later" does not go stale when a new major ships, as the
+frozen "…, 15 Sequoia" list did the day macOS 26 Tahoe shipped. The M7 drift guard asserts the
+open-ended phrasing (and forbids the old frozen list), not a version name.
 
 Then the command-line tool (the `.command` or the PKG; open a new Terminal; `PATH` note), what
 launching does (the browser opens; there is no Dock icon; the app quits when the page closes or
@@ -180,9 +192,11 @@ place.
 - **I-M8** On a bundle launch the launch URL and every exit reason are written to a real file
   sink under the app-data dir, not only to a stdout LaunchServices discards (C7).
 - **Conditional (labeled, C2):** Gatekeeper behaviour is Apple's and version-dependent. The
-  workaround text names two version-keyed GUI flows — System Settings → Privacy & Security →
-  Open Anyway (macOS 13–15) and Control-click → Open (macOS 11–12) — plus the version-independent
-  `xattr` command. A headless runner cannot exercise the GUI dialog, so the per-release check of
+  workaround text names two GUI flows by an OPEN-ENDED version floor — System Settings → Privacy
+  & Security → Open Anyway (macOS 13 Ventura and later, the current path) and Control-click → Open
+  (only the older macOS 11–12) — plus the version-independent `xattr` command. The version floor is
+  never a closed enumeration (C1/friction A/C2), so it does not go stale when a new macOS major
+  ships. A headless runner cannot exercise the GUI dialog, so the per-release check of
   the workaround against the current macOS is a **manual gate**: a dated human sign-off recorded
   in `packaging/macos/GATEKEEPER-CHECK.md` before each tag.
 
@@ -218,8 +232,8 @@ green on a macOS runner (a pushed branch build), not only that the YAML parses.
 
 | Cond | Applied as |
 |---|---|
-| C1 | §5 workaround rewritten for macOS 13–15 (Privacy & Security → Open Anyway) with `xattr` co-primary and Control-click → Open demoted to 11–12; one source file `packaging/macos/FIRST-LAUNCH.txt` propagated everywhere |
-| C2 | §6 conditional names the version-keyed flows + the version-independent command; the per-release Gatekeeper check is a manual, dated sign-off in `GATEKEEPER-CHECK.md`; M7 asserts the Open Anyway/xattr text and the sign-off's presence |
+| C1 | §5 workaround rewritten with an OPEN-ENDED version floor (macOS 13 Ventura and later, Privacy & Security → Open Anyway) with `xattr` co-primary and Control-click → Open demoted to the older 11–12; one source file `packaging/macos/FIRST-LAUNCH.txt` propagated everywhere. The fix tranche (friction A/C2) made the header open-ended after the frozen "…, 15 Sequoia" list shipped already two majors behind macOS 26 Tahoe |
+| C2 | §6 conditional names the flows by an open-ended version floor + the version-independent command; the per-release Gatekeeper check is a manual, dated sign-off in `GATEKEEPER-CHECK.md`; M7 asserts the open-ended phrasing (forbidding the old frozen list), the Open Anyway/xattr text, and the sign-off's presence |
 | C3 | §4 the release body carries the first-launch note; I-M5; M9 |
 | C4 | §3 scripts `mkdir -p /usr/local/bin` then symlink; I-M4 relaxed accordingly; PATH/new-Terminal notes; M5 runs with the dir removed; M11 |
 | C5 | §4 `ci-macos.yml` concurrency cancel-in-progress, 30-min timeout, path scoping, bounded retries; M12 |

@@ -160,3 +160,37 @@ session-less relaunch endpoint, and the I-M6 exit-on-page-close are all asserted
 green (runs 34388861436, 34391651537). The unsigned-state Gatekeeper wall itself is
 the accepted Type I of this phase; the xattr path 2 keeps first launch self-service
 independent of macOS version.
+
+## Fix-tranche addendum (post-review)
+
+The 11 Type II items and the Type III rows they anchor were fixed in a three-fixer
+tranche on `feature/u5-macos-bundle`. Each Type II maps to the commit that carries its
+fix; the Type III rows fixed alongside them are listed with their owner.
+
+| # | Type II item | fix commit | what landed |
+|---|--------------|-----------|-------------|
+| 1 | A/C2, C/C2 — FIRST-LAUNCH version list frozen at "15 Sequoia" | F-C (docs+final) | path 1 is now the open-ended "macOS 13 Ventura and later (including macOS 26 Tahoe)"; the M7 drift guard asserts the open-ended phrasing and forbids the old frozen enumeration, instead of matching the literal "Sequoia" |
+| 2 | A/C3 — grace-exit emits no user-visible signal | F-A `c98b020` | a macOS user notification carrying the launch URL is posted on grace-exit with zero sessions |
+| 3 | A/C3 — no running-state/stop surface | F-A `c98b020` | launch notification + an in-tab "closing this tab quits the app" hint (`internal/webui/quit_hint_u5_test.go`) |
+| 4 | B/C1 — install-cli.sh symlinks unconditionally, false success | F-B `e319546` | `[ -x "$BIN" ]` guard before the symlink; a run before the app is in place now fails loudly |
+| 5 | B/C1 — the `.command` is itself quarantined, undocumented | F-C (docs+final) | FIRST-LAUNCH.txt and install.md now document "if macOS blocks the .command, Control-click it → Open" |
+| 6 | B/C5, C/C2 — spoofable substring sign-off grep | F-B `e319546` | anchored table-row grep; example row deleted (release-ci-secrets-1) |
+| 7 | C/C2 — gate fires after `gh release create` | F-B `e319546` | the grep moved into the `release` job before publish; release-checklist.md (F-C) now states the before-publish timing |
+| 8 | C/C1 — partial signing secrets fail open silently | F-B `e319546` | all-or-nothing assertion: some-but-not-all signing secrets fail rather than degrade to unsigned |
+| 9 | C/C3 — SIGNING.txt not single-sourced | F-B `e319546` | build-bundle.sh's default is the single source; only the DevID path overrides |
+| 10 | C/C4, C/C6 — binary version 0.21.0 out of step with v0.22 | F-A `c98b020` + F-B `e319546` (code), F-C (docs) | `var version` injected via `-ldflags -X main.version=${tag#v}`; release-checklist.md names the mechanism and the file, README's v0.22 note states the release version comes from the tag |
+| 11 | C/C6 — "bump the version" names no file | F-C (docs+final) | release-checklist step 2 names `cmd/seavault/main.go`'s `var version` and the linker-flag injection, and drops the hand-edit instruction |
+
+Type III rows fixed by F-C alongside the above: the Sequoia-and-later second confirmation
+dialog and the "app must already be in /Applications" xattr note (A/C2); quit-on-close and
+the no-Dock-icon fact stated in FIRST-LAUNCH.txt (A/C5); the PATH notes now cover zsh
+(`~/.zprofile`) and bash (`~/.bash_profile`) and are idempotent (grep before append) (B/C3);
+the uninstall quit guidance distinguishes the bundle agent from a Terminal-started `seavault
+gui` (Ctrl-C) (B/C4); and the shared FIRST-LAUNCH note now says a `.pkg`-installed app usually
+carries no quarantine (A/C6). The GATEKEEPER-CHECK.md sign-off row format is documented in
+prose with an example (`vX.Y.Z`, indented) that structurally cannot satisfy the anchored gate.
+
+**Post-tranche verdict:** SHIPPABLE — the backlog Type II items are cleared, the golden path
+is unchanged and still completes, and no control was weakened. The Gatekeeper GUI dialog and
+the real LaunchServices relaunch remain a per-release human sign-off (`GATEKEEPER-CHECK.md`),
+still unperformed for any real tag by construction.

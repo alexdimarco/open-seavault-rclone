@@ -29,17 +29,29 @@ open-seavault-rclone — first launch on macOS
 This build is not yet signed with an Apple Developer ID, so macOS will refuse to
 open it the first time. Two ways to allow it, once:
 
-  1. macOS 13 Ventura, 14 Sonoma, 15 Sequoia:
+  1. macOS 13 Ventura and later (including macOS 26 Tahoe):
      open the app once (it will be blocked), then open
      System Settings -> Privacy & Security, scroll to Security, click
      "Open Anyway" next to open-seavault-rclone, and confirm with Touch ID or
-     your password.
+     your password. On macOS 15 Sequoia and later, macOS shows one more
+     confirmation dialog right after that — click "Open Anyway" (or "Open") in it
+     to finish.
 
-  2. Any version, in Terminal:
+  2. Any version, in Terminal (drag the app into /Applications first — this
+     command targets it there):
      xattr -dr com.apple.quarantine /Applications/open-seavault-rclone.app
 
+If you double-click "Install command-line tool.command" from the DMG and macOS
+blocks it too, Control-click it -> Open -> Open to run it that once.
+
 On macOS 11-12 only, Control-click the app -> Open -> Open also works. For the
-installer package: Control-click the .pkg -> Open (all versions).
+installer package: Control-click the .pkg -> Open (all versions). An app installed
+from the .pkg usually carries no quarantine flag, so it often opens with no
+first-launch prompt at all.
+
+Once it opens, the interface is your web browser: there is no separate window and
+no Dock icon (the app runs as a macOS agent), and it quits on its own when you
+close the browser tab.
 
 Signed and notarized builds will remove this step once an Apple Developer ID is
 in place. This artifact's exact signing state is recorded in SIGNING.txt.
@@ -54,17 +66,30 @@ scripting and the full CLI. Two ways to install it:
   your password once (in Terminal, through `sudo`) and symlinks
   `/usr/local/bin/seavault` to the binary inside the app. It creates `/usr/local/bin`
   if it is missing (a fresh Apple-silicon Mac has no such directory) and does nothing
-  else — no network, no other writes.
+  else — no network, no other writes. The `.command` is unsigned like the app, so
+  macOS may block it on first run too; if it does, **Control-click it → Open → Open**
+  to run it that once.
 - **From the PKG:** download `open-seavault-rclone_vX.Y.Z_macos_universal.pkg` and run
   it. It installs the app into `/Applications` and its `postinstall` makes the same
-  `/usr/local/bin/seavault` symlink for you.
+  `/usr/local/bin/seavault` symlink for you. An app installed this way usually carries
+  no quarantine flag, so it typically opens without the first-launch step above.
 
 **Open a new Terminal window afterward** so the shell picks up the new command — a
-Terminal that was already open will not see it. If `seavault` is still not found,
-`/usr/local/bin` is not on your `PATH`; add it and open a new Terminal again:
+Terminal that was already open will not see it (a stale Terminal is the usual reason
+`seavault` seems missing). On the rare setup where `/usr/local/bin` is genuinely not
+on your `PATH`, add it to your login shell's profile and open a new Terminal again.
+Use the file for your shell — `~/.zprofile` for **zsh** (the macOS default) or
+`~/.bash_profile` for **bash**. These are idempotent (they check before appending, so
+running them twice adds nothing):
 
 ```sh
-echo 'export PATH="/usr/local/bin:$PATH"' >> ~/.zprofile
+# zsh (macOS default):
+grep -qxF 'export PATH="/usr/local/bin:$PATH"' ~/.zprofile 2>/dev/null || \
+  echo 'export PATH="/usr/local/bin:$PATH"' >> ~/.zprofile
+
+# bash login shell (if that is your shell instead):
+grep -qxF 'export PATH="/usr/local/bin:$PATH"' ~/.bash_profile 2>/dev/null || \
+  echo 'export PATH="/usr/local/bin:$PATH"' >> ~/.bash_profile
 ```
 
 Confirm the install with `seavault version`.
@@ -93,12 +118,17 @@ re-opens the tab for the instance already running.
 
 Reverse the install in order. Your vaults are untouched by every step below.
 
-1. **Quit the running app first.** It has no Dock icon, so quit it in **Activity Monitor**
-   (search for `open-seavault-rclone` and stop it) or in Terminal:
+1. **Quit the running app first.** A bundle launch (double-click) runs as an agent with
+   no Dock icon, so quit it in **Activity Monitor** (search for `open-seavault-rclone`
+   and stop it) or in Terminal:
 
    ```sh
    pkill -f open-seavault-rclone
    ```
+
+   That matches the bundle agent. If instead you started the GUI yourself in a Terminal
+   with `seavault gui`, its process is named `seavault` (not `open-seavault-rclone`), so
+   `pkill` above will not catch it — press **Ctrl-C** in that Terminal to stop it.
 
 2. **Remove the CLI symlink.** It is root-owned when the PKG or the `.command`
    created it, so use `sudo`:

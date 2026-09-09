@@ -315,29 +315,49 @@ func TestReleaseWorkflowMacosJob(t *testing.T) {
 	}
 }
 
-// TestFirstLaunchTextIsCurrentMacOS (M9 support, design §5, C1/C2): the single
-// FIRST-LAUNCH source names the path that works on the shipping macOS first
-// (Privacy & Security → Open Anyway), keeps xattr as a co-primary reliable path,
-// demotes Control-click → Open to a macOS 11–12 note, and covers the .pkg. Every
-// row asserts so the copy can never silently regress to the pre-15 dead path.
+// TestFirstLaunchTextIsCurrentMacOS (M9 support, design §5, C1/C2; friction A/C2,
+// B/C1, A/C5, A/C6): the single FIRST-LAUNCH source names the path that works on
+// the shipping macOS first (Privacy & Security → Open Anyway) with an OPEN-ENDED
+// version floor ("macOS 13 Ventura and later"), never a closed enumeration that
+// silently goes stale — the fix for friction A/C2, where the frozen "…, 15 Sequoia"
+// list stopped two majors short of the shipping macOS 26 Tahoe. It keeps xattr as a
+// co-primary reliable path (and says the app must already be in /Applications),
+// demotes Control-click → Open to a macOS 11–12 note, covers the .pkg (and that a
+// PKG install usually carries no quarantine, A/C6), names the Sequoia-and-later
+// second confirmation dialog, tells the user the blocked-.command recourse (B/C1),
+// and states the quit-on-close / no-Dock-icon facts (A/C5). Every row asserts so
+// the copy can never silently regress to the pre-15 dead path or re-freeze the list.
 func TestFirstLaunchTextIsCurrentMacOS(t *testing.T) {
 	txt := s2Read(t, "packaging", "macos", "FIRST-LAUNCH.txt")
 
 	rows := []struct{ name, substr string }{
 		{"declares the unsigned state plainly", "not yet signed with an Apple Developer ID"},
-		{"names System Settings → Privacy & Security (macOS 13-15)", "Privacy & Security"},
+		{"names System Settings → Privacy & Security (macOS 13+)", "Privacy & Security"},
 		{"the Open Anyway control", "Open Anyway"},
 		{"the version-independent xattr command (co-primary)", "xattr -dr com.apple.quarantine"},
 		{"the app path in the xattr command", "/Applications/open-seavault-rclone.app"},
 		{"Control-click demoted to a macOS 11-12 note", "11"},
 		{"Control-click wording present but scoped to 11-12", "Control-click"},
 		{"covers the installer package", ".pkg"},
-		{"names the current macOS releases", "Sequoia"},
+		{"an OPEN-ENDED version floor, not a frozen enumeration (friction A/C2)", "Ventura and later"},
+		{"names the Sequoia-and-later second confirmation dialog (friction A/C2 III)", "Sequoia and later"},
+		{"tells the user the xattr command targets the app in /Applications (friction A/C2 III)", "into /Applications first"},
+		{"documents the blocked-.command recourse (friction B/C1)", `"Install command-line tool.command"`},
+		{"notes a PKG install usually carries no quarantine (friction A/C6)", "no quarantine flag"},
+		{"states the no-Dock-icon fact (friction A/C5)", "no Dock icon"},
+		{"states the quit-on-close fact (friction A/C5)", "quits on its own when you"},
 	}
 	for _, r := range rows {
 		if !strings.Contains(txt, r.substr) {
 			t.Errorf("FIRST-LAUNCH.txt must %s (%q)", r.name, r.substr)
 		}
+	}
+
+	// friction A/C2: the primary "Open Anyway" path must NOT re-freeze into a closed
+	// version list. The old copy read "macOS 13 Ventura, 14 Sonoma, 15 Sequoia:",
+	// stale the day it shipped; that exact enumeration must never come back.
+	if strings.Contains(txt, "14 Sonoma, 15 Sequoia") {
+		t.Error("FIRST-LAUNCH.txt path 1 must be open-ended (\"macOS 13 Ventura and later\"), not the frozen \"13 Ventura, 14 Sonoma, 15 Sequoia\" enumeration that stops short of the shipping macOS (friction A/C2)")
 	}
 
 	// The dead pre-15 instruction must not be presented as the PRIMARY path: the
