@@ -427,6 +427,19 @@ func TestB1BasicAuthLockoutThroughServe(t *testing.T) {
 	if res.header.Get("WWW-Authenticate") != "" {
 		t.Fatalf("429 must NOT carry WWW-Authenticate (the client would keep re-prompting)")
 	}
+	// friction W1-1/W1-4: the human wait rides the BODY too (a client that hides the
+	// Retry-After header still learns the number), and it STATES the same "when" as
+	// the header — the 30-second first lock reads "30 seconds", never a rounded-up
+	// "1 minute" that would contradict Retry-After: 30.
+	if ra := res.header.Get("Retry-After"); ra != "30" {
+		t.Fatalf("first Basic lock Retry-After = %q, want \"30\" (LockStart default 30s)", ra)
+	}
+	if !strings.Contains(res.body, "30 seconds") {
+		t.Fatalf("Basic 429 body must carry the human wait \"30 seconds\" (matching Retry-After: 30); got %q", res.body)
+	}
+	if strings.Contains(res.body, "minute") {
+		t.Fatalf("Basic 429 body must not round a 30s lock up to minutes (contradicts Retry-After: 30); got %q", res.body)
+	}
 
 	// Correct credentials WHILE LOCKED are still denied (the lock precedes the
 	// compare).
@@ -547,16 +560,22 @@ func TestG1GUISurfaces(t *testing.T) {
 				t.Fatalf("wrong login %d: re-render must show the invalid-credentials message", i)
 			}
 		}
-		// Sixth: locked → 429 re-render with the minutes countdown and Retry-After.
+		// Sixth: locked → 429 re-render with an HONEST countdown and Retry-After.
+		// friction W1-2: the 30-second first lock reads "30 seconds", the same "when"
+		// the Retry-After header carries — never a rounded-up "1 minute" a retry at
+		// t=31s would disprove.
 		res := postForm(t, client, loginURL, url.Values{"username": {guiUser}, "password": {"wrong-6"}})
 		if res.status != http.StatusTooManyRequests {
 			t.Fatalf("sixth login: status %d, want 429", res.status)
 		}
-		if res.header.Get("Retry-After") == "" {
-			t.Fatalf("locked login re-render must carry Retry-After")
+		if ra := res.header.Get("Retry-After"); ra != "30" {
+			t.Fatalf("locked login re-render Retry-After = %q, want \"30\" (LockStart default 30s)", ra)
 		}
-		if !strings.Contains(res.body, "minute") {
-			t.Fatalf("locked login re-render must show a minutes countdown; body:\n%s", res.body)
+		if !strings.Contains(res.body, "30 seconds") {
+			t.Fatalf("locked login re-render must show the honest countdown \"30 seconds\" (matching Retry-After: 30); body:\n%s", res.body)
+		}
+		if strings.Contains(res.body, "minute") {
+			t.Fatalf("locked login re-render must not round a 30s lock up to minutes (contradicts Retry-After: 30); body:\n%s", res.body)
 		}
 		// Correct credentials while locked are still denied.
 		res = postForm(t, client, loginURL, url.Values{"username": {guiUser}, "password": {guiPass}})
@@ -637,6 +656,15 @@ func TestG1GUISurfaces(t *testing.T) {
 		}
 		if _, ok := body["retryAfterSeconds"]; !ok {
 			t.Fatalf("429 open JSON must carry retryAfterSeconds; got %s", res.body)
+		}
+		// friction W1-2/W1-3 (uniformity): the open 429 states the same "when" as the
+		// header and the Basic body — "30 seconds" for the 30s first lock, never a
+		// rounded-up "1 minute". retryAfterSeconds and the error phrase agree.
+		if secs, ok := body["retryAfterSeconds"].(float64); !ok || int(secs) != 30 {
+			t.Fatalf("429 open retryAfterSeconds = %v, want 30 (LockStart default 30s); body %s", body["retryAfterSeconds"], res.body)
+		}
+		if errStr, _ := body["error"].(string); !strings.Contains(errStr, "30 seconds") || strings.Contains(errStr, "minute") {
+			t.Fatalf("429 open error must read \"30 seconds\" and not round up to minutes; got %q", errStr)
 		}
 		// After the clock advances past the lock, the correct password opens (200).
 		clk.advance(31 * time.Second)

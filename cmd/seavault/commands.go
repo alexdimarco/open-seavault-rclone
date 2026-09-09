@@ -85,6 +85,11 @@ func run(argv []string) int {
 	}
 	row, ok := topLevelCommand(name)
 	if !ok {
+		// Name the unrecognized verb before the usage wall (friction W3-1), so a
+		// mistyped top-level command reads like an unknown SUBCOMMAND does
+		// (dispatchGroup prints "error: unknown … subcommand …") instead of leaving
+		// the operator to guess which token was rejected. Same exit code (2).
+		fmt.Fprintf(os.Stderr, "error: unknown command %q; run \"seavault --help\"\n", name)
 		usage()
 		return 2
 	}

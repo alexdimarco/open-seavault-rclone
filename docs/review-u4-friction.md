@@ -156,3 +156,72 @@ number. Bump it in the release commit.
 4. **[Type II] A narrow "clear lock for <peer\|account>" operator lever** or trusted-peer allowlist (W2-6), so the owner can release their own network without disarming globally.
 5. **[Type III · cross-cutting] Bump `const version` to 0.21.0** (W4-1 / W4-4) so the binary agrees with SECURITY.md / README / TLS guide.
 6. Remaining Type III: sub-minute lock durations in seconds and collapse the duplicate lock line; human wait in the WebDAV `429` body; live locked-peer readout in `tls status`/GUI; `--auth-limit`/`--tls*` in curated `--help`; unknown-top-level "unknown command" line; registry usage on flag-parse errors; concrete flag summaries for `get/list/remove/stats`; per-entry-point leftovers remedy (`VAULT_DIR` vs `--vault`); doc notes (account-ceiling interaction, `/64` sharing, plain-restart recovery, three-recoveries residual, GUI-login-row caveat, `qrencode`, migration-note group-verb wording, `tls` in the enumerated list).
+
+---
+
+## Addendum — fix tranche (post-review), branch `feature/u4-polish-ratelimit`
+
+The four backlog Type II items and the assigned Type III rows are fixed, red-first,
+across three file-disjoint fixers: **F-A `cb3e590`** (limiter core), **F-B `38c1b40`**
+(wiring + levers + banner), **F-C** (this commit — docs + UX copy + final verify). No
+gate was weakened; sanctioned pre-U3/U4 test edits are recorded in
+`cmd/seavault/testdata/accepted-test-edits.txt`. The design's §9 carries the full map.
+
+**Type II (backlog) — all resolved:**
+
+1. **`--auth-limit on` persistence + status defect (W2-3 / W3-5 / W4-2).** F-B `38c1b40`:
+   the enabled branch renders every readout from an effective "on" state **and persists**
+   `enabled=true` + clears `disabledSince`, so a flagless restart stays protected (C7). The
+   TLS guide and docstring now describe the persist-and-effective behaviour truthfully
+   (F-C).
+2. **Per-viewer GUI lock banner (W1-3).** F-B `38c1b40`: session-gated
+   `GET /api/auth-limits/self` feeds a banner that counts down from `retryAfterSeconds` and
+   disables Open until it clears.
+3. **Bind refusal names `--tls` when a cert is configured (W3-4).** F-B `38c1b40`:
+   `certConfigured` threaded into `ensureLoopbackBind`; the refusal now leads with "pass
+   `--tls`".
+4. **Narrow clear-lock lever (W2-6).** F-B `38c1b40`: `POST /api/auth-limits/clear`
+   (`{peer}`/`{account}`; GUI session+CSRF, `serve` Basic auth) releases one peer/account
+   while limits stay on for everyone else. SECURITY.md/TLS-guide enumerate the three
+   recoveries (wait / restart / clear-lock) and the lone-locked-out-remote residual (F-C).
+
+**Type III rows fixed in this tranche (owner in parentheses):**
+
+- **W1-1 / W1-4 (F-C):** the WebDAV Basic `429` **body** now carries the human wait
+  ("try again in 30 seconds"), and the "when" is stated uniformly — one exported
+  `authlimit.DurationPhrase` drives the operator line, both `429` bodies, and the login
+  countdown.
+- **W1-2 (F-C):** the login re-render and the `open` `429` render a sub-minute lock in
+  seconds ("30 seconds"), agreeing with `Retry-After: 30`; no rounded-up "1 minute".
+- **W1-1 lock-line rounding / W1-2 (F-A `cb3e590`):** `LockLine` sub-minute honesty.
+- **W1-5 / W4-6 (F-B `38c1b40`):** `--auth-limit on|off` listed in `serve`/`gui --help`.
+- **W1-6 (F-C):** the fumbled-redeem (vault decrypt error + `retryAfterSeconds` throttle
+  hint) and wrong-launch (styled no-session page + throttle note) messages documented in
+  the TLS guide.
+- **W2-1 / W2-4 (F-C):** what a household member sees on the shared peer key, and the
+  `/64` "one household, one bucket" meaning, in plain words (SECURITY.md + TLS guide).
+- **W2-5 (F-C):** documented that `tls status`/settings show policy + enabled state while
+  `GET /api/auth-limits/self` shows the viewer's own lock.
+- **W3-1 (F-C):** an unknown top-level command now prints `error: unknown command "<x>"`
+  before the usage wall (code); the bad-flag path is documented (README).
+- **W3-3 (F-B `38c1b40`):** `init` leftovers remedy names `VAULT_DIR`.
+- **W3-6 (F-C):** `tls` added to the enumerated group-verb list.
+- **W4-1 / W4-4 (F-C):** `const version` bumped to `0.21.0`, so the binary agrees with the
+  docs; SECURITY.md/README state a five-failure burst emits **two** lock lines for one
+  incident.
+- **W4-2 (F-C):** the per-surface "GUI login" row is caveated (present only when a GUI
+  password is set); the re-enable semantics documented as persisted + effective.
+
+**Still backlog (not this tranche):** the remaining Type III cosmetics not owned by the
+assigned findings — a live locked-peer readout in `tls status`/GUI (W2-1/W2-5); collapsing
+the duplicate peer-only lock line (W4-1) — kept documented as two-lines-per-incident
+rather than suppressed; concrete flag summaries for `get/list/remove/stats` (W3-1);
+routing `flag.Parse` errors through the registry usage renderer (W3-1); the `qrencode`
+third-party/live-secret note (W4-3); the migration-note "app-config/gui are groups"
+re-word (W4-4). None drives a cell to `no` or makes a golden path high-friction.
+
+**Post-tranche verdict:** the four Type II backlog items and every assigned Type III row
+are resolved; both golden paths remain low-friction and protected by default. Unfiltered
+`go test -race -count=1 ./...` green; `gofmt`/`vet`/`build` clean; both cross-builds clean;
+`scripts/smoke-test.sh` green against a fresh build. **Friction verdict: SHIPPABLE (backlog
+cleared to residual cosmetics).**

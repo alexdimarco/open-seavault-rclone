@@ -86,12 +86,15 @@ on by default with sensible thresholds, and nothing about how a credential is ve
   cap, plus a higher **per-account** ceiling (20) that catches an attacker rotating source
   addresses against one username. The peer is the TCP source address (an IPv6 peer is keyed by its
   /64), never a proxy header. WebDAV Basic and the vault open answer `429 Too Many Requests` with
-  `Retry-After` when locked (Basic withholds the `WWW-Authenticate` challenge so native clients
-  stop re-prompting); the GUI login re-renders with a minutes countdown. The **launch link and
-  recovery redeem are throttled but never locked**, so the only bootstrap path and the last-resort
-  recovery path always succeed with the correct secret. Lock lines are logged in plain operator
-  words and never contain a credential. See [SECURITY.md](SECURITY.md) (guarantees I-R1…I-R10 and
-  the residuals) and [docs/tls-and-certificates.md](docs/tls-and-certificates.md).
+  `Retry-After` — and the same human wait in the response body — when locked (Basic withholds the
+  `WWW-Authenticate` challenge so native clients stop re-prompting); the GUI login re-renders with
+  an honest countdown (seconds when the lock is under a minute, so it agrees with `Retry-After`).
+  The **launch link and recovery redeem are throttled but never locked**, so the only bootstrap
+  path and the last-resort recovery path always succeed with the correct secret. Lock lines are
+  logged in plain operator words and never contain a credential (a five-failure burst logs **two**
+  lines — the per-peer key and the peer+account key — for one incident). See
+  [SECURITY.md](SECURITY.md) (guarantees I-R1…I-R10 and the residuals) and
+  [docs/tls-and-certificates.md](docs/tls-and-certificates.md).
 - **An emergency off switch.** `--auth-limit off` on `seavault gui` and `seavault serve` (or
   `auth.limits.enabled=false` in the app config) disables the limiter for an incident. It is never
   the default and is deliberately loud: a startup warning names the flag, a config-file disable is
@@ -100,6 +103,16 @@ on by default with sensible thresholds, and nothing about how a credential is ve
 - **Startup exposure line.** `gui` and `serve` print one line for any non-loopback bind — that
   decrypted content is served beyond this machine, to prefer a VPN/Tailscale over an open LAN, and
   the current auth-limit state.
+- **Operator levers and a default-username warning.** A logged-in GUI viewer sees their **own**
+  lock state with a live countdown (Open is disabled until it clears), fed by a session-gated
+  `GET /api/auth-limits/self`. `serve` and `gui` expose a narrow **clear-lock** action
+  (`POST /api/auth-limits/clear` with a `{peer}` or `{account}`) that frees one peer or account
+  while the limiter stays on for everyone else, so an owner can release their own network without
+  the fleet-wide off switch. Because the per-account ceiling is a lockout lever and the default
+  `serve --user` is the public `seavault`, `serve` now **warns at startup** when it binds a
+  non-loopback address with that default — **pass a non-default `--user NAME` for an exposed
+  serve** (SECURITY.md explains why the ceiling lock is effectively indefinite under sustained
+  re-triggering).
 - **Polish backlog cleared.** The GUI names the first differing word on a recovery read-back
   (without echoing any phrase material), clears the skipped-setup state on close, and tidies key
   and rollback wording; the CLI/`tls setup` wizard gets clearer error remedies, a monthly Tailscale
@@ -114,6 +127,14 @@ code an unknown top-level command already returns (it previously exited 1); **a 
 script that guards for a mistyped subcommand should test for a non-zero exit as before; one that
 distinguished exit 1 from exit 2 on a group's subcommand should now expect 2. `app-config` and
 `gui` are not group verbs and are unchanged.
+
+An **unknown top-level command** now also names the rejected verb before the usage wall —
+`error: unknown command "<x>"; run "seavault --help"` on stderr, exit `2` — matching the
+`error: unknown … subcommand …` line an unknown subcommand already prints, so a typo tells you
+*which* token was wrong instead of only dumping usage. The **bad-flag path** (an unknown or
+malformed flag, e.g. `seavault gui --nope`) exits `2` and prints that command's flag usage; note
+it is currently the Go standard single-dash `-flag` listing, not the curated double-dash `--help`
+layout — guard on the exit code, not on the usage text.
 
 ### Recovery phrases: redeem is single-use (DOCS 2)
 
@@ -189,7 +210,8 @@ the recovery read-back ceremony, the strict rollback gate, or the config-tamper/
   restructure moves markup only.
 - **`--help` that teaches, and an exit-code change.** Every subcommand has a one-line synopsis and a
   double-dash usage line, and the group verbs — `password`, `recovery`, `vault`, `keychain`,
-  `rclone`, `rsync`, `remote`, `ssh-key`, and `profile` — list their subcommands. An explicit
+  `rclone`, `rsync`, `remote`, `ssh-key`, `tls` (added in v0.20), and `profile` — list their
+  subcommands. An explicit
   `--help` or a bare invocation of one of those group verbs now **exits 0** (it used to exit
   non-zero); an **unknown** subcommand still exits non-zero, and an unknown top-level command exits
   2, so error-guarding scripts detect typos. **If a script relied on a bare group verb's old

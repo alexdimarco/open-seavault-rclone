@@ -1355,23 +1355,13 @@ func authRetryAfterSeconds(d time.Duration) int {
 	return secs
 }
 
-// minutesCountdown renders d as whole minutes (rounded up, floored at one) for
-// an operator/end-user countdown, so a lock re-render never says "0 minutes".
-func minutesCountdown(d time.Duration) string {
-	m := int((d + time.Minute - 1) / time.Minute)
-	if m < 1 {
-		m = 1
-	}
-	if m == 1 {
-		return "1 minute"
-	}
-	return fmt.Sprintf("%d minutes", m)
-}
-
 // renderLoginLocked answers a locked GUI-login attempt (C6): it re-renders the
-// login template with a minutes countdown, a 429 status, and a Retry-After
+// login template with an honest countdown, a 429 status, and a Retry-After
 // header, so the browser shows why and for how long, and never with any
-// credential material.
+// credential material. The countdown uses authlimit.DurationPhrase — the same
+// source as the operator lock line and the Retry-After header — so a 30-second
+// first lock reads "30 seconds" instead of a rounded-up, contradictory "1 minute"
+// (friction W1-2).
 func (s *Server) renderLoginLocked(w http.ResponseWriter, r *http.Request, retryAfter time.Duration) {
 	if !s.guiAuthEnabled() {
 		http.Redirect(w, r, "/", http.StatusFound)
@@ -1381,7 +1371,7 @@ func (s *Server) renderLoginLocked(w http.ResponseWriter, r *http.Request, retry
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Retry-After", fmt.Sprintf("%d", authRetryAfterSeconds(retryAfter)))
 	w.WriteHeader(http.StatusTooManyRequests)
-	msg := fmt.Sprintf("Too many failed login attempts; try again in %s.", minutesCountdown(retryAfter))
+	msg := fmt.Sprintf("Too many failed login attempts; try again in %s.", authlimit.DurationPhrase(retryAfter))
 	_ = loginPage.Execute(w, struct{ Message string }{Message: msg})
 }
 
@@ -1895,7 +1885,7 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 			secs := authRetryAfterSeconds(retryAfter)
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", secs))
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"error":             fmt.Sprintf("too many failed open attempts; try again in %s", minutesCountdown(retryAfter)),
+				"error":             fmt.Sprintf("too many failed open attempts; try again in %s", authlimit.DurationPhrase(retryAfter)),
 				"retryAfterSeconds": secs,
 			})
 			return

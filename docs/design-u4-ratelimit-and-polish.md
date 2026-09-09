@@ -1,6 +1,6 @@
 # Design — Phase U4: rate limiting and lockout for network-exposed auth, and the polish backlog
 
-STATUS: BUILT — Revision 2 (the 7 conditions of the pre-code review, `docs/review-u4-predesign.md`, GO_WITH_CONDITIONS; 56 judged / 46 refuted / 0 blockers, applied below and in §8) is fully built. Slice commits: R1 `3b7a3e5` (authlimit core, L1–L4), R2 `bae9f89` (wire every surface + flags/config/startup note; B1/G1/H1/S1/O1/L5/K1/W1/W2/X1), P1 `3877bae` (Track P GUI rows), P2 `7afe263` + `298514c` (Track P CLI/wizard rows, incl. A1-c6), P3 (this commit — Track P docs: SECURITY.md I-R1…I-R10 + residuals, the TLS-guide auth-limit section, the README v0.21 changelog, the extended D1 drift guard `TestU4DocsP3*`, and the final unfiltered `-race` verify + smoke + wiring sweep). The `dca9122` doc commit sanctioned the A1-c6 test-expectation change (Z1). P-DOCS rows A3-c1/A3-c2/A3-c5/A1-c5 were delivered in the U3 F-D tranche (guide sections guarded by `TestTLSDocsDriftD1FixTranche`) and re-anchored for U4 by `TestU4DocsP3DeliveredTLSDocRows`.
+STATUS: BUILT + REVIEWED + FIX TRANCHE — Revision 2 (the 7 conditions of the pre-code review, `docs/review-u4-predesign.md`, GO_WITH_CONDITIONS; 56 judged / 46 refuted / 0 blockers, applied below and in §8) is fully built, independently reviewed (adversarial `docs/review-u4-adversarial.md`, 13 confirmed / 3 refuted; friction `docs/review-u4-friction.md`, SHIPPABLE_WITH_BACKLOG), and the confirmed findings are fixed in a three-fixer tranche (§9). Slice commits: R1 `3b7a3e5` (authlimit core, L1–L4), R2 `bae9f89` (wire every surface + flags/config/startup note; B1/G1/H1/S1/O1/L5/K1/W1/W2/X1), P1 `3877bae` (Track P GUI rows), P2 `7afe263` + `298514c` (Track P CLI/wizard rows, incl. A1-c6), P3 `c574a39` (Track P docs: SECURITY.md I-R1…I-R10 + residuals, the TLS-guide auth-limit section, the README v0.21 changelog, the extended D1 drift guard `TestU4DocsP3*`). **Fix-tranche commits:** F-A `cb3e590` (limiter-core: lockout-dos-1 hard key ceiling, concurrency-reservation-1/2, off-switch-config-2, peer-spoofing-2 pkg half, wiring-3, lockout-dos-5), F-B `38c1b40` (wiring + levers + banner: leakage-copy-1/C7 persist, polish-behaviour-1 `--tls` bind hint, wiring-1, wiring-2 banner + no-session throttle + self endpoint, W2-6 clear-lock lever, lockout-dos-2 default-username warning, polish-behaviour-2), and F-C (this commit — docs + final verification: lockout-dos-2 docs, W2-6/W4-1/W4-2/W2-1/W2-4/W2-5/W1-6 docs, W1-1/W1-2/W1-4 honest 429-body/countdown, W3-1 unknown-command line + docs, W3-6, the v0.21 `const version` bump, the review addenda, this STATUS, and the §9 fix-tranche map + extended D1 guard). The `dca9122` doc commit sanctioned the A1-c6 test-expectation change (Z1). P-DOCS rows A3-c1/A3-c2/A3-c5/A1-c5 were delivered in the U3 F-D tranche (guide sections guarded by `TestTLSDocsDriftD1FixTranche`) and re-anchored for U4 by `TestU4DocsP3DeliveredTLSDocRows`.
 
 ## 1. Goal and scope
 
@@ -134,8 +134,12 @@ guarantee (I-R1..I-R7) with the new residuals in §6.
   is examined; unlock happens only by time; the peer is the TCP address, never a header.
 - **I-R2** No credential, hash, launch secret, or phrase appears in any limiter log line or 429
   body.
-- **I-R3** Memory is bounded by `MaxKeys` with oldest-idle eviction; a spray of 20,000 peers leaves
-  at most `MaxKeys` entries.
+- **I-R3** Memory is bounded by `MaxKeys` as a **hard total-key ceiling**: a full map evicts the
+  oldest idle key, or — when every key is locked — the oldest *locked* key, so a spray of 20,000
+  peers that each lock still leaves at most `MaxKeys` entries (the fix tranche closed a defect where
+  a locked spray grew unbounded, adversarial `lockout-dos-1`). A locked key is evicted only as a
+  last resort (never while an idle key remains), and a key holding an in-flight reservation is never
+  evicted, so eviction can never drop a live attempt (`concurrency-reservation-1`, preserving I-R10).
 - **I-R4** The limiter is on by default on every bind including loopback; the off switch is
   explicit, logged loudly at startup, and visible in status.
 - **I-R5** The constant-time Basic compare and the argon2id GUI verification are unchanged (their
@@ -225,3 +229,46 @@ pinned expected values for the Tailscale row change accordingly and nothing else
 (its intent, "placeholders are substituted with concrete values", is preserved; the assertion
 stays exact). If no pre-U4 test asserts those, no entry is needed; the builder states which case
 applies.
+
+## 9. Fix tranche — the two filed reviews' confirmed findings
+
+The BUILT phase was independently reviewed twice: an adversarial review
+(`docs/review-u4-adversarial.md` — 18 candidates → 13 confirmed after dedup, 3 refuted, 0 blockers)
+and a friction review (`docs/review-u4-friction.md` — SHIPPABLE_WITH_BACKLOG, 6 Type II, 26 Type
+III). Every confirmed finding is fixed here, red-first (regression test → neutralize → prove RED for
+the right reason → restore → prove GREEN), across three file-disjoint fixers. No gate was weakened,
+no fixture edited to pass; the only pre-U3/U4 test edits are the sanctioned mechanical call-site
+changes recorded in `cmd/seavault/testdata/accepted-test-edits.txt`.
+
+| Finding | Sev | Fixer / commit | Fix |
+|---|---|---|---|
+| concurrency-reservation-1 | med | F-A `cb3e590` | `evictOneLocked` never evicts a `pending>0` key; if all keys hold reservations the map grows by one, so eviction can never drop a live reservation (restores I-R10/C4) |
+| lockout-dos-1 | med | F-A `cb3e590` | hard total-key ceiling — evict the oldest *locked* key when no idle victim exists, so a locked spray stays ≤ `MaxKeys`; I-R3 re-worded (SECURITY.md + §4) |
+| off-switch-config-2 | med | F-A `cb3e590` | `normalizeAuthLimits` floors `Window`/`LockStart`/`LockMax` and caps thresholds/`MaxKeys`; `StatusLine` surfaces `Window` — a degenerate config can no longer silently neutralize the limiter |
+| concurrency-reservation-2 | low | F-A `cb3e590` + F-B `38c1b40` | pending decays on a Window-stale unlocked streak, clamped at the threshold (F-A `Release()` + `refreshLocked`); per-handler `defer Release()` guards consumption against a panic/early return (F-B) |
+| wiring-3 | low | F-A `cb3e590` | `LockLine` renders sub-minute locks honestly ("30 seconds"), agreeing with `Retry-After` |
+| lockout-dos-5 | low | F-A `cb3e590` | account-ceiling lock line reads `account "seavault" (from any source)` — no empty peer / double space |
+| leakage-copy-1 | med | F-B `38c1b40` | `--auth-limit on` over a persisted disable runs the limiter, renders every readout from an EFFECTIVE "on" state, and **persists** `enabled=true` + clears `disabledSince` (C7) so a flagless restart stays protected |
+| polish-behaviour-1 | med | F-B `38c1b40` | `ensureLoopbackBind` takes a `certConfigured` signal; a configured cert with `--tls` omitted leads the refusal with "pass `--tls`" |
+| wiring-1 | low | F-B `38c1b40` | `serve`/`gui --help` name `--auth-limit on\|off` from the registry usage rows |
+| wiring-2 | low | F-B `38c1b40` | per-viewer banner + session-gated `GET /api/auth-limits/self`; a wrong `?launch=` shows the styled no-session page with the throttle reason |
+| peer-spoofing-2 | low | F-A `cb3e590` (pkg) + F-B `38c1b40` (call site) | `Attempt.Release()` (decrement only) replaces the wrong `Success()` on the GUI keychain-read-error branch |
+| polish-behaviour-2 | low | F-B `38c1b40` | `init`'s leftovers remedy names the positional `VAULT_DIR`, not the `--vault` flag it lacks |
+| lockout-dos-2 | med | F-B `38c1b40` (code) + **F-C** (docs) | non-loopback `serve` with the default username warns and recommends `--user`; SECURITY.md/README/guide state the ceiling lock is effectively indefinite under sustained re-triggering, that the default username is public, and to pass a non-default `--user` |
+| W2-6 (Type II) | — | F-B `38c1b40` (lever) + **F-C** (docs) | narrow `POST /api/auth-limits/clear` (peer/account) keeps limits on for everyone else; SECURITY.md/guide enumerate the three recoveries and the lone-locked-out-remote residual |
+| W1-3 (Type II) | — | F-B `38c1b40` | the per-viewer lock banner + countdown promised in §2.2/§6 is built |
+| W3-4 (Type II) | — | F-B `38c1b40` | see polish-behaviour-1 |
+| W1-1/W1-2/W1-4 | III | **F-C** | the WebDAV Basic `429` body carries the honest human wait; the login re-render and `open` `429` render sub-minute locks in seconds; one exported `authlimit.DurationPhrase` is the single source, so the operator line, both `429` bodies, and the countdown state the same "when" |
+| W3-1 | III | **F-C** | an unknown top-level command names the rejected verb (`error: unknown command "…"`) before the usage wall; the bad-flag path is documented (README) |
+| W4-1 | III | **F-C** | guarantees attributed correctly (`const version` bumped to `0.21.0`); SECURITY.md/README state a five-failure burst emits **two** lock lines (peer + peer/account) for one incident |
+| W4-2 | III | **F-C** | the GUI-login per-surface row is caveated (only when a GUI password is set); the re-enable semantics documented as persisted + effective (true after F-B) |
+| W2-1/W2-4/W2-5/W3-6/W1-6 | III | **F-C** | household `/64` sharing in plain words + what a household member sees; status shows policy/enabled while the self endpoint shows the viewer's own lock; the changelog group-verb list adds `tls`; the fumbled-redeem and wrong-launch messages are documented |
+
+**Refuted (no code):** `lockout-dos-3` (FailureDelay/goroutine cost — disclosed by design), `lockout-dos-4`
+(pending-leak reachability — the property is `concurrency-reservation-2`; the panic path is unreachable),
+`peer-spoofing-1` (reverse-proxy peer collapse — disclosed and tested). Left as-is.
+
+The new SECURITY.md/README/TLS-guide sections this tranche adds are guarded by the extended D1 drift
+guard (`TestU4DocsP3*`, `cmd/seavault/u4_docs_p3_test.go`), so a later edit that drops the
+account-ceiling-indefinite disclosure, the default-username `--user` recommendation, the clear-lock
+lever, the self endpoint, the two-lock-lines note, or the honest-countdown wording fails the build.

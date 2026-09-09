@@ -328,7 +328,12 @@ func (s *Server) authorizeBasic(w http.ResponseWriter, r *http.Request) bool {
 		// Locked: deny before the compare. No WWW-Authenticate (so the client
 		// stops re-prompting for a password it cannot currently use).
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(retryAfter)))
-		http.Error(w, "too many failed authentication attempts; retry after the lock expires", http.StatusTooManyRequests)
+		// Carry the human wait in the BODY too (friction W1-1/W1-4): a client that
+		// hides the Retry-After header still gets the number, and it states the same
+		// "when" as the header and the operator lock line (authlimit.DurationPhrase
+		// is the one source, so "30 seconds" here agrees with Retry-After: 30). No
+		// credential appears (I-R2).
+		http.Error(w, "too many failed authentication attempts; try again in "+authlimit.DurationPhrase(retryAfter), http.StatusTooManyRequests)
 		return false
 	}
 	// Defence in depth (concurrency-reservation-2b): guarantee the reservation is

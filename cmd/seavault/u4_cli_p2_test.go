@@ -53,6 +53,35 @@ func TestUnknownSubcommandExitsTwo(t *testing.T) {
 	}
 }
 
+// TestUnknownTopLevelCommandNamesTheVerb (friction W3-1): an unrecognized TOP-LEVEL
+// command names the rejected verb on stderr — "error: unknown command \"…\"; run
+// \"seavault --help\"" — before the usage wall, the way an unknown SUBCOMMAND already
+// does (dispatchGroup: "error: unknown … subcommand …"). Before this fix a mistyped
+// top-level command printed only the usage wall, leaving the operator to guess which
+// token was wrong. The exit code stays 2. A KNOWN command is the control: it must NOT
+// emit the unknown-command line (so the assertion is specific to the unknown case).
+func TestUnknownTopLevelCommandNamesTheVerb(t *testing.T) {
+	_, stderr, code := captureRun(t, "definitely-not-a-command")
+	if code != 2 {
+		t.Fatalf("unknown top-level command exit = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, `unknown command "definitely-not-a-command"`) {
+		t.Fatalf("stderr must name the unknown verb; got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "seavault --help") {
+		t.Fatalf("the unknown-command line must point at `seavault --help`; got:\n%s", stderr)
+	}
+	// Control: a bare `version` (a known top-level command) exits 0 and prints no
+	// "unknown command" line, so the line is specific to the unrecognized verb.
+	_, ctrlErr, ctrlCode := captureRun(t, "version")
+	if ctrlCode != 0 {
+		t.Fatalf("known command `version` exit = %d, want 0", ctrlCode)
+	}
+	if strings.Contains(ctrlErr, "unknown command") {
+		t.Fatalf("a known command must not emit an unknown-command line; got:\n%s", ctrlErr)
+	}
+}
+
 // TestKeychainDeleteReportPlainNoEntryAndDebug (U4 DOCS-1): `keychain delete`
 // composes an operator line via keychainDeleteReport. A missing entry (the service
 // answered, no entry) reports "no keychain entry for <vault>" plainly and is NOT an

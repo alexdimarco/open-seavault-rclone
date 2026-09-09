@@ -202,3 +202,61 @@ func TestU4DocsP3DeliveredTLSDocRows(t *testing.T) {
 		}
 	}
 }
+
+// TestU4DocsFixTrancheAddenda extends the D1 drift guard to the doc sections the U4
+// FIX TRANCHE adds (design §9), so a later edit that silently drops a fix-tranche
+// disclosure fails the build. It guards, per file, the disclosures the confirmed
+// review findings required: the account-ceiling lock is effectively indefinite under
+// re-triggering and the default WebDAV username is public (adversarial lockout-dos-2);
+// the hard total-key ceiling wording (lockout-dos-1 / I-R3); the two-lock-lines note
+// (friction W4-1); the clear-lock lever and the per-viewer self endpoint (W2-6 / W2-5 /
+// wiring-2); the honest sub-minute countdown (W1-1/W1-2/W1-4); and the `tls` group-verb
+// list entry (W3-6). Every table asserts on every row and fails an empty table.
+func TestU4DocsFixTrancheAddenda(t *testing.T) {
+	sec := p3ReadDoc(t, "SECURITY.md")
+	readme := p3ReadDoc(t, "README.md")
+	guide := p3ReadDoc(t, "docs", "tls-and-certificates.md")
+
+	type row struct {
+		finding string
+		doc     string
+		body    string
+		want    string
+	}
+	rows := []row{
+		// SECURITY.md — lockout-dos-2 (docs half) and the re-worded invariants/residuals.
+		{"lockout-dos-2 account lock is indefinite in aggregate", "SECURITY.md", sec, "effectively locked out indefinitely"},
+		{"lockout-dos-2 cap bounds each lock, not the aggregate", "SECURITY.md", sec, "but\n  not the aggregate"},
+		{"lockout-dos-2 default WebDAV username is public", "SECURITY.md", sec, "the public, documented `seavault`"},
+		{"lockout-dos-2 recommend a non-default --user", "SECURITY.md", sec, "non-default `--user NAME`"},
+		{"lockout-dos-1 I-R3 hard total-key ceiling", "SECURITY.md", sec, "hard total-key"},
+		{"W4-1 five-failure burst emits two lock lines", "SECURITY.md", sec, "one incident, not two"},
+		{"W2-6 clear-lock lever", "SECURITY.md", sec, "POST /api/auth-limits/clear"},
+		{"W2-6 three recoveries + residual", "SECURITY.md", sec, "Recovering from a lock"},
+		{"W2-5 per-viewer self endpoint", "SECURITY.md", sec, "GET /api/auth-limits/self"},
+		{"W1-1/W1-4 the 429 body carries the wait", "SECURITY.md", sec, "the same human wait in its body"},
+
+		// README — W3-6, W3-1, W4-1, and the fix-tranche changelog additions.
+		{"W3-6 tls in the group-verb list", "README.md", readme, "`tls` (added in v0.20)"},
+		{"W3-1 unknown top-level command names the verb", "README.md", readme, `error: unknown command "<x>"`},
+		{"W3-1 bad-flag path documented", "README.md", readme, "bad-flag path"},
+		{"W2-6 clear-lock in the changelog", "README.md", readme, "POST /api/auth-limits/clear"},
+		{"lockout-dos-2 non-default --user in the changelog", "README.md", readme, "non-default `--user NAME` for an exposed"},
+		{"W1-2 honest sub-minute countdown", "README.md", readme, "seconds when the lock is under a minute"},
+
+		// TLS guide — W2-4, lockout-dos-2, W2-6, W4-2, W1-1/W1-2.
+		{"W2-4 one household shares one bucket", "tls-and-certificates.md", guide, "One household shares one bucket"},
+		{"lockout-dos-2 non-default --user on exposed serve", "tls-and-certificates.md", guide, "non-default `--user`"},
+		{"W2-6 clear-lock lever in the guide", "tls-and-certificates.md", guide, "/api/auth-limits/clear"},
+		{"W4-2 re-enable persists and stays protected", "tls-and-certificates.md", guide, "comes back **protected**"},
+		{"W1-1/W1-2 honest 30-second wait", "tls-and-certificates.md", guide, "try again in 30 seconds"},
+	}
+	if len(rows) == 0 {
+		t.Fatal("fix-tranche addenda table is empty")
+	}
+	for _, r := range rows {
+		if !strings.Contains(r.body, r.want) {
+			t.Errorf("fix-tranche: %s is missing the %s anchor %q", r.doc, r.finding, r.want)
+		}
+	}
+}

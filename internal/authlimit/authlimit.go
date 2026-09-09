@@ -646,3 +646,12 @@ func lockDurationPhrase(d time.Duration) string {
 	}
 	return fmt.Sprintf("%d minutes", m)
 }
+
+// DurationPhrase is the exported, single source of truth for the human wait a
+// lock/throttle exposes, so the operator lock line (LockLine), the WebDAV Basic
+// `429` body, the GUI login re-render, and the `/api/open` `429` JSON all state
+// the SAME "when" (friction W1-1/W1-2/W1-4): a sub-minute lock in whole seconds
+// ("30 seconds", agreeing with `Retry-After: 30`), a minute or more in whole
+// minutes. It rounds up and floors at one second, matching the Retry-After a
+// caller derives from the same duration, and names no credential.
+func DurationPhrase(d time.Duration) string { return lockDurationPhrase(d) }

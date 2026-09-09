@@ -49,7 +49,7 @@ import (
 	"github.com/alexdimarco/open-seavault-rclone/internal/webui"
 )
 
-const version = "0.20.0"
+const version = "0.21.0"
 
 func main() {
 	// main() dispatches FROM the command registry (commands.go). All command

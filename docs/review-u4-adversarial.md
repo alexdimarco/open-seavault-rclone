@@ -101,3 +101,40 @@ Every code fix ships prove-fail → prove-pass with its regression test, per the
 testing discipline (no gate weakened, no fixture edited to pass). The three medium
 disclosure items in Tranches 2–3 that touch SECURITY.md/design invariants are
 security-sensitive and owe the adversarial-pass gate before merge.
+
+---
+
+## Addendum — fix tranche (post-review), branch `feature/u4-polish-ratelimit`
+
+Every confirmed finding above is fixed, red-first (regression test → neutralize →
+prove RED for the right reason → restore → prove GREEN), across three file-disjoint
+fixers. No gate was weakened and no fixture edited to pass; the only pre-U3/U4 test
+edits are the sanctioned mechanical call-site changes recorded in
+`cmd/seavault/testdata/accepted-test-edits.txt`. Commits: **F-A `cb3e590`** (limiter
+core), **F-B `38c1b40`** (wiring + levers + banner), **F-C** (this commit — docs +
+UX-copy + final verification). The design's §9 carries the same map.
+
+| id | sev | fixer / commit | fix shipped |
+|----|-----|----------------|-------------|
+| lockout-dos-1 | med | F-A `cb3e590` | hard total-key ceiling: `evictOneLocked` evicts the oldest *locked* key when no idle victim exists, so a locked spray stays ≤ `MaxKeys`. I-R3 re-worded in SECURITY.md + design §4 (bound now stated as the hard ceiling, locked-key-last-resort, reservation never dropped). |
+| lockout-dos-2 | med | F-B `38c1b40` (code) + **F-C** (docs) | non-loopback `serve` on the default username prints a startup WARNING recommending `--user`. SECURITY.md/README/TLS-guide now state plainly: the cap bounds each lock, **not the aggregate** (sustained re-triggering → effectively indefinite), the default WebDAV username is the public `seavault` (no username knowledge needed), and to pass a non-default `--user` for an exposed serve. |
+| concurrency-reservation-1 | med | F-A `cb3e590` | a `pending>0` key is never an eviction victim; if every key holds a reservation the map grows by one — eviction can no longer drop a live reservation (restores I-R10/C4). -race regression shipped. |
+| leakage-copy-1 | med | F-B `38c1b40` | `--auth-limit on` over a persisted disable renders every readout from an EFFECTIVE "on" state **and persists** `enabled=true` + clears `disabledSince` (C7), so a flagless restart stays protected. O1/X1 rows extended. |
+| off-switch-config-2 | med | F-A `cb3e590` | `normalizeAuthLimits` floors `Window`/`LockStart`/`LockMax` and caps thresholds/`MaxKeys` (out-of-range → default); `StatusLine` surfaces `Window` — a degenerate-but-valid config can no longer silently neutralize the limiter. |
+| polish-behaviour-1 | med | F-B `38c1b40` | `ensureLoopbackBind` takes a `certConfigured` signal; a configured cert with `--tls` omitted leads the refusal with "pass `--tls`". `TestBindRefusalLeadsWithTLSRoute` extended. |
+| wiring-1 | low | F-B `38c1b40` | `serve`/`gui --help` name `--auth-limit on\|off` from the registry usage rows. |
+| wiring-2 | low | F-B `38c1b40` | per-viewer banner + session-gated `GET /api/auth-limits/self`; a wrong `?launch=` shows the styled no-session page with the throttle reason (never a lock). |
+| wiring-3 | low | F-A `cb3e590` | `LockLine` renders sub-minute locks honestly ("30 seconds"), agreeing with `Retry-After`. F-C carried the same honest phrase (one exported `authlimit.DurationPhrase`) into the WebDAV `429` body and the login/open copy (friction W1-1/W1-2/W1-4). |
+| lockout-dos-5 | low | F-A `cb3e590` | account-ceiling lock line reads `account "seavault" (from any source)` — no empty peer, no double space. |
+| peer-spoofing-2 | low | F-A `cb3e590` (pkg) + F-B `38c1b40` (call site) | new `Attempt.Release()` (decrement only) replaces the wrong `Success()` on the GUI keychain-read-error branch, so an infrastructure error no longer clears the streak on all three keys. |
+| concurrency-reservation-2 | low | F-A `cb3e590` + F-B `38c1b40` | pending decays on a Window-stale unlocked streak, clamped at the threshold; per-handler `defer Release()` guards consumption against a panic/early return. |
+| polish-behaviour-2 | low | F-B `38c1b40` | `init`'s leftovers remedy names the positional `VAULT_DIR`, not the `--vault` flag it lacks. |
+
+**Post-tranche verdict:** all 13 confirmed findings resolved; the 3 refuted findings
+required no change and stand as filed. No confirmed finding is deferred. The unfiltered
+`go test -race -count=1 ./...` is green, `gofmt`/`go vet`/`go build` are clean, and the
+windows/amd64 and darwin/arm64 cross-builds are clean. The three medium disclosure items
+(lockout-dos-2, leakage-copy-1, and the I-R3 re-word) that touch SECURITY.md/design
+invariants were treated as security-sensitive and carry their adversarial reasoning in
+SECURITY.md §"Authentication rate limiting and lockout" and design §9. **Adversarial
+verdict: RESOLVED.**
