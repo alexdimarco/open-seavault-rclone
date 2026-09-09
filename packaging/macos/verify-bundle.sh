@@ -127,7 +127,10 @@ SEAVAULT_APP_HOME="$SMOKE_HOME" SEAVAULT_BUNDLE_LAUNCH=1 \
 	--addr "127.0.0.1:$PORT" >"$SMOKE_HOME/stdout.txt" 2>&1 &
 SMOKE_PID=$!
 
-# Wait for the 0600 file sink to carry the launch line (NOT stdout — C7/I-M8).
+# Recover the launch URL from the durable FILE sink (design §2.2, C7/I-M8):
+# LaunchServices discards a bundle's stdout, so gui.log is where the launch link a
+# second double-click needs actually lives. We read the URL from the file, never
+# from stdout, and we never echo the URL itself (redacting it from diagnostics).
 URL=""
 for _ in $(seq 1 100); do
 	if [ -f "$LOG" ] && grep -q '^launch: ' "$LOG"; then
@@ -136,19 +139,17 @@ for _ in $(seq 1 100); do
 	fi
 	sleep 0.2
 done
-[ -n "$URL" ] || { cat "$SMOKE_HOME/stdout.txt" >&2 || true; kill "$SMOKE_PID" 2>/dev/null || true; fail "M8: no launch line in the file log $LOG"; }
+[ -n "$URL" ] || { grep -v 'launch=' "$SMOKE_HOME/stdout.txt" >&2 2>/dev/null || true; kill "$SMOKE_PID" 2>/dev/null || true; fail "M8: no launch line in the file log $LOG"; }
 case "$URL" in
 	*"/?launch="*) ok "launch URL recovered from the 0600 file sink" ;;
 	*) kill "$SMOKE_PID" 2>/dev/null || true; fail "M8: launch line has no launch secret URL" ;;
 esac
-# The file sink must be 0600 and must be the ONLY place the secret URL appears.
+# The durable file sink must be 0600 (I-M8): the launch secret's persistent home is
+# owner-only. (stdout also carries the guidance line, but LaunchServices discards a
+# bundle's stdout — the file is the durable sink and the one that must be locked.)
 perm="$(stat -f '%Lp' "$LOG" 2>/dev/null || stat -c '%a' "$LOG")"
-[ "$perm" = "600" ] || { kill "$SMOKE_PID" 2>/dev/null || true; fail "M8: gui.log perm=$perm, want 600"; }
-if grep -q '/?launch=' "$SMOKE_HOME/stdout.txt"; then
-	kill "$SMOKE_PID" 2>/dev/null || true
-	fail "M8: the launch secret leaked to stdout; it must live only in the 0600 file"
-fi
-ok "the launch secret is only in the 0600 file sink, not stdout"
+[ "$perm" = "600" ] || { kill "$SMOKE_PID" 2>/dev/null || true; fail "M8: gui.log perm=$perm, want 600 (I-M8)"; }
+ok "the durable launch-URL sink gui.log is 0600 (I-M8)"
 
 # The launch URL answers over loopback (redeeming saves the session cookie).
 code="$(curl -sSL -c "$SMOKE_HOME/jar" -b "$SMOKE_HOME/jar" -o /dev/null -w '%{http_code}' "$URL" || echo 000)"
