@@ -273,7 +273,14 @@ func RunTLSWizard(pr Prompter, deps TLSDeps) error {
 		case routeBYO:
 			cert, key, recipe, flowErr = routeBYOFlow(pr)
 		case routeSelfSigned:
-			return finishSelfSigned(pr)
+			if ferr := finishSelfSigned(pr); ferr != nil {
+				return ferr
+			}
+			// This is the "other devices" branch: keeping a self-signed certificate
+			// here cannot map a Windows network drive (Windows' WebDAV client refuses
+			// it), so name how to re-run for a mappable certificate (A3-c3).
+			pr.Show("To map a Windows network drive later, re-run `seavault tls setup` and choose Tailscale or your own CA instead — a self-signed certificate cannot be used for a Windows drive mapping.")
+			return nil
 		}
 		if errors.Is(flowErr, errBackToMenu) {
 			continue
@@ -882,14 +889,23 @@ func serveBindFor(guiBind string) string {
 // showRenewal prints the renewal recipe for the route with the CONCRETE renew
 // command and name substituted into the systemd-timer, cron, and Task Scheduler
 // snippets — no bare placeholders (A1-c6) — plus the 30-second hot-reload note
-// (design §4 step 7). A bring-your-own pair gets its own recipe (renew at your CA
-// and replace the files in place), never the self-signed re-run (A2-c3).
+// (design §4 step 7). The Tailscale route schedules MONTHLY, not daily, because
+// `tailscale cert` re-issues unconditionally on every run rather than renewing
+// idempotently near expiry (A1-c6); lego/certbot/self-signed keep the daily
+// cadence. A bring-your-own pair gets its own recipe (renew at your CA and
+// replace the files in place), never the self-signed re-run (A2-c3).
 func showRenewal(pr Prompter, r renewalRecipe) {
 	pr.Show("Renewal:")
 	switch r.route {
 	case routeNameTailscale:
 		pr.Show("  Re-run this before the ~90-day certificate expires (Tailscale certificates are short-lived):")
 		pr.Show("    " + r.command)
+		pr.Show("  `tailscale cert` re-issues the certificate unconditionally every time it runs — it is not an idempotent renew that only acts near expiry — so schedule it MONTHLY, not daily:")
+		pr.Show("  systemd timer: put `" + r.command + "` in a .service unit and pair it with a monthly .timer (OnCalendar=monthly; Persistent=true).")
+		pr.Show("  cron: 17 3 1 * *  " + r.command + "   (runs on the 1st of each month at 03:17)")
+		pr.Show("  Windows Task Scheduler: schtasks /Create /SC MONTHLY /TN SeaVaultCertRenew /TR \"" + r.command + "\" /ST 03:17")
+		pr.Show("  open-seavault-rclone reloads a renewed certificate within 30 seconds — no restart is needed.")
+		return
 	case routeNameLego:
 		pr.Show("  Renew " + r.name + " with (the same DNS token exported in the environment):")
 		pr.Show("    " + r.command)

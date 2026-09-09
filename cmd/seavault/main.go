@@ -23,9 +23,11 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alexdimarco/open-seavault-rclone/internal/appconfig"
+	"github.com/alexdimarco/open-seavault-rclone/internal/authlimit"
 	"github.com/alexdimarco/open-seavault-rclone/internal/importer"
 	"github.com/alexdimarco/open-seavault-rclone/internal/keychain"
 	"github.com/alexdimarco/open-seavault-rclone/internal/localdav"
@@ -47,7 +49,7 @@ import (
 	"github.com/alexdimarco/open-seavault-rclone/internal/webui"
 )
 
-const version = "0.20.0"
+const version = "0.21.0"
 
 func main() {
 	// main() dispatches FROM the command registry (commands.go). All command
@@ -228,14 +230,28 @@ func setupFailureLines(res setup.Result) []string {
 }
 
 // annotateSetupError names the remedy for a typed setup error that the
-// non-interactive --preset path would otherwise surface bare (ADM-5). A
-// leftovers directory (a non-empty target with no vault.json, from an
-// interrupted setup) gets the "remove it or choose a different --vault" remedy
-// the interactive flow offers as a prompt. Any other error is returned
-// unchanged.
+// non-interactive --preset path would otherwise surface bare (ADM-5). --preset
+// takes the `--vault` flag, so the leftovers remedy names it.
 func annotateSetupError(err error) error {
+	return annotateLeftovers(err, "--vault")
+}
+
+// annotateInitLeftovers is annotateSetupError for `init`, which takes a positional
+// VAULT_DIR rather than a --vault flag: the remedy must name the real argument so
+// it is actionable (polish-behaviour-2 / W3-3 — the shared helper must not tell an
+// `init` user to pass a `--vault` flag `init` does not have).
+func annotateInitLeftovers(err error) error {
+	return annotateLeftovers(err, "VAULT_DIR")
+}
+
+// annotateLeftovers gives a leftovers directory (a non-empty target with no
+// vault.json, from an interrupted setup) the "remove it or choose a different
+// <target>" remedy the interactive flow offers as a prompt, parameterized by how
+// the calling command names its vault-directory argument. Any other error is
+// returned unchanged.
+func annotateLeftovers(err error, targetName string) error {
 	if errors.Is(err, setup.ErrVaultDirLeftovers) {
-		return fmt.Errorf("%w — remove that directory and re-run, or choose a different --vault", err)
+		return fmt.Errorf("%w — remove that directory and re-run, or choose a different %s", err, targetName)
 	}
 	return err
 }
@@ -588,6 +604,17 @@ func cmdInit(args []string) error {
 	}
 	if err := userpath.ValidateCreatableVaultPath(vaultPath); err != nil {
 		return err
+	}
+	// Apply the same interrupted-setup leftovers classification `setup` enforces
+	// (CLI 4): a target that is non-empty but holds no vault.json is leftovers from
+	// an interrupted run, and `init` names the remove-and-retry remedy instead of
+	// letting CreateWithOptions fail with a lower-level message. Only the leftovers
+	// case is intercepted here; an EXISTING vault and an empty/absent directory
+	// fall through to the create path exactly as before.
+	if verr := (setup.Plan{VaultDir: vaultPath, Cloud: setup.LocalOnly{}}).Validate(); errors.Is(verr, setup.ErrVaultDirLeftovers) {
+		// init takes a positional VAULT_DIR, not a --vault flag; name the real
+		// argument so the remedy is actionable (polish-behaviour-2 / W3-3).
+		return annotateInitLeftovers(verr)
 	}
 	params := vault.ChunkParams{MinSize: *min, AvgSize: *avg, MaxSize: *max}
 	var kdfCfg vault.KDFConfig
@@ -1340,7 +1367,13 @@ func isEveryInterface(host string) bool {
 // ::, [::]). Without TLS it is refused exactly as before unless insecureBind
 // overrides. Plaintext therefore never reaches a non-loopback address without
 // the explicit override (I-T1); the guard relaxes only for a TLS listener.
-func ensureLoopbackBind(addr string, insecureBind, tlsOn, selfSigned bool) ([]string, error) {
+//
+// certConfigured says a certificate is already configured but the operator did
+// not pass --tls (A3-c4 / polish-behaviour-1): the one-flag fix is to add --tls,
+// so the plaintext refusal leads with that before the generic "set up TLS first"
+// route — otherwise a user who just ran `seavault tls setup` is told to do it
+// again and is never told the flag that would work.
+func ensureLoopbackBind(addr string, insecureBind, tlsOn, selfSigned, certConfigured bool) ([]string, error) {
 	host := hostOf(addr)
 	if isLoopbackOrLocalhost(host) {
 		return nil, nil
@@ -1358,10 +1391,26 @@ func ensureLoopbackBind(addr string, insecureBind, tlsOn, selfSigned bool) ([]st
 	if insecureBind {
 		return nil, nil
 	}
+	// A certificate is configured but --tls was omitted: lead with the one-flag
+	// remedy before the generic route (A3-c4 / polish-behaviour-1).
+	if certConfigured {
+		return nil, fmt.Errorf("refusing to bind %q: a certificate is already configured — pass --tls to serve over the configured certificate. Otherwise set up TLS first: run `seavault tls setup` (or pass --tls-cert/--tls-key). As a last resort, pass --insecure-bind to serve plaintext on this address (not recommended)", addr)
+	}
 	if isEveryInterface(host) {
 		return nil, fmt.Errorf("refusing to bind %q: an unspecified host listens on every interface and would expose DECRYPTED content. To reach other devices, set up TLS first: run `seavault tls setup` (or pass --tls-cert/--tls-key), then bind a specific address. As a last resort, pass --insecure-bind to serve plaintext (not recommended)", addr)
 	}
 	return nil, fmt.Errorf("refusing to bind %q: %q is not a loopback address, and this endpoint serves DECRYPTED content. To reach other devices, set up TLS first: run `seavault tls setup` (or pass --tls-cert/--tls-key). As a last resort, pass --insecure-bind to serve plaintext on this address (not recommended)", addr, host)
+}
+
+// certConfiguredFor reports whether an actual certificate pair is configured that
+// `--tls` would serve over (the shared tls.* section or the legacy gui.* pair),
+// independent of whether TLS was activated for this run. It never triggers the
+// self-signed floor's generation (configuredPair is side-effect-free), and the
+// self-signed floor is deliberately NOT counted: serve has no self-signed floor
+// (resolveServeTLS), so there is no configured cert for --tls to serve there.
+func certConfiguredFor(cfg appconfig.Config) bool {
+	_, _, source := configuredPair(cfg)
+	return source == tlsconfig.SourceConfig || source == tlsconfig.SourceLegacyGUI
 }
 
 // repeatableString collects a repeatable string flag (e.g. --allow-host NAME).
@@ -1712,6 +1761,213 @@ func startTLSReloader(ctx context.Context, resolved *tlsconfig.Resolved, purpose
 	return func() { <-done }
 }
 
+// authLimitClock is the injected clock the limiter (lock/window expiry) and the
+// disabled-since stamp / hourly re-warning read. Production is time.Now; the U4
+// integration tests replace it with a controllable clock to drive lock expiry
+// and the re-warning deterministically. It is a test seam only.
+var authLimitClock = func() time.Time { return time.Now() }
+
+// authLimitWarnEvery is how often the loud OFF warning re-emits while a disabled
+// server runs (C7); authLimitWarnTick is how often the re-warn goroutine wakes to
+// compare the injected clock. Tests shrink both to observe a re-emission quickly.
+var (
+	authLimitWarnEvery = time.Hour
+	authLimitWarnTick  = time.Minute
+)
+
+// authLimitLogf receives the auth-limit operator messages: the per-lock line
+// (C6), the startup OFF warning and its hourly re-emission (C7), and the
+// non-loopback startup exposure line (§2.3). Production writes to stderr so an
+// operator sees them; the integration tests capture the sink to assert content
+// and prove no credential leaks (I-R2 / S1). It is a test seam.
+var authLimitLogf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) }
+
+// resolveAuthLimitEnabled applies the --auth-limit flag over the persisted
+// config: "" (absent) uses the config default (on unless auth.limits.enabled is
+// false), "on"/"off" override it. An unrecognised value is an error.
+func resolveAuthLimitEnabled(flagVal string, cfg appconfig.Config) (enabled, fromFlag bool, err error) {
+	switch strings.ToLower(strings.TrimSpace(flagVal)) {
+	case "":
+		return cfg.Auth.Limits.IsEnabled(), false, nil
+	case "on":
+		return true, true, nil
+	case "off":
+		return false, true, nil
+	default:
+		return false, false, fmt.Errorf("--auth-limit must be \"on\" or \"off\", got %q", flagVal)
+	}
+}
+
+// parseAuthDur parses a normalized auth-limit duration string; an unparsable
+// value yields 0, which authlimit.New re-normalizes to the default.
+func parseAuthDur(s string) time.Duration {
+	d, err := time.ParseDuration(strings.TrimSpace(s))
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// authLimitOffWarning composes the loud startup warning for a disabled limiter,
+// always naming the flag (I-R4) and, for a persisted (config-file) disable,
+// naming the date so a headless server left off after an incident says so (C7).
+// It carries no credential.
+func authLimitOffWarning(limits appconfig.AuthLimits, fromFlag, persisted bool) string {
+	const base = "WARNING: authentication rate limiting is OFF — the GUI login and WebDAV auth are unthrottled and will not lock after repeated failed attempts."
+	switch {
+	case persisted && strings.TrimSpace(limits.DisabledSince) != "":
+		return base + fmt.Sprintf(" Disabled since %s by auth.limits.enabled=false. Re-enable with --auth-limit on or set auth.limits.enabled=true.", limits.DisabledSince)
+	case fromFlag:
+		return base + " Disabled by --auth-limit off for this run. Re-enable by dropping --auth-limit off (or pass --auth-limit on)."
+	default:
+		return base + " Re-enable with --auth-limit on or set auth.limits.enabled=true."
+	}
+}
+
+// startAuthLimit resolves the effective auth-limit state for a gui/serve run
+// (design-u4 §2.2/§2.3, C7). When enabled it builds the limiter over the injected
+// clock and returns it with the "on" status line. When disabled it returns a nil
+// limiter (the surfaces skip all limiting, I-R4), emits the loud startup warning
+// through authLimitLogf, records a disabled-since timestamp for a PERSISTED
+// disable (updating *cfg and saving it, so `tls status`/settings can date the OFF
+// state and re-enabling clears it), and starts a goroutine that re-emits the
+// warning every authLimitWarnEvery on the injected clock. The returned stop func
+// (always non-nil) halts that goroutine when the command returns.
+func startAuthLimit(cfg *appconfig.Config, flagVal, purpose string) (lim *authlimit.Limiter, statusLine string, stop func(), err error) {
+	stop = func() {}
+	enabled, fromFlag, err := resolveAuthLimitEnabled(flagVal, *cfg)
+	if err != nil {
+		return nil, "", stop, err
+	}
+	limits := cfg.Auth.Limits
+	if enabled {
+		policy := authlimit.Policy{
+			FailuresBeforeLock:        limits.FailuresBeforeLock,
+			AccountFailuresBeforeLock: limits.AccountFailuresBeforeLock,
+			Window:                    parseAuthDur(limits.Window),
+			LockStart:                 parseAuthDur(limits.LockStart),
+			LockMax:                   parseAuthDur(limits.LockMax),
+			FailureDelay:              parseAuthDur(limits.FailureDelay),
+			MaxKeys:                   limits.MaxKeys,
+		}
+		// Render the status line from the EFFECTIVE (on) state, never the raw
+		// persisted config: when --auth-limit on overrides a persisted
+		// enabled=false + disabledSince, the limiter IS running, so every readout
+		// (the startup exposure line, /api/status, `tls status`, the settings page)
+		// must read "auth limits: on (…)", not the stale "OFF since <date>"
+		// (leakage-copy-1 / friction W3-5). And PERSIST the re-enable — set
+		// enabled=true, clear disabledSince, and save — so a later FLAGLESS restart
+		// (a systemd unit that just runs `seavault serve`) comes back protected, as
+		// the docs promise `--auth-limit on` does (C7 / friction W2-3/W4-2). Persist
+		// only when the persisted config actually disabled it, so a normal
+		// on-by-default start writes nothing.
+		effective := limits
+		on := true
+		effective.Enabled = &on
+		effective.DisabledSince = ""
+		if !cfg.Auth.Limits.IsEnabled() || strings.TrimSpace(cfg.Auth.Limits.DisabledSince) != "" {
+			cfg.Auth.Limits.Enabled = &on
+			cfg.Auth.Limits.DisabledSince = ""
+			if saveErr := appconfig.Save(*cfg); saveErr != nil {
+				authLimitLogf("auth-limit: could not persist the re-enabled state: %v", saveErr)
+			}
+		}
+		return authlimit.New(policy, authLimitClock), effective.StatusLine(), stop, nil
+	}
+
+	// Disabled: build the effective (possibly dated) view for the status line.
+	persisted := !cfg.Auth.Limits.IsEnabled() // the persisted config itself disables it
+	effective := limits
+	disabled := false
+	effective.Enabled = &disabled
+	if persisted {
+		if strings.TrimSpace(effective.DisabledSince) == "" {
+			stamp := authLimitClock().UTC().Format(time.RFC3339)
+			effective.DisabledSince = stamp
+			cfg.Auth.Limits.Enabled = &disabled
+			cfg.Auth.Limits.DisabledSince = stamp
+			if saveErr := appconfig.Save(*cfg); saveErr != nil {
+				authLimitLogf("auth-limit: could not persist the disabled-since timestamp: %v", saveErr)
+			}
+		}
+	} else {
+		effective.DisabledSince = "" // a flag-only disable is not dated
+	}
+	statusLine = effective.StatusLine()
+
+	warn := authLimitOffWarning(effective, fromFlag, persisted)
+	authLimitLogf("%s", warn)
+
+	stopCh := make(chan struct{})
+	var once sync.Once
+	stop = func() { once.Do(func() { close(stopCh) }) }
+	// Snapshot the seams (clock, sink, cadence) HERE — synchronously in the
+	// command goroutine — and hand them to the re-warn goroutine, so the goroutine
+	// never reads the mutable package-level seams a test rewrites at cleanup (they
+	// are func/duration values; the captured clock closure still observes a test's
+	// later time advances).
+	go authLimitReWarn(warn, stopCh, authLimitClock, authLimitLogf, authLimitWarnEvery, authLimitWarnTick)
+	return nil, statusLine, stop, nil
+}
+
+// authLimitReWarn re-emits the OFF warning every `every` of injected-clock time
+// while a disabled server runs (C7), waking every `tick` to compare against
+// `clock`. It returns when stop is closed (the command exiting). All time seams
+// are passed in (not read from the globals) so the goroutine races with nothing.
+func authLimitReWarn(warn string, stop <-chan struct{}, clock func() time.Time, logf func(string, ...any), every, tick time.Duration) {
+	if tick <= 0 {
+		tick = time.Minute
+	}
+	last := clock()
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			now := clock()
+			if now.Sub(last) >= every {
+				logf("%s", warn)
+				last = now
+			}
+		}
+	}
+}
+
+// maybePrintExposureLine prints the one-line non-loopback exposure advisory
+// (§2.3, friction A3-c5) for a bind reachable beyond this machine, naming the
+// current auth-limit state so the operator sees the residual and the live
+// protection at a glance. A loopback/localhost bind prints nothing.
+func maybePrintExposureLine(addr, statusLine string) {
+	if isLoopbackOrLocalhost(hostOf(addr)) {
+		return
+	}
+	authLimitLogf("serving DECRYPTED content beyond this machine; prefer a VPN/Tailscale over an open LAN; %s", statusLine)
+}
+
+// defaultServeUser is the WebDAV Basic-auth username `serve` uses when --user is
+// blank. It is public knowledge, so on a network-exposed bind it removes the
+// "attacker must know a username" precondition on the per-account lockout lever
+// (lockout-dos-2): anyone can drive the {basic,"",seavault} account ceiling.
+const defaultServeUser = "seavault"
+
+// maybeWarnDefaultServeUser warns, at startup, when `serve` binds a non-loopback
+// address with the DEFAULT WebDAV username (lockout-dos-2, code half). Naming a
+// non-default username with --user removes the precondition an attacker needs to
+// aim the per-account ceiling at the owner's account from rotating sources. It is
+// silent on a loopback bind (the account lever is not reachable off-box) and when
+// the operator already chose a non-default --user. It names no credential.
+func maybeWarnDefaultServeUser(addr, user string) {
+	if isLoopbackOrLocalhost(hostOf(addr)) {
+		return
+	}
+	if user != defaultServeUser {
+		return
+	}
+	authLimitLogf("WARNING: serving beyond this machine with the DEFAULT WebDAV username %q; an attacker who assumes that public default can drive the per-account lockout against you from rotating sources — restart with --user NAME using a non-default username to remove that precondition", defaultServeUser)
+}
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", "127.0.0.1:8765", "local address for the WebDAV-compatible endpoint")
@@ -1725,25 +1981,31 @@ func cmdServe(args []string) error {
 	tlsCert := fs.String("tls-cert", "", "serve WebDAV over HTTPS using this PEM certificate chain (leaf first); requires --tls-key")
 	tlsKey := fs.String("tls-key", "", "the PEM private key matching --tls-cert")
 	tlsUse := fs.Bool("tls", false, "serve WebDAV over HTTPS using the configured tls.certFile/tls.keyFile section")
+	authLimit := fs.String("auth-limit", "", "rate-limit WebDAV Basic auth: on (default) or off (off is loud and unprotected; also settable via auth.limits.enabled)")
 	var allowHost repeatableString
 	fs.Var(&allowHost, "allow-host", "additional Host header value to accept besides loopback/localhost (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: seavault serve [--addr 127.0.0.1:8765] [--user seavault] [--password-file PATH] [--quiet-credentials] [--allow-host NAME] [--tls-cert PATH --tls-key PATH | --tls] [--drop-os-junk] [--no-keychain] [--insecure-bind] VAULT_DIR_OR_PROFILE")
+		return fmt.Errorf("usage: seavault serve [--addr 127.0.0.1:8765] [--user seavault] [--password-file PATH] [--quiet-credentials] [--allow-host NAME] [--tls-cert PATH --tls-key PATH | --tls] [--auth-limit on|off] [--drop-os-junk] [--no-keychain] [--insecure-bind] VAULT_DIR_OR_PROFILE")
 	}
 	cfg, err := appconfig.Load()
 	if err != nil {
 		return err
 	}
+	authLimiter, authStatusLine, stopAuthLimit, err := startAuthLimit(&cfg, *authLimit, "serve")
+	if err != nil {
+		return err
+	}
+	defer stopAuthLimit()
 	resolved, err := resolveServeTLS(*tlsCert, *tlsKey, *tlsUse, cfg, hostOf(*addr))
 	if err != nil {
 		return err
 	}
 	tlsOn := resolved != nil && resolved.Source != tlsconfig.SourceNone
 	selfSigned := resolved != nil && resolved.SelfSigned
-	warnings, err := ensureLoopbackBind(*addr, *insecureBind, tlsOn, selfSigned)
+	warnings, err := ensureLoopbackBind(*addr, *insecureBind, tlsOn, selfSigned, certConfiguredFor(cfg))
 	if err != nil {
 		return err
 	}
@@ -1768,6 +2030,8 @@ func cmdServe(args []string) error {
 	}
 	dav := localdav.New(v)
 	dav.Credentials = &localdav.BasicCredentials{User: credUser, Password: credPassword}
+	dav.AuthLimiter = authLimiter
+	dav.AuthLogf = authLimitLogf
 	dav.AllowedHosts = allowedHostsForBind(*addr, allowHost, cfg.TLS.AllowHosts)
 	dav.DropOSJunk = *dropOSJunk
 	scheme := "http"
@@ -1776,6 +2040,8 @@ func cmdServe(args []string) error {
 	}
 	fmt.Printf("serving local WebDAV-compatible vault at %s://%s/\n", scheme, *addr)
 	fmt.Println("bind is local by default; do not expose this listener on an untrusted network")
+	maybePrintExposureLine(*addr, authStatusLine)
+	maybeWarnDefaultServeUser(*addr, credUser)
 	logTLSStartup(os.Stdout, "serve", resolved, dav.AllowedHosts)
 	if printCredentials {
 		fmt.Printf("WebDAV credentials: %s / %s\n", credUser, credPassword)
@@ -1835,7 +2101,11 @@ func cmdAppConfig(args []string) error {
 	case "reset-gui-login":
 		return resetLocalAppConfiguration(false)
 	default:
-		return fmt.Errorf("usage: seavault app-config path | reset | reset-gui-login")
+		// An unknown sub-action is a usage error and exits 2, matching the group
+		// dispatchers and the unknown top-level command (CLI-1). exitCodeError
+		// carries the code; run() does not reprint it, so print the usage here.
+		fmt.Fprintln(os.Stderr, "usage: seavault app-config path | reset | reset-gui-login")
+		return &exitCodeError{code: 2, msg: fmt.Sprintf("unknown app-config subcommand %q", args[0])}
 	}
 }
 
@@ -1896,6 +2166,7 @@ func cmdGUI(args []string) error {
 	insecureBind := fs.Bool("insecure-bind", false, "allow binding to a non-loopback address (exposes decrypted content; not recommended)")
 	tlsCert := fs.String("tls-cert", "", "serve the GUI over HTTPS using this PEM certificate chain (leaf first); requires --tls-key")
 	tlsKey := fs.String("tls-key", "", "the PEM private key matching --tls-cert")
+	authLimit := fs.String("auth-limit", "", "rate-limit the GUI login and vault open: on (default) or off (off is loud and unprotected; also settable via auth.limits.enabled)")
 	var allowHost repeatableString
 	fs.Var(&allowHost, "allow-host", "additional Host header value to accept besides loopback/localhost (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -1903,7 +2174,7 @@ func cmdGUI(args []string) error {
 	}
 	initial := ""
 	if fs.NArg() > 1 {
-		return fmt.Errorf("usage: seavault gui [--addr 127.0.0.1:8787] [--no-open] [--allow-host NAME] [--tls-cert PATH --tls-key PATH] [--insecure-bind] [VAULT_DIR_OR_PROFILE]")
+		return fmt.Errorf("usage: seavault gui [--addr 127.0.0.1:8787] [--no-open] [--allow-host NAME] [--tls-cert PATH --tls-key PATH] [--auth-limit on|off] [--insecure-bind] [VAULT_DIR_OR_PROFILE]")
 	}
 	if fs.NArg() == 1 {
 		initial = fs.Arg(0)
@@ -1918,6 +2189,11 @@ func cmdGUI(args []string) error {
 	if err != nil {
 		return err
 	}
+	authLimiter, authStatusLine, stopAuthLimit, err := startAuthLimit(&cfg, *authLimit, "gui")
+	if err != nil {
+		return err
+	}
+	defer stopAuthLimit()
 	// Resolve the serving certificate through the precedence chain (flags → the
 	// shared tls section → the legacy gui.certFile → the self-signed floor when
 	// gui.protocol is https → none). A configured full-but-mismatched pair fails
@@ -1933,7 +2209,10 @@ func cmdGUI(args []string) error {
 		return err
 	}
 	tlsOn := resolved.Source != tlsconfig.SourceNone
-	warnings, err := ensureLoopbackBind(*addr, *insecureBind, tlsOn, resolved.SelfSigned)
+	// gui auto-activates a configured cert (tlsOn is already true then), so
+	// certConfigured only matters for the refusal path when no cert exists; pass
+	// the real state for consistency with serve (polish-behaviour-1).
+	warnings, err := ensureLoopbackBind(*addr, *insecureBind, tlsOn, resolved.SelfSigned, certConfiguredFor(cfg))
 	if err != nil {
 		return err
 	}
@@ -1953,6 +2232,9 @@ func cmdGUI(args []string) error {
 	}
 	s.TLSActive = tlsOn
 	s.AllowedHosts = allowedHostsForBind(*addr, allowHost, cfg.TLS.AllowHosts)
+	s.AuthLimiter = authLimiter
+	s.AuthLogf = authLimitLogf
+	s.AuthLimitStatus = authStatusLine
 	// Pick up changes made to.seavault by an external sync client (e.g. the
 	// Nextcloud desktop client) underneath this long-lived GUI server.
 	stopWatcher := s.StartSyncWatcher(2 * time.Second)
@@ -1979,6 +2261,7 @@ func cmdGUI(args []string) error {
 	fmt.Printf("serving local GUI at %s\n", launchURL)
 	fmt.Println("open this exact launch link; a bare " + scheme + "://" + launchAddr + "/ no longer shows the app, and the launch secret rotates each launch, so bookmarks break by design")
 	fmt.Println("bind is local by default; do not expose this listener on an untrusted network")
+	maybePrintExposureLine(*addr, authStatusLine)
 	logTLSStartup(os.Stdout, "gui", resolved, s.AllowedHosts)
 	if *exitOnBrowserClose {
 		s.EnableBrowserCloseShutdown(10 * time.Second)
@@ -2268,6 +2551,10 @@ func writeTLSStatusSummary(out io.Writer, cfg appconfig.Config) {
 			fmt.Fprintf(out, "running listener: %d days left\n", rs.DaysLeft)
 		}
 	}
+	// Auth rate-limit status (C7): the persisted view — "on (…)" or "OFF since
+	// <date> — <remedy>" — so an operator reading `tls status` learns whether the
+	// network-facing credential surfaces are protected.
+	fmt.Fprintln(out, cfg.Auth.Limits.StatusLine())
 }
 
 // cleanAllowHostsCLI resolves the allowlist for `tls use`: the explicit
@@ -2483,6 +2770,33 @@ func keychainStatusLine(serviceReachable bool, getErr error) (line string, isErr
 		return "no keychain entry for this vault", false
 	}
 	return getErr.Error(), true
+}
+
+// keychainDeleteReport composes what `seavault keychain delete` reports (DOCS-1),
+// given the pre-delete lookup result (getErr; nil means an entry was found),
+// whether the OS keychain service is reachable, and the delete outcome (delErr,
+// only meaningful when an entry was found). It returns the plain operator line,
+// whether that line is an error, and the raw backend detail to show ONLY under
+// --debug. The plain line NEVER contains backend error text (the pre-U4 delete
+// dumped a raw backend error when no entry existed), and no field ever carries a
+// password. A missing entry with the service reachable is reported plainly and is
+// NOT an error, so a delete that finds nothing to remove exits 0.
+func keychainDeleteReport(vaultLabel string, getErr error, serviceReachable bool, delErr error) (line string, isErr bool, rawDetail string) {
+	if getErr != nil {
+		if serviceReachable {
+			// The service answered and there is simply no entry: nothing to delete.
+			return fmt.Sprintf("no keychain entry for %s", vaultLabel), false, ""
+		}
+		// The service could not be reached, so we cannot tell entry-or-not: a real
+		// failure. The plain line names the situation; the raw backend error is the
+		// --debug detail.
+		return "could not reach the OS keychain to delete the entry", true, getErr.Error()
+	}
+	if delErr != nil {
+		// An entry existed but the delete itself failed.
+		return "could not delete the OS keychain entry", true, delErr.Error()
+	}
+	return "OS keychain entry deleted", false, ""
 }
 
 // cmdPassword implements `seavault password change`: rotate
@@ -2775,6 +3089,12 @@ func cmdRecoveryGenerate(args []string) error {
 	return nil
 }
 
+// cliRedeemFailureDelay is the fixed throttle the single-shot CLI recovery
+// redeem applies after a wrong phrase (design-u4 §2.2, C2/W2). It deliberately
+// does NOT consult authlimit: a per-process, in-memory limiter protects nothing
+// in a process that verifies at most one phrase before exiting.
+const cliRedeemFailureDelay = 250 * time.Millisecond
+
 func cmdRecoveryRedeem(args []string) error {
 	fs := flag.NewFlagSet("recovery redeem", flag.ExitOnError)
 	acceptRollback := fs.Bool("accept-rollback", false, "open a config older than this device last saw (a restore from backup)")
@@ -2796,6 +3116,11 @@ func cmdRecoveryRedeem(args []string) error {
 	// ); --accept-rollback still applies to a restored config.
 	v, entryID, err := vault.OpenWithRecovery(vaultPath, phrase, vault.OpenOptions{AcceptRollback: *acceptRollback})
 	if err != nil {
+		// Fixed throttle on a wrong phrase (design-u4 §2.2, C2/W2): a single-shot CLI
+		// process starts with an empty map and can never accumulate, so it uses a
+		// plain fixed FailureDelay and holds NO rate-limiter reference — the GUI
+		// redeem surface carries the limiter; this one deliberately does not.
+		time.Sleep(cliRedeemFailureDelay)
 		return err
 	}
 	if note := v.PreflightNote(); note != "" {
@@ -3082,10 +3407,16 @@ func execKeychain(args []string) error {
 		fmt.Println(line)
 		return nil
 	case "delete", "remove", "rm":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: seavault keychain delete VAULT_DIR_OR_PROFILE")
+		fs := flag.NewFlagSet("keychain delete", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		debug := fs.Bool("debug", false, "print the raw keychain backend error the plain summary omits")
+		if err := fs.Parse(args[1:]); err != nil {
+			return fmt.Errorf("usage: seavault keychain delete [--debug] VAULT_DIR_OR_PROFILE")
 		}
-		vaultPath, err := resolveVaultArg(args[1])
+		if fs.NArg() != 1 {
+			return fmt.Errorf("usage: seavault keychain delete [--debug] VAULT_DIR_OR_PROFILE")
+		}
+		vaultPath, err := resolveVaultArg(fs.Arg(0))
 		if err != nil {
 			return err
 		}
@@ -3093,10 +3424,25 @@ func execKeychain(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := keychain.Delete(cfg.VaultID); err != nil {
-			return err
+		// Look the entry up BEFORE deleting so a missing entry is a plain line, not
+		// a raw backend error (DOCS-1). keychainDeleteReport composes the operator
+		// line and keeps every backend error string out of it; the raw detail is
+		// shown only under --debug, and never carries any password (I-R2/I-S1).
+		_, getErr := keychain.Get(cfg.VaultID)
+		serviceReachable := keychain.Check().Available
+		var delErr error
+		if getErr == nil {
+			delErr = keychain.Delete(cfg.VaultID)
 		}
-		fmt.Println("OS keychain entry deleted")
+		line, isErr, rawDetail := keychainDeleteReport(vaultPath, getErr, serviceReachable, delErr)
+		if isErr {
+			fmt.Fprintln(os.Stderr, line)
+			if *debug && rawDetail != "" {
+				fmt.Fprintln(os.Stderr, "keychain error detail:", rawDetail)
+			}
+			return &exitCodeError{code: 1, msg: line}
+		}
+		fmt.Println(line)
 		return nil
 	default:
 		return fmt.Errorf("unknown keychain command %q", args[0])

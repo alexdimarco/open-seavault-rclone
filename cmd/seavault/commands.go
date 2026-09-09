@@ -85,6 +85,11 @@ func run(argv []string) int {
 	}
 	row, ok := topLevelCommand(name)
 	if !ok {
+		// Name the unrecognized verb before the usage wall (friction W3-1), so a
+		// mistyped top-level command reads like an unknown SUBCOMMAND does
+		// (dispatchGroup prints "error: unknown … subcommand …") instead of leaving
+		// the operator to guess which token was rejected. Same exit code (2).
+		fmt.Fprintf(os.Stderr, "error: unknown command %q; run \"seavault --help\"\n", name)
 		usage()
 		return 2
 	}
@@ -126,7 +131,12 @@ func dispatchGroup(group string, exec func([]string) error, args []string) error
 	row, ok := groupCommand(group, sub)
 	if !ok {
 		renderGroupHelp(os.Stderr, group)
-		return fmt.Errorf("unknown %s subcommand %q; run \"seavault %s --help\"", group, sub, group)
+		// An unknown subcommand is a usage error and exits 2, the SAME code an
+		// unknown top-level command yields (CLI-1): the two were inconsistent
+		// before (top-level 2, subcommand 1). exitCodeError carries the code and
+		// run() does not reprint it, so the reason line is emitted here.
+		fmt.Fprintf(os.Stderr, "error: unknown %s subcommand %q; run \"seavault %s --help\"\n", group, sub, group)
+		return &exitCodeError{code: 2, msg: fmt.Sprintf("unknown %s subcommand %q", group, sub)}
 	}
 	if len(args) > 1 && isHelpFlag(args[1]) {
 		renderCommandHelp(os.Stdout, row)
@@ -273,8 +283,8 @@ func init() {
 		{name: "gc", synopsis: "Reclaim unreferenced chunks; a bare run is a dry run (exits 3 if work is pending).", usage: "seavault gc [--confirm] [--fence 72h] [--json] [flags] VAULT_DIR_OR_PROFILE", handler: cmdGC},
 		{name: "compact", bespokeHelp: true, synopsis: compactSynopsis(), usage: "seavault compact [--no-keychain] VAULT_DIR_OR_PROFILE", handler: cmdCompact},
 		{name: "stats", synopsis: "Report vault size, chunk, and manifest statistics.", usage: "seavault stats [flags] VAULT_DIR_OR_PROFILE", handler: cmdStats},
-		{name: "serve", synopsis: "Serve a vault over local WebDAV for a network drive mount.", usage: "seavault serve [--addr 127.0.0.1:8765] [--user seavault] [--password-file PATH] [--quiet-credentials] [--allow-host NAME] [--drop-os-junk] [flags] VAULT_DIR_OR_PROFILE", handler: cmdServe},
-		{name: "gui", synopsis: "Run the local browser GUI; subcommands: reset-config, reset-login, config-path.", usage: "seavault gui [--addr 127.0.0.1:8787] [--no-open] [--allow-host NAME] [--insecure-bind] [VAULT_DIR_OR_PROFILE]", handler: cmdGUI},
+		{name: "serve", synopsis: "Serve a vault over local WebDAV for a network drive mount.", usage: "seavault serve [--addr 127.0.0.1:8765] [--user seavault] [--password-file PATH] [--quiet-credentials] [--allow-host NAME] [--tls-cert PATH --tls-key PATH | --tls] [--auth-limit on|off] [--drop-os-junk] [flags] VAULT_DIR_OR_PROFILE", handler: cmdServe},
+		{name: "gui", synopsis: "Run the local browser GUI; subcommands: reset-config, reset-login, config-path.", usage: "seavault gui [--addr 127.0.0.1:8787] [--no-open] [--exit-on-browser-close[=false]] [--allow-host NAME] [--tls-cert PATH --tls-key PATH] [--auth-limit on|off] [--insecure-bind] [VAULT_DIR_OR_PROFILE]", handler: cmdGUI},
 		{name: "app-config", aliases: []string{"config"}, synopsis: "Inspect or reset this device's local app configuration.", usage: "seavault app-config path | reset | reset-gui-login", handler: cmdAppConfig},
 		{name: "move", synopsis: "Move a vault directory and update saved locations and remotes.", usage: "seavault move [--profile NAME] [--replace] SOURCE_VAULT_DIR_OR_PROFILE DEST_VAULT_DIR", handler: cmdMove},
 		{name: "version", synopsis: "Print the seavault version and exit.", usage: "seavault version", handler: cmdVersion},
@@ -314,7 +324,7 @@ func init() {
 		// keychain subcommands.
 		{group: "keychain", name: "store", synopsis: "Store a vault password in the OS keychain.", usage: "seavault keychain store VAULT_DIR_OR_PROFILE"},
 		{group: "keychain", name: "status", synopsis: "Report whether a keychain entry exists for a vault.", usage: "seavault keychain status VAULT_DIR_OR_PROFILE"},
-		{group: "keychain", name: "delete", aliases: []string{"remove", "rm"}, synopsis: "Delete a vault's OS keychain entry.", usage: "seavault keychain delete VAULT_DIR_OR_PROFILE"},
+		{group: "keychain", name: "delete", aliases: []string{"remove", "rm"}, synopsis: "Delete a vault's OS keychain entry.", usage: "seavault keychain delete [--debug] VAULT_DIR_OR_PROFILE"},
 
 		// rclone subcommands (version and path were omitted by older usage() — C3).
 		{group: "rclone", name: "status", synopsis: "Report the managed rclone runtime status.", usage: "seavault rclone status [--check-update]"},

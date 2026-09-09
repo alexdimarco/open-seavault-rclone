@@ -32,16 +32,16 @@ func TestEnsureLoopbackBind(t *testing.T) {
 	// table is TestEnsureLoopbackBindGuardTable (row P2).
 	allowed := []string{"127.0.0.1:8787", "localhost:8765", "[::1]:8787", "127.0.0.1:0"}
 	for _, a := range allowed {
-		if _, err := ensureLoopbackBind(a, false, false, false); err != nil {
+		if _, err := ensureLoopbackBind(a, false, false, false, false); err != nil {
 			t.Fatalf("expected %q to be allowed: %v", a, err)
 		}
 	}
 	rejected := []string{"0.0.0.0:8787", ":8787", "192.168.1.5:8787", "example.com:8787"}
 	for _, a := range rejected {
-		if _, err := ensureLoopbackBind(a, false, false, false); err == nil {
+		if _, err := ensureLoopbackBind(a, false, false, false, false); err == nil {
 			t.Fatalf("expected %q to be rejected", a)
 		}
-		if _, err := ensureLoopbackBind(a, true, false, false); err != nil {
+		if _, err := ensureLoopbackBind(a, true, false, false, false); err != nil {
 			t.Fatalf("expected %q to be allowed with --insecure-bind override: %v", a, err)
 		}
 	}

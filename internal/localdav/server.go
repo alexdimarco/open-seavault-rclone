@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alexdimarco/open-seavault-rclone/internal/authlimit"
 	"github.com/alexdimarco/open-seavault-rclone/internal/loopback"
 	"github.com/alexdimarco/open-seavault-rclone/internal/vault"
 )
@@ -55,6 +57,18 @@ type Server struct {
 	// Credentials, when non-nil, require HTTP Basic authentication on every
 	// request (OPTIONS included). See.
 	Credentials *BasicCredentials
+	// AuthLimiter, when non-nil (and Credentials is set), rate-limits and locks
+	// the Basic-auth surface (design-u4 §2.2, surface "basic"): a locked peer is
+	// denied BEFORE the constant-time compare with 429 + Retry-After and NO
+	// WWW-Authenticate (so a client stops re-prompting), a failed compare is
+	// throttled by FailureDelay and then answered 401 as before, and a match
+	// resets the peer. It is nil for the GUI's per-request /dav servers, which are
+	// session-gated rather than Basic-authenticated. See.
+	AuthLimiter *authlimit.Limiter
+	// AuthLogf, when non-nil, receives the one-line operator lock message when the
+	// Basic surface locks a peer (C6); it never carries a credential. cmd serve
+	// points it at the auth-limit log sink. Nil discards the line.
+	AuthLogf func(format string, args ...any)
 	// DropOSJunk, when true, makes the server silently no-op filesystem cruft
 	// (.DS_Store and friends) instead of storing it. See.
 	DropOSJunk bool
@@ -217,9 +231,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 
-	if s.Credentials != nil && !s.credentialsMatch(r) {
-		w.Header().Set("WWW-Authenticate", `Basic realm="open-seavault-rclone", charset="UTF-8"`)
-		http.Error(w, "authentication required", http.StatusUnauthorized)
+	if s.Credentials != nil && !s.authorizeBasic(w, r) {
+		return
+	}
+
+	// The narrow operator "clear lock" lever (W2-6): POST /api/auth-limits/clear
+	// releases ONE named peer or account while the limiter stays on for everyone
+	// else. It sits AFTER authorizeBasic, so it is reachable only once Basic auth
+	// has passed — from an unlocked peer such as loopback on the host — and it is
+	// refused outright when no Basic credentials are configured, so it can never be
+	// called unauthenticated.
+	if r.URL.Path == "/api/auth-limits/clear" {
+		s.handleAuthLimitClear(w, r)
 		return
 	}
 
@@ -272,6 +295,158 @@ func hostForbiddenBody(rawHost string, extra []string) string {
 		allowed += ", " + strings.Join(extra, ", ")
 	}
 	return fmt.Sprintf("forbidden: unexpected Host header %q; allowed: %s; start with --allow-host NAME to add one", rawHost, allowed)
+}
+
+// authorizeBasic gates a Basic-authenticated request. It returns true when the
+// request may proceed and has already written the response otherwise.
+//
+// A request with NO Basic header is the client's first probe: it is answered
+// with the WWW-Authenticate challenge (401) and does NOT touch the limiter — the
+// challenge is a prompt, not a credential guess, so a well-behaved client's
+// initial unauthenticated request never burns a failure. Once credentials are
+// presented, the limiter (when configured) runs BEFORE the constant-time compare
+// (design-u4 §2.2, I-R1): a locked peer gets 429 + Retry-After with NO
+// WWW-Authenticate; a wrong credential is throttled by FailureDelay and then
+// answered 401 with the challenge as before; a match resets the peer.
+func (s *Server) authorizeBasic(w http.ResponseWriter, r *http.Request) bool {
+	user, _, ok := r.BasicAuth()
+	if !ok {
+		w.Header().Set("WWW-Authenticate", `Basic realm="open-seavault-rclone", charset="UTF-8"`)
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return false
+	}
+	if s.AuthLimiter == nil {
+		if s.credentialsMatch(r) {
+			return true
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="open-seavault-rclone", charset="UTF-8"`)
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return false
+	}
+	att, allowed, retryAfter := s.AuthLimiter.Attempt(authlimit.SurfaceBasic, r.RemoteAddr, user)
+	if !allowed {
+		// Locked: deny before the compare. No WWW-Authenticate (so the client
+		// stops re-prompting for a password it cannot currently use).
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(retryAfter)))
+		// Carry the human wait in the BODY too (friction W1-1/W1-4): a client that
+		// hides the Retry-After header still gets the number, and it states the same
+		// "when" as the header and the operator lock line (authlimit.DurationPhrase
+		// is the one source, so "30 seconds" here agrees with Retry-After: 30). No
+		// credential appears (I-R2).
+		http.Error(w, "too many failed authentication attempts; try again in "+authlimit.DurationPhrase(retryAfter), http.StatusTooManyRequests)
+		return false
+	}
+	// Defence in depth (concurrency-reservation-2b): guarantee the reservation is
+	// returned even on a panic or an early return that ran neither Fail nor
+	// Success; Release no-ops once one of those has resolved the attempt.
+	defer att.Release()
+	if s.credentialsMatch(r) {
+		att.Success()
+		return true
+	}
+	att.Fail()
+	if s.AuthLogf != nil {
+		for _, line := range att.LockLines() {
+			s.AuthLogf("%s", line)
+		}
+	}
+	if d := s.AuthLimiter.FailureDelay(); d > 0 {
+		time.Sleep(d)
+	}
+	w.Header().Set("WWW-Authenticate", `Basic realm="open-seavault-rclone", charset="UTF-8"`)
+	http.Error(w, "authentication required", http.StatusUnauthorized)
+	return false
+}
+
+// authLimitClearRequest is the body of POST /api/auth-limits/clear (W2-6): the
+// operator names exactly ONE of a peer or an account to release. It carries no
+// credential — a peer address or a username, both identifiers.
+type authLimitClearRequest struct {
+	Peer    string `json:"peer,omitempty"`
+	Account string `json:"account,omitempty"`
+}
+
+// handleAuthLimitClear serves the serve-side "clear lock" lever (W2-6): it clears
+// the lock/failure state for ONE named peer or account while leaving the limiter
+// ON for everyone else. It reaches here only after Basic auth passed (ServeHTTP),
+// so it is impossible to call without authentication. It requires the WebDAV
+// credentials to be configured AND the limiter to be running; it returns ONLY
+// what was cleared (surface/peer/account, never a credential) and logs one
+// operator line naming what was cleared and by which peer. The residual — a
+// fully-locked-out lone operator still waits or restarts — is documented in
+// SECURITY.md/§6.
+func (s *Server) handleAuthLimitClear(w http.ResponseWriter, r *http.Request) {
+	if s.Credentials == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.AuthLimiter == nil {
+		http.Error(w, "auth limits are disabled; there is nothing to clear", http.StatusBadRequest)
+		return
+	}
+	var req authLimitClearRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	peer := strings.TrimSpace(req.Peer)
+	account := strings.TrimSpace(req.Account)
+	if (peer == "") == (account == "") {
+		http.Error(w, "clear exactly one of peer or account", http.StatusBadRequest)
+		return
+	}
+	var keys []authlimit.ClearedKey
+	what := ""
+	if peer != "" {
+		keys = s.AuthLimiter.ClearPeer(peer)
+		what = "peer " + peer
+	} else {
+		keys = s.AuthLimiter.ClearAccount(account)
+		what = "account " + account
+	}
+	if s.AuthLogf != nil {
+		s.AuthLogf("auth-limit: cleared %s by %s", what, authlimit.PeerKey(r.RemoteAddr))
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"cleared": clearedKeyStrings(keys)})
+}
+
+// clearedKeyStrings renders cleared buckets as human, credential-free strings for
+// the "clear lock" response body.
+func clearedKeyStrings(keys []authlimit.ClearedKey) []string {
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		who := k.Peer
+		switch {
+		case k.Peer == "" && k.Account != "":
+			who = fmt.Sprintf("account %q (from any source)", k.Account)
+		case k.Account != "":
+			who = fmt.Sprintf("%s (user %q)", k.Peer, k.Account)
+		}
+		out = append(out, fmt.Sprintf("%s for %s", authlimit.SurfaceWords(k.Surface), who))
+	}
+	return out
+}
+
+// retryAfterSeconds converts a lock/throttle duration to a whole-seconds
+// Retry-After value, rounding up so a sub-second remainder never truncates to 0
+// (a "retry in 0 seconds" would invite an immediate re-lock). A non-positive
+// duration yields 1.
+func retryAfterSeconds(d time.Duration) int {
+	if d <= 0 {
+		return 1
+	}
+	secs := int((d + time.Second - 1) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	return secs
 }
 
 // credentialsMatch compares the request's Basic credentials against the

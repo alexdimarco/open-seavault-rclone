@@ -431,9 +431,13 @@ func TestExitCodeContract(t *testing.T) {
 	}{
 		{"no args", []string{}, 2},
 		{"unknown top-level", []string{"definitely-not-a-command"}, 2},
-		{"unknown rclone subcommand", []string{"rclone", "frobnicate"}, 1},
-		{"unknown remote subcommand", []string{"remote", "frobnicate"}, 1},
-		{"unknown profile subcommand", []string{"profile", "frobnicate"}, 1},
+		// U4 CLI-1 (I-P1, design §8 Z1): an unknown subcommand now exits 2, the same
+		// usage-error code as an unknown top-level command (they were inconsistent —
+		// top-level 2, subcommand 1). Only the want-values changed; the argv rows and
+		// the assertion are otherwise the pre-U4 table.
+		{"unknown rclone subcommand", []string{"rclone", "frobnicate"}, 2},
+		{"unknown remote subcommand", []string{"remote", "frobnicate"}, 2},
+		{"unknown profile subcommand", []string{"profile", "frobnicate"}, 2},
 	}
 	for _, tc := range nonZero {
 		got := runCode(t, tc.argv...)

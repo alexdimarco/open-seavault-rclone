@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/alexdimarco/open-seavault-rclone/internal/appconfig"
+	"github.com/alexdimarco/open-seavault-rclone/internal/authlimit"
 	"github.com/alexdimarco/open-seavault-rclone/internal/dependencies"
 	"github.com/alexdimarco/open-seavault-rclone/internal/importer"
 	"github.com/alexdimarco/open-seavault-rclone/internal/keychain"
@@ -77,6 +78,32 @@ type Server struct {
 	// listener does not tell a remote visitor to open http://127.0.0.1 (C1). cmd
 	// gui sets it to scheme://<launch-host>:<port>/?launch=… (no real secret).
 	LoginHintURL string
+	// AuthLimiter, when non-nil, rate-limits the GUI credential surfaces
+	// (design-u4 §2.2): the login form (locked → 429 re-render + Retry-After),
+	// /api/open (locked → 429 JSON + Retry-After), and — throttle-only, never
+	// locked (C1/C2) — launch redemption and /api/recovery/redeem. cmd gui sets it
+	// before serving; nil disables all limiting (the emergency off switch, I-R4).
+	AuthLimiter *authlimit.Limiter
+	// AuthLogf, when non-nil, receives the one-line operator lock message when a
+	// GUI surface locks a peer (C6); it never carries a credential. Nil discards.
+	AuthLogf func(format string, args ...any)
+	// AuthLimitStatus is the effective one-line auth-limit status (appconfig
+	// AuthLimits.StatusLine of the running state) cmd gui computes at startup and
+	// the settings surface reads back through /api/status (C7). Empty until set.
+	AuthLimitStatus string
+	// openVaultFn verifies the vault password and opens the vault. It defaults (in
+	// NewWithConfig) to the real vault.Open/OpenWithOptions; it is a TEST SEAM so a
+	// test can inject a fault — a panicking verifier — to prove the /api/open
+	// reservation defer-guard returns the in-flight pending count even when the
+	// verifier does not return normally (concurrency-reservation-2b). Production
+	// never overrides it, so the real KDF is always exercised.
+	openVaultFn func(path, password string, acceptRollback bool) (*vault.Vault, error)
+	// guiLoginKeychainGet reads the legacy GUI-login password from the OS keychain.
+	// It defaults (in NewWithConfig) to the real keychain.Get; it is a TEST SEAM so
+	// a test can force the keychain-read-error branch of handleLogin hermetically
+	// (no real OS keychain touched) to prove that branch RELEASES the limiter
+	// reservation rather than clearing the failure streak (peer-spoofing-2).
+	guiLoginKeychainGet func(account string) (string, error)
 	// authSessions maps a session cookie value to its state. A session is created
 	// only by redeeming the launch secret (see handleLaunch); its TTL slides 12h
 	// on every request that passes the session check. See.
@@ -323,6 +350,10 @@ type statusResponse struct {
 	AppConfig       appconfig.Config    `json:"appConfig"`
 	Dependencies    dependencies.Report `json:"dependencies"`
 	AuthEnabled     bool                `json:"authEnabled"`
+	// AuthLimitStatus is the effective one-line auth-limit status the settings
+	// surface renders (C7): "auth limits: on (…)" or "auth limits: OFF since
+	// <date> — …". Empty when cmd did not set it (e.g. a bare NewWithConfig).
+	AuthLimitStatus string `json:"authLimitStatus,omitempty"`
 	// RecoveryMissing is true when a vault is open that holds no recovery-key
 	// entry, so the full page can surface a persistent "no recovery key" banner
 	// until one exists (recovery-integration-3, design §3.3 step 3). It is false
@@ -470,6 +501,15 @@ func NewWithConfig(initialVault string, cfg appconfig.Config) (*Server, error) {
 		presence:       localdav.NewPresenceCache(),
 		shutdownCh:     make(chan struct{}),
 	}
+	// Default the open-verify seam to the real vault open (production always uses
+	// this; a test may override it — concurrency-reservation-2b).
+	s.openVaultFn = func(path, password string, acceptRollback bool) (*vault.Vault, error) {
+		if acceptRollback {
+			return vault.OpenWithOptions(path, password, vault.OpenOptions{AcceptRollback: true})
+		}
+		return vault.Open(path, password)
+	}
+	s.guiLoginKeychainGet = keychain.Get
 	if strings.TrimSpace(initialVault) != "" {
 		resolved, err := resolveVaultArg(initialVault)
 		if err != nil {
@@ -776,8 +816,9 @@ func (s *Server) serveNoSession(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusForbidden)
 		_ = noSessionPage.Execute(w, struct {
-			CookieBlocked bool
-			LaunchExample string
+			CookieBlocked  bool
+			LaunchExample  string
+			ThrottleReason string
 		}{CookieBlocked: r.URL.Query().Get("redeemed") == "1", LaunchExample: s.LoginHintURL})
 		return
 	}
@@ -892,6 +933,10 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleRecoveryRedeem(w, r)
 	case "/api/recovery/revoke":
 		s.handleRecoveryRevoke(w, r)
+	case "/api/auth-limits/self":
+		s.handleAuthLimitSelf(w, r)
+	case "/api/auth-limits/clear":
+		s.handleAuthLimitClear(w, r)
 	case "/api/setup/detect":
 		s.handleSetupDetect(w, r)
 	case "/api/setup/validate":
@@ -1107,7 +1152,14 @@ func (s *Server) sweepExpiredLocked(now time.Time) {
 func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
 	provided := r.URL.Query().Get("launch")
 	if subtle.ConstantTimeCompare([]byte(provided), []byte(s.launchSecret)) != 1 {
-		http.Error(w, "forbidden: invalid launch secret", http.StatusForbidden)
+		// Throttle only, never lock (C1/I-R9): the 256-bit launch secret is the
+		// defense, and a lock here would deny the only bootstrap path to a session.
+		// A wrong guess is delayed by FailureDelay, then answered with the styled
+		// no-session page carrying the THROTTLE reason (wiring-2 / §2.2 / friction
+		// W1-6) — never a lock and never a bare 403; the correct secret is never
+		// gated by the limiter and always redeems.
+		s.throttleAuthFailure()
+		s.serveWrongLaunch(w, r)
 		return
 	}
 	id, err := randomToken()
@@ -1125,6 +1177,202 @@ func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
 	secure := s.cookieSecure()
 	http.SetCookie(w, &http.Cookie{Name: guiSessionCookie, Value: id, Path: "/", Expires: expires, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secure})
 	http.Redirect(w, r, "/?redeemed=1", http.StatusFound)
+}
+
+// serveWrongLaunch answers a wrong/stale ?launch= with the styled no-session page
+// (wiring-2 / §2.2 / friction W1-6) at 403, carrying the THROTTLE reason — never a
+// lock (launch is throttle-only, C1/I-R9) — and the launch example already on the
+// page, instead of the old bare "forbidden: invalid launch secret" text. It names
+// no secret (I-R2).
+func (s *Server) serveWrongLaunch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusForbidden)
+	_ = noSessionPage.Execute(w, struct {
+		CookieBlocked  bool
+		LaunchExample  string
+		ThrottleReason string
+	}{
+		LaunchExample:  s.LoginHintURL,
+		ThrottleReason: "That launch link is not valid. Repeated attempts are briefly throttled (a short delay, never a lockout). Open the current launch link that open-seavault-rclone printed to the terminal when it started.",
+	})
+}
+
+// throttleAuthFailure applies the limiter's FailureDelay sleep for the
+// throttle-only surfaces (launch, redeem) that never lock (C1/C2). It is a no-op
+// when the limiter is off or the configured delay is zero.
+func (s *Server) throttleAuthFailure() {
+	if s.AuthLimiter == nil {
+		return
+	}
+	if d := s.AuthLimiter.FailureDelay(); d > 0 {
+		time.Sleep(d)
+	}
+}
+
+// logAuthLocks writes the operator-facing lock line(s) a Fail produced (C6),
+// each already free of any credential (I-R2). A nil sink or an unlocked Fail
+// writes nothing.
+func (s *Server) logAuthLocks(att *authlimit.Attempt) {
+	if att == nil || s.AuthLogf == nil {
+		return
+	}
+	for _, line := range att.LockLines() {
+		s.AuthLogf("%s", line)
+	}
+}
+
+// authLimitSelfResponse is the per-viewer lock-state readout the GUI banner polls
+// (wiring-2 / §2.2). It reports ONLY the viewer's OWN lock state on the
+// post-login surfaces (open, redeem), keyed by the TCP peer — never another
+// peer's state, and never the shared account ceiling — so it discloses nothing an
+// attacker could use to probe other peers, and it never carries a credential.
+type authLimitSelfResponse struct {
+	Locked            bool `json:"locked"`
+	RetryAfterSeconds int  `json:"retryAfterSeconds,omitempty"`
+}
+
+// handleAuthLimitSelf serves GET /api/auth-limits/self: the viewer's own lock
+// state (wiring-2). It reaches here only through the fully-authorized dispatch
+// (a valid session, and loggedIn when a GUI password is configured), so it is
+// session-gated by construction. With the limiter off, or the viewer unlocked, it
+// reports locked:false. It consults the open and redeem surfaces — the only two
+// that can show a banner (§2.2) — for THIS peer only, via the read-only
+// SelfState query (no reservation, no new map entry).
+func (s *Server) handleAuthLimitSelf(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	resp := authLimitSelfResponse{}
+	if s.AuthLimiter != nil {
+		var worst time.Duration
+		for _, surface := range []authlimit.Surface{authlimit.SurfaceOpen, authlimit.SurfaceRedeem} {
+			if locked, ra := s.AuthLimiter.SelfState(surface, r.RemoteAddr, ""); locked && ra > worst {
+				worst = ra
+			}
+		}
+		if worst > 0 {
+			resp.Locked = true
+			resp.RetryAfterSeconds = authRetryAfterSeconds(worst)
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// authLimitClearRequest is the body of POST /api/auth-limits/clear (W2-6): the
+// operator names exactly ONE of a peer or an account to release. It carries no
+// credential — a peer address or a username, both identifiers.
+type authLimitClearRequest struct {
+	Peer    string `json:"peer,omitempty"`
+	Account string `json:"account,omitempty"`
+}
+
+// handleAuthLimitClear serves POST /api/auth-limits/clear: the narrow operator
+// self-unlock lever (W2-6). It clears the lock/failure state for ONE named peer
+// or account while leaving the limiter ON for everyone else. It reaches here only
+// through the fully-authorized dispatch AND behind the CSRF token check (a
+// state-changing POST), so it is impossible to call without the logged-in GUI
+// session. It returns ONLY what was cleared (surface/peer/account — never a
+// credential) and logs one operator line naming what was cleared and by which
+// peer. A locked operator peer cannot reach it (the session dispatch runs after
+// nothing that locks the GUI page), and the residual — a fully-locked-out lone
+// operator still waits or restarts — is documented in SECURITY.md/§6.
+func (s *Server) handleAuthLimitClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var req authLimitClearRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	peer := strings.TrimSpace(req.Peer)
+	account := strings.TrimSpace(req.Account)
+	if (peer == "") == (account == "") {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "clear exactly one of peer or account"})
+		return
+	}
+	if s.AuthLimiter == nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "auth limits are disabled; there is nothing to clear"})
+		return
+	}
+	cleared, what := s.clearAuthLimit(peer, account)
+	s.logAuthLimitClear(what, r.RemoteAddr)
+	writeJSON(w, http.StatusOK, map[string]any{"cleared": cleared})
+}
+
+// clearAuthLimit performs the peer/account clear and returns the redacted
+// descriptions of what was freed plus a short operator phrase for the log line.
+func (s *Server) clearAuthLimit(peer, account string) (cleared []string, what string) {
+	var keys []authlimit.ClearedKey
+	if peer != "" {
+		keys = s.AuthLimiter.ClearPeer(peer)
+		what = "peer " + peer
+	} else {
+		keys = s.AuthLimiter.ClearAccount(account)
+		what = "account " + account
+	}
+	return clearedKeyStrings(keys), what
+}
+
+// logAuthLimitClear writes the operator line for a clear-lock action (W2-6),
+// naming what was cleared and the peer that requested it, never a credential.
+func (s *Server) logAuthLimitClear(what, remoteAddr string) {
+	if s.AuthLogf == nil {
+		return
+	}
+	s.AuthLogf("auth-limit: cleared %s by %s", what, authlimit.PeerKey(remoteAddr))
+}
+
+// clearedKeyStrings renders cleared buckets as human, credential-free strings for
+// a "clear lock" response body (shared by the GUI and serve levers).
+func clearedKeyStrings(keys []authlimit.ClearedKey) []string {
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		who := k.Peer
+		switch {
+		case k.Peer == "" && k.Account != "":
+			who = fmt.Sprintf("account %q (from any source)", k.Account)
+		case k.Account != "":
+			who = fmt.Sprintf("%s (user %q)", k.Peer, k.Account)
+		}
+		out = append(out, fmt.Sprintf("%s for %s", authlimit.SurfaceWords(k.Surface), who))
+	}
+	return out
+}
+
+// authRetryAfterSeconds converts a lock/throttle duration to a whole-seconds
+// Retry-After value, rounding up so a sub-second remainder never truncates to 0.
+func authRetryAfterSeconds(d time.Duration) int {
+	if d <= 0 {
+		return 1
+	}
+	secs := int((d + time.Second - 1) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	return secs
+}
+
+// renderLoginLocked answers a locked GUI-login attempt (C6): it re-renders the
+// login template with an honest countdown, a 429 status, and a Retry-After
+// header, so the browser shows why and for how long, and never with any
+// credential material. The countdown uses authlimit.DurationPhrase — the same
+// source as the operator lock line and the Retry-After header — so a 30-second
+// first lock reads "30 seconds" instead of a rounded-up, contradictory "1 minute"
+// (friction W1-2).
+func (s *Server) renderLoginLocked(w http.ResponseWriter, r *http.Request, retryAfter time.Duration) {
+	if !s.guiAuthEnabled() {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Retry-After", fmt.Sprintf("%d", authRetryAfterSeconds(retryAfter)))
+	w.WriteHeader(http.StatusTooManyRequests)
+	msg := fmt.Sprintf("Too many failed login attempts; try again in %s.", authlimit.DurationPhrase(retryAfter))
+	_ = loginPage.Execute(w, struct{ Message string }{Message: msg})
 }
 
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request, message string) {
@@ -1149,21 +1397,58 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	cfg := s.currentConfig()
 	username := strings.TrimSpace(r.FormValue("username"))
 	password := r.FormValue("password")
+	// design-u4 §2.2 surface "login": rate-limit BEFORE the argon2id verification
+	// (the cost). A locked peer/account is denied with a 429 re-render + Retry-After
+	// (C6); a wrong credential is throttled by FailureDelay then re-rendered as
+	// before; valid credentials reset the key.
+	var loginAttempt *authlimit.Attempt
+	if s.AuthLimiter != nil {
+		att, allowed, retryAfter := s.AuthLimiter.Attempt(authlimit.SurfaceLogin, r.RemoteAddr, username)
+		if !allowed {
+			s.renderLoginLocked(w, r, retryAfter)
+			return
+		}
+		loginAttempt = att
+		// Defence in depth (concurrency-reservation-2b): guarantee the reservation
+		// is returned even on a panic or an early return that ran neither Fail nor
+		// Success; Release no-ops once one of those has resolved the attempt, so a
+		// leaked pending can never wedge this peer — or the shared account ceiling —
+		// shut.
+		defer loginAttempt.Release()
+	}
 	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(cfg.GUI.Username)) == 1
 	passOK := false
 	if strings.TrimSpace(cfg.GUI.PasswordHash) != "" {
 		passOK = verifyGUIPasswordHash(cfg.GUI.PasswordHash, password)
 	} else {
-		stored, err := keychain.Get(guiAuthAccount)
+		stored, err := s.guiLoginKeychainGet(guiAuthAccount)
 		if err != nil {
+			// A keychain-read failure is not a credential guess: RELEASE the
+			// reservation without counting it (peer-spoofing-2 — Success would
+			// wrongly clear the failure streak and lock on all three keys, including
+			// the shared account ceiling, on an infrastructure error the attacker
+			// never earned), then re-render the remedy.
+			if loginAttempt != nil {
+				loginAttempt.Release()
+			}
 			s.handleLoginPage(w, r, "GUI login is using a legacy OS-keychain password, but open-seavault-rclone could not read it. Use Reset password and app configuration, then set the GUI login password again. Keychain detail: "+err.Error())
 			return
 		}
 		passOK = subtle.ConstantTimeCompare([]byte(password), []byte(stored)) == 1
 	}
 	if !userOK || !passOK {
+		if loginAttempt != nil {
+			loginAttempt.Fail()
+			s.logAuthLocks(loginAttempt)
+			s.throttleAuthFailure()
+		}
 		s.handleLoginPage(w, r, "Invalid open-seavault-rclone GUI username or password.")
 		return
+	}
+	// Credentials are valid: reset the limiter key now (a subsequent session-expiry
+	// re-render below is not a credential failure and must not accumulate).
+	if loginAttempt != nil {
+		loginAttempt.Success()
 	}
 	// Success sets loggedIn on the EXISTING session (created by the launch
 	// redemption); no new cookie is issued. step 5.
@@ -1460,7 +1745,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		recoveryMissing = !vaultHasRecoveryEntry(s.vault)
 	}
 	s.mu.Unlock()
-	resp := statusResponse{Open: open, BrowserToken: s.tokenValue(), WebDAV: s.webdavStatus(), VaultPath: vaultPath, VaultID: vaultID, Config: cfgDTO, Profiles: entries, AvailableVaults: s.availableVaultStatuses(entries), SuggestedPaths: userpath.SuggestedVaultPaths(), KeychainStatus: s.keychainStatus, AppConfig: s.currentConfig(), Dependencies: dependencies.Report{Keychain: s.keychainStatus}, AuthEnabled: s.guiAuthEnabled(), RecoveryMissing: recoveryMissing}
+	resp := statusResponse{Open: open, BrowserToken: s.tokenValue(), WebDAV: s.webdavStatus(), VaultPath: vaultPath, VaultID: vaultID, Config: cfgDTO, Profiles: entries, AvailableVaults: s.availableVaultStatuses(entries), SuggestedPaths: userpath.SuggestedVaultPaths(), KeychainStatus: s.keychainStatus, AppConfig: s.currentConfig(), Dependencies: dependencies.Report{Keychain: s.keychainStatus}, AuthEnabled: s.guiAuthEnabled(), AuthLimitStatus: s.AuthLimitStatus, RecoveryMissing: recoveryMissing}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1588,27 +1873,58 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "password is required unless the OS keychain has this vault"})
 		return
 	}
-	var v *vault.Vault
-	if req.AcceptRollback {
-		// The operator has explicitly acknowledged a restore-from-backup: pass
-		// AcceptRollback into Open so the strict freshness gate clears the anchor and
-		// re-TOFUs, for THIS request only. checkFreshness and the non-interactive
-		// path are untouched (I-U5).
-		v, err = vault.OpenWithOptions(vaultPath, password, vault.OpenOptions{AcceptRollback: true})
-	} else {
-		v, err = vault.Open(vaultPath, password)
+	// design-u4 §2.2 surface "open": bound attempts against the vault-unwrap KDF
+	// (the main cost, 64 MiB per attempt). A locked peer is denied before the
+	// unwrap with 429 JSON {error, retryAfterSeconds} + Retry-After (C6); a wrong
+	// password is throttled by FailureDelay then answered as before; a successful
+	// unwrap resets the peer. No account: the vault password carries no username.
+	var openAttempt *authlimit.Attempt
+	if s.AuthLimiter != nil {
+		att, allowed, retryAfter := s.AuthLimiter.Attempt(authlimit.SurfaceOpen, r.RemoteAddr, "")
+		if !allowed {
+			secs := authRetryAfterSeconds(retryAfter)
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", secs))
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error":             fmt.Sprintf("too many failed open attempts; try again in %s", authlimit.DurationPhrase(retryAfter)),
+				"retryAfterSeconds": secs,
+			})
+			return
+		}
+		openAttempt = att
+		// Defence in depth (concurrency-reservation-2b): the vault-unwrap KDF is the
+		// costliest verifier and the one most likely to panic on a malformed config;
+		// guarantee the reservation is returned even then. Release no-ops once Fail
+		// or Success has resolved the attempt, so a panic or early return can never
+		// leak a pending count against this peer.
+		defer openAttempt.Release()
 	}
+	var v *vault.Vault
+	// The verifier runs through the openVaultFn seam (production: the real
+	// vault.Open/OpenWithOptions; a test may inject a fault). AcceptRollback passes
+	// the restore-from-backup acknowledgement so the strict freshness gate clears
+	// the anchor and re-TOFUs for THIS request only (I-U5).
+	v, err = s.openVaultFn(vaultPath, password, req.AcceptRollback)
 	if err != nil {
+		// A failed unwrap is a credential failure: throttle it (and log any lock).
+		if openAttempt != nil {
+			openAttempt.Fail()
+			s.logAuthLocks(openAttempt)
+			s.throttleAuthFailure()
+		}
 		// A rolled-back config surfaces the accept-rollback affordance: the page
 		// reads canAcceptRollback and offers "I restored this from a backup", which
 		// re-submits with acceptRollback:true AND the re-entered password (design
-		// U2 §2.7). The error text still carries the strict-gate instructions.
+		// U2 §2.7). GUI-OWN 6: the body is worded for the GUI — it names that
+		// control, never the CLI --accept-rollback flag — keeping the strict-gate warning.
 		if errors.Is(err, vault.ErrConfigRolledBack) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "canAcceptRollback": true})
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": rollbackGUIMessage, "canAcceptRollback": true})
 			return
 		}
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
+	}
+	if openAttempt != nil {
+		openAttempt.Success()
 	}
 	warnings := []string{}
 	// Config-MAC ratchet on the first write-capable GUI open (
@@ -1663,6 +1979,11 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	// Closing the vault ends the "skip to advanced" choice (GUI-D2 1): a returning
+	// owner who skipped to the app view and then closed must land on Welcome-back on
+	// the next index render, not the sticky app view, so the recovery/open golden
+	// path is signposted again. clearSetupSkipped is a no-op for a missing session.
+	s.clearSetupSkipped(r)
 	s.mu.Lock()
 	s.vault = nil
 	s.pendingRecovery = nil
@@ -1865,7 +2186,7 @@ func (s *Server) handleRecoveryCommit(w http.ResponseWriter, r *http.Request) {
 	// usability-aid disclaimer, instead of the generic wrong-phrase line (design
 	// U2 §2.5 / review C1). A base32-shaped mismatch keeps the generic message.
 	if err := vault.RecoveryPhraseCheck(pend.phrase, req.Readback); err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: recoveryReadbackMessage(err)})
+		writeJSON(w, http.StatusBadRequest, apiError{Error: recoveryReadbackMessage(err, pend.phrase, req.Readback)})
 		return
 	}
 	if err := pend.commit(); err != nil {
@@ -1889,14 +2210,61 @@ func (s *Server) handleRecoveryCommit(w http.ResponseWriter, r *http.Request) {
 // disclaimer that the built-in checksum is a usability aid, not a security
 // control (design U2 §2.5 / matrix M1). A base32-shaped mismatch keeps the
 // generic line. The message never contains either secret.
-func recoveryReadbackMessage(err error) string {
+func recoveryReadbackMessage(err error, minted, readback string) string {
 	switch {
 	case errors.Is(err, vault.ErrRecoveryChecksum), errors.Is(err, vault.ErrRecoveryWordUnknown), errors.Is(err, vault.ErrRecoveryWordCount):
-		return err.Error() + ". This checksum is a usability aid, not a security control. Nothing was written — check the words against your saved copy and try again."
+		msg := err.Error()
+		if idx := recoveryReadbackFirstDiff(minted, readback); idx > 0 {
+			msg += fmt.Sprintf("; the first word that differs is word %d", idx)
+		}
+		// DOCS-2: the disclaimer covers BOTH gates — an unknown word is caught by the
+		// wordlist lookup, a mistyped or misordered word by the built-in checksum — and
+		// neither is a security control (the "usability aid, not a security control"
+		// substring is pinned by matrix M1).
+		return msg + ". The recovery wordlist and its built-in checksum are a usability aid, not a security control. Nothing was written — check the words against your saved copy and try again."
 	default:
 		return "the re-entered phrase did not match; nothing was written — check the phrase and try again"
 	}
 }
+
+// recoveryReadbackFirstDiff returns the 1-based position of the first word in a
+// word-shaped readback that differs from minted's canonical 24-word form, or 0 when
+// the readback is not word-shaped or nothing differs (GUI-OWN 4). It is a server-side
+// diff: only the index is surfaced, never the correct word, so a typist learns WHICH
+// word to check without any phrase material leaving the process.
+func recoveryReadbackFirstDiff(minted, readback string) int {
+	want, err := vault.RecoveryPhraseWords(minted)
+	if err != nil {
+		return 0
+	}
+	got := strings.Fields(readback)
+	// Only a word-shaped read-back (roughly the 24-word form) has per-word positions
+	// to name; a compact base32 read-back does not.
+	if len(got) < 20 || len(got) > 28 {
+		return 0
+	}
+	n := len(got)
+	if len(want) < n {
+		n = len(want)
+	}
+	for i := 0; i < n; i++ {
+		if !strings.EqualFold(strings.TrimSpace(got[i]), want[i]) {
+			return i + 1
+		}
+	}
+	// The compared prefix matched but the lengths differ: the first missing or extra
+	// word is the divergence.
+	if len(got) != len(want) {
+		return n + 1
+	}
+	return 0
+}
+
+// rollbackGUIMessage is the GUI-neutral body for a rolled-back /api/open refusal
+// (GUI-OWN 6). It carries the same freshness warning as the CLI ErrConfigRolledBack
+// but points at the GUI "I restored this from a backup" control instead of the
+// --accept-rollback flag, so a browser user is never sent to a command line.
+const rollbackGUIMessage = "This vault looks older than this device last saw it. If you deliberately restored it from a backup, re-enter the vault password and choose \"I restored this from a backup\" to open it and re-establish freshness. If you did NOT expect this, the sync server may be replaying a retired configuration: do not enter a retired password, and restore this vault from a good backup or open it on another device."
 
 // recordRecoveryLabel writes the device-local label record for the recovery entry
 // just appended to v (design U2 §2.6): the created date and this device's
@@ -1963,7 +2331,16 @@ func (s *Server) handleRecoveryRedeem(w http.ResponseWriter, r *http.Request) {
 	}
 	v, entryID, err := vault.OpenWithRecovery(vaultPath, req.Phrase, vault.OpenOptions{})
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		// design-u4 §2.2 surface "redeem": throttle only, NEVER lock (C2/I-R9) — a
+		// fumbled 24-word phrase must never lock the last-resort recovery path. The
+		// wrong phrase is delayed by FailureDelay and answered with the existing
+		// error carrying retryAfterSeconds; the correct phrase is never gated.
+		retryAfterSeconds := 0
+		if s.AuthLimiter != nil {
+			s.throttleAuthFailure()
+			retryAfterSeconds = authRetryAfterSeconds(s.AuthLimiter.FailureDelay())
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "retryAfterSeconds": retryAfterSeconds})
 		return
 	}
 	if err := v.RedeemRecovery(entryID, req.NewPassword); err != nil {
@@ -3946,11 +4323,15 @@ h1 { margin:0 0 8px; font-size:1.35rem; }
 p { line-height:1.5; }
 code { background:rgba(127,127,127,.14); border-radius:6px; padding:1px 5px; }
 small { color:var(--muted); }
+.throttle { border:1px solid var(--border); background:rgba(234,179,8,.12); padding:10px 12px; border-radius:10px; }
 </style>
 </head>
 <body>
 <main>
   <h1>open-seavault-rclone session required</h1>
+{{if .ThrottleReason}}
+  <p class="throttle">{{.ThrottleReason}}</p>
+{{end}}
 {{if .CookieBlocked}}
   <p>Your browser is <strong>not storing</strong> the open-seavault-rclone session cookie for <code>127.0.0.1</code>/<code>localhost</code>. Allow cookies for this address, then open the launch link again.</p>
   <p><small>Private-mode or cookie-blocking settings for local addresses prevent the GUI from keeping you signed in.</small></p>
@@ -4320,6 +4701,7 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
 .jump-links a { color: var(--focus); text-decoration: none; padding: 4px 0; }
 .jump-links a:hover { text-decoration: underline; }
 .compat-warning { display: none; padding: 10px 12px; border-radius: 12px; background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger); margin-top: 12px; }
+.auth-limit-banner { padding: 10px 12px; border-radius: 12px; background: var(--panel-2); color: var(--fg); border: 1px solid #ef4444; border-left: 4px solid #ef4444; margin: 0 0 12px; font-weight: 500; }
 .notice-banner { padding: 10px 12px; border-radius: 12px; background: var(--panel-2); color: var(--fg); border: 1px solid var(--focus); border-left: 4px solid var(--focus); margin-top: 12px; }
 .notice-banner ul { margin: 4px 0 0; padding-left: 18px; }
 .notice-banner .notice-title { font-weight: 600; }
@@ -4446,7 +4828,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
     <button type="button" class="destination-tab" data-destination="security" onclick="showDestination('security')">Security</button>
     <button type="button" class="destination-tab" data-destination="advanced" onclick="showDestination('advanced')">Advanced</button>
   </nav>
-  <p class="advanced-toggle-row"><button type="button" id="showAdvancedToggle" onclick="toggleAdvanced()">Show advanced</button></p>
+  <p class="advanced-toggle-row"><button type="button" id="showAdvancedToggle" onclick="toggleAdvanced()">Keep advanced visible</button></p>
 </div>
 
 <section id="welcome-back" aria-label="Welcome back">
@@ -4454,7 +4836,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
   <p class="hint">Open one of your saved vaults, point open-seavault-rclone at a vault folder you already have, or create a new vault.</p>
   <div id="welcomeVaultList" class="table-wrap"><p class="hint">Loading your saved vaults&hellip;</p></div>
   <div class="form-grid">
-    <label>I already have a vault &mdash; choose its folder
+    <label>I already have a vault &mdash; enter its folder path
       <input id="welcomeVaultPath" placeholder="~/Nextcloud/seavault" autocomplete="off">
       <small>Point to a vault folder you already have, for example one your sync client restored on this device. This opens it with the existing vault; nothing is created.</small>
     </label>
@@ -4600,6 +4982,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
   </nav>
 <section id="vault-panel">
   <h2>Your vault</h2>
+  <div id="authLimitBanner" class="auth-limit-banner" role="status" hidden></div>
   <div class="form-grid">
     <label>Saved vault selector
       <select id="vaultSelect" onchange="selectSavedVault()">
@@ -4860,7 +5243,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
     </div>
     <div id="recoveryReadbackStep" hidden>
       <p class="hint">Re-enter the recovery phrase from your written copy to confirm before it is saved. Paste is disabled so the re-entry proves you captured it off-screen.</p>
-      <p class="hint">If a word is mistyped or out of order, the built-in checksum will usually catch it and say so. That checksum is a usability aid, not a security control.</p>
+      <p class="hint">If a word is not in the recovery wordlist, the wordlist lookup catches it. If a word is mistyped or out of order, the built-in checksum will usually catch it and say so. That checksum is a usability aid, not a security control.</p>
       <div class="form-grid">
         <label>Re-enter the recovery phrase to confirm
           <input id="recoveryReadback" autocomplete="off" onpaste="return false" ondrop="return false" ondragover="return false" placeholder="type the phrase from your written copy">
@@ -4878,6 +5261,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
       <button class="secondary" onclick="recoveryPrintConfirmedCard()">Print confirmed card</button>
     </p>
   </div>
+  <p class="hint">Each key is shown by its handle. The number after the # matches the number printed on that key&rsquo;s recovery card, so you can tell which paper key a row refers to and which to keep.</p>
   <div id="recoveryList" class="table-wrap"></div>
 
   <h3>Redeem a recovery key</h3>
@@ -5181,6 +5565,50 @@ function showError(title, detail){
   $('message').textContent = title;
   appendLog(title, detail || '', 'error');
 }
+// ---- per-viewer auth-limit lock banner + countdown (wiring-2 / design §2.2) ----
+// Shows THIS device's own open-lockout state as a banner, disables the Open
+// buttons until the countdown elapses, and wires retryAfterSeconds from an open
+// 429 into the same countdown. It is per-viewer: /api/auth-limits/self returns
+// only this peer's state, never another peer's, and never a credential.
+let authLimitTimer = null;
+let authLimitUntil = 0;
+function setOpenButtonsDisabled(disabled){
+  document.querySelectorAll('button[onclick^="openVault"],button[onclick^="quickOpenVault"],button[onclick^="welcomeOpen"]').forEach(function(b){ b.disabled = disabled; });
+}
+function renderAuthLimitBanner(){
+  const el = $('authLimitBanner');
+  if(!el) return;
+  const remaining = Math.max(0, Math.ceil((authLimitUntil - Date.now())/1000));
+  if(remaining <= 0){
+    el.hidden = true; el.textContent = '';
+    setOpenButtonsDisabled(false);
+    if(authLimitTimer){ clearInterval(authLimitTimer); authLimitTimer = null; }
+    return;
+  }
+  el.hidden = false;
+  el.textContent = 'Too many failed open attempts from this device. Open is paused for ' + remaining + ' second' + (remaining === 1 ? '' : 's') + '. This is a per-device lockout that clears on its own — no restart needed.';
+  setOpenButtonsDisabled(true);
+}
+function startAuthLimitCountdown(seconds){
+  const s = Number(seconds) || 0;
+  if(s <= 0) return;
+  authLimitUntil = Math.max(authLimitUntil, Date.now() + s*1000);
+  renderAuthLimitBanner();
+  if(!authLimitTimer){ authLimitTimer = setInterval(renderAuthLimitBanner, 1000); }
+}
+async function refreshAuthLimitSelf(){
+  try {
+    const st = await api('/api/auth-limits/self');
+    if(st && st.locked && st.retryAfterSeconds){ startAuthLimitCountdown(st.retryAfterSeconds); }
+  } catch(e){ /* a status poll must never disrupt the page */ }
+}
+// maybeAuthLimitLocked reads a thrown api() error: an open 429 carries
+// retryAfterSeconds, which feeds the same countdown so the banner appears the
+// moment the server locks this device.
+function maybeAuthLimitLocked(e){
+  if(e && e.status === 429 && e.body && e.body.retryAfterSeconds){ startAuthLimitCountdown(e.body.retryAfterSeconds); return true; }
+  return false;
+}
 // showNotices renders any warnings[] an action returned (the SeaVaultData /
 // hidden-file-sync notes from /api/init and /api/open) as a visible info banner,
 // so a non-technical owner reads them instead of hunting through the JSON log
@@ -5342,8 +5770,8 @@ async function listRecovery(){
     // full entry ID drives revoke. isLast is passed so the last remaining key
     // triggers the consequence-naming confirmation before its revoke.
     const isLast = rows.length === 1;
-    box.innerHTML = '<table><thead><tr><th>Recovery key</th><th>ID</th><th></th></tr></thead><tbody>' +
-      rows.map(r => '<tr><td>'+esc(r.display || ('Recovery key #' + (r.handle||'')))+'</td><td><code>'+esc(r.id)+'</code></td><td><button class="secondary" onclick="revokeRecovery(\''+esc(r.id)+'\','+(isLast?'true':'false')+')">Revoke</button></td></tr>').join('') +
+    box.innerHTML = '<table><thead><tr><th>Recovery key</th><th></th></tr></thead><tbody>' +
+      rows.map(r => '<tr><td>'+esc(r.display || ('Recovery key #' + (r.handle||'')))+'</td><td><button class="secondary" onclick="revokeRecovery(\''+esc(r.id)+'\','+(isLast?'true':'false')+')">Revoke</button></td></tr>').join('') +
       '</tbody></table>';
   } catch(e){ showError('Could not list recovery keys', e.message); }
 }
@@ -5672,7 +6100,7 @@ async function welcomeOpen(){
     if(!path){ showError('Vault folder required', 'Enter or choose the folder of the vault you want to open.'); return; }
     await api('/api/open',{method:'POST',headers:jsonHeaders,body:JSON.stringify({vaultPath: path, password: pw, useKeychain: !pw})});
     window.location.href = '/';
-  } catch(e){ if(await offerAcceptRollback(e, path, pw)) return; showError('Could not open the vault', humanFetchError(e)); }
+  } catch(e){ if(await offerAcceptRollback(e, path, pw)) return; maybeAuthLimitLocked(e); showError('Could not open the vault', humanFetchError(e)); }
 }
 // welcomeRedeemPrefill copies the Welcome-back folder-picker path into the redeem
 // vault-path field when the redeem disclosure is opened and that field is still
@@ -5783,7 +6211,7 @@ async function submitVaultPasswordModal(){
   try {
     await openSavedVaultWithPassword(target.name, target.path, pw, save);
     closeVaultPasswordModal();
-  } catch(e){ showError('Could not open vault', e.message); }
+  } catch(e){ maybeAuthLimitLocked(e); showError('Could not open vault', e.message); }
 }
 function selectVaultCard(name, path){ $('vaultPath').value = path; $('profile').value = name; const sel=$('vaultSelect'); if(sel) sel.value=name; showHuman('Saved vault selected', 'Selected ' + name + '.'); }
 async function openSavedVault(name, path, useKeychain){
@@ -5822,7 +6250,7 @@ async function openSavedVaultFromPassword(name, path, passwordId, saveKeychain){
     catch(e) { showVaultPasswordModal(name, path); showError('Saved keychain password unavailable', e.message || e); return; }
   }
   try { await openSavedVaultDirect(name, path, pw, !!saveKeychain, false); }
-  catch(e){ showError('Could not open vault', e.message || e); }
+  catch(e){ maybeAuthLimitLocked(e); showError('Could not open vault', e.message || e); }
 }
 function initPayload(){ return {vaultPath:$('vaultPath').value, password:$('password').value, profile:$('profile').value, savePassword:$('savePassword').checked, kdf:$('kdf').value}; }
 function openPayload(useKeychain){ return {vaultPath:$('vaultPath').value, password:$('password').value, savePassword:$('savePassword').checked, useKeychain:useKeychain}; }
@@ -5883,7 +6311,7 @@ async function saveCurrentVaultProfile(){
   } catch(e){ showError('Could not save vault', e.message); }
 }
 async function initVault(){ try { const warn = localPathWarning(); if(warn){ showError('Invalid vault path', warn); return; } const res = await api('/api/init',{method:'POST',headers:jsonHeaders,body:JSON.stringify(initPayload())}); $('password').value=''; const status = await api('/api/status'); status.lastAction = res; lastStatus = status; renderVaultSelector(status); renderAvailableVaults(status); renderTopVaultStrip(status); renderKeychainStatus(status); renderDependencies(status); renderWebDAVStatus(status); renderWebDAVQuick(status); renderAppConfig(status); showHuman('Vault created and opened', status, 'success'); showNotices(res.warnings); await refreshFiles(); await refreshDavFiles(); await loadProfiles(); } catch(e){ showError('Could not create vault', e.message); } }
-async function openVault(useKeychain){ try { const warn = localPathWarning(); if(warn){ showError('Invalid vault path', warn); return; } const res = await api('/api/open',{method:'POST',headers:jsonHeaders,body:JSON.stringify(openPayload(useKeychain))}); $('password').value=''; const status = await api('/api/status'); status.lastAction = res; lastStatus = status; renderVaultSelector(status); renderAvailableVaults(status); renderTopVaultStrip(status); renderKeychainStatus(status); renderDependencies(status); renderWebDAVStatus(status); renderWebDAVQuick(status); renderAppConfig(status); showHuman('Vault opened', status, 'success'); showNotices(res.warnings); await refreshFiles(); await refreshDavFiles(); await loadProfiles(); } catch(e){ if(await offerAcceptRollback(e, $('vaultPath').value, $('password').value)) return; showError('Could not open vault', e.message); } }
+async function openVault(useKeychain){ try { const warn = localPathWarning(); if(warn){ showError('Invalid vault path', warn); return; } const res = await api('/api/open',{method:'POST',headers:jsonHeaders,body:JSON.stringify(openPayload(useKeychain))}); $('password').value=''; const status = await api('/api/status'); status.lastAction = res; lastStatus = status; renderVaultSelector(status); renderAvailableVaults(status); renderTopVaultStrip(status); renderKeychainStatus(status); renderDependencies(status); renderWebDAVStatus(status); renderWebDAVQuick(status); renderAppConfig(status); showHuman('Vault opened', status, 'success'); showNotices(res.warnings); await refreshFiles(); await refreshDavFiles(); await loadProfiles(); } catch(e){ if(await offerAcceptRollback(e, $('vaultPath').value, $('password').value)) return; maybeAuthLimitLocked(e); showError('Could not open vault', e.message); } }
 function clearWebDAVUI(message){
   currentDavPath = 'content';
   selectedDavPath = '';
@@ -6871,7 +7299,7 @@ document.addEventListener('keydown', ev => {
 });
 reportBrowserSupport();
 startBrowserHeartbeat();
-appendLog('open-seavault-rclone GUI started','Ready.'); refreshStatus(); loadAppConfig(); rsyncStatus(false); rcloneStatus(false); loadRemotes(); loadSSHKeys();
+appendLog('open-seavault-rclone GUI started','Ready.'); refreshStatus(); loadAppConfig(); rsyncStatus(false); rcloneStatus(false); loadRemotes(); loadSSHKeys(); refreshAuthLimitSelf();
 </script>
 </body>
 </html>`))

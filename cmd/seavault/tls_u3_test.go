@@ -230,7 +230,7 @@ func TestEnsureLoopbackBindGuardTable(t *testing.T) {
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
-			warnings, err := ensureLoopbackBind(r.addr, r.insecureBind, r.m.tlsOn, r.m.selfSigned)
+			warnings, err := ensureLoopbackBind(r.addr, r.insecureBind, r.m.tlsOn, r.m.selfSigned, false)
 			allowed := err == nil
 			if allowed != r.wantAllowed {
 				t.Fatalf("allowed=%v (err=%v), want allowed=%v", allowed, err, r.wantAllowed)
@@ -414,7 +414,7 @@ func TestServeTLSListenerPropfind(t *testing.T) {
 	}
 
 	// The same non-loopback bind without TLS and without the override is refused.
-	if _, err := ensureLoopbackBind("192.168.1.5:8765", false, false, false); err == nil {
+	if _, err := ensureLoopbackBind("192.168.1.5:8765", false, false, false, false); err == nil {
 		t.Fatal("plaintext non-loopback serve without --insecure-bind must be refused")
 	}
 
@@ -628,9 +628,29 @@ func TestNoPreU3TestDeletedOrEdited(t *testing.T) {
 	// test function that existed on main; only edits/additions within the file are
 	// allowed. main_test.go carries the U3 additions and the sanctioned guard-
 	// signature adaptation; commands_test.go carries the authorized H4 rewrite.
+	//
+	// Since U4 (maintainer authorization 2026-09-08) this guard shares ONE reviewed
+	// source of waivers with TestZ1NoPreU2TestEditedOrDeleted: every path listed in
+	// cmd/seavault/testdata/accepted-test-edits.txt ("<path><TAB><reason>") is
+	// treated as a guard-host file too, so a sanctioned mechanical edit is waived in
+	// exactly one visible diff instead of two divergent maps. The no-removal rule
+	// still applies to every waived file.
 	guardHostFiles := map[string]bool{
 		"cmd/seavault/main_test.go":     true,
 		"cmd/seavault/commands_test.go": true,
+	}
+	if raw, err := os.ReadFile(filepath.Join(repoRoot, "cmd", "seavault", "testdata", "accepted-test-edits.txt")); err == nil {
+		for _, ln := range strings.Split(string(raw), "\n") {
+			ln = strings.TrimSpace(ln)
+			if ln == "" || strings.HasPrefix(ln, "#") {
+				continue
+			}
+			p := strings.Fields(ln)[0]
+			if !guardHostFiles[p] {
+				t.Logf("Z1 (U3 guard): treating reviewer-accepted edit to %s as a guard-host file", p)
+			}
+			guardHostFiles[p] = true
+		}
 	}
 
 	mainTestFiles := gitListTestFiles(t, repoRoot)
