@@ -14,6 +14,16 @@ set -eu
 APP="/Applications/open-seavault-rclone.app"
 BIN="$APP/Contents/MacOS/open-seavault-rclone"
 
+# friction B/C1: the bundle binary must exist and be executable before we do
+# anything. A user who double-clicks this .command BEFORE dragging the app into
+# /Applications would otherwise get a dangling symlink and a false "Installed".
+# Check first, before the sudo re-exec, so the fix (drag the app) costs no
+# password prompt.
+if [ ! -x "$BIN" ]; then
+	echo "Drag open-seavault-rclone.app into /Applications first, then run this again." >&2
+	exit 1
+fi
+
 # /usr/local/bin is root-owned, and absent on a fresh Apple-silicon Mac (C4). The
 # .pkg postinstall already runs as root; the DMG .command is double-clicked as the
 # user, so re-exec once under sudo (a password prompt in Terminal) to obtain
@@ -23,7 +33,18 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 mkdir -p /usr/local/bin
-ln -sf "$BIN" /usr/local/bin/seavault
+# installer-scripts-1 (I-M4): remove any pre-existing /usr/local/bin/seavault
+# FIRST, then ln -sfn (never dereference a pre-existing symlink-to-directory — a
+# plain `ln -sf` would drop the new link INSIDE that directory, a root-owned write
+# into an attacker-controlled target on a user-writable /usr/local/bin). Then
+# verify readlink points exactly where we intended, or fail loudly.
+rm -f /usr/local/bin/seavault
+ln -sfn "$BIN" /usr/local/bin/seavault
+got="$(readlink /usr/local/bin/seavault || true)"
+if [ "$got" != "$BIN" ]; then
+	echo "Install failed: /usr/local/bin/seavault points at '$got', expected '$BIN'." >&2
+	exit 1
+fi
 
 echo "Installed: /usr/local/bin/seavault -> $BIN"
 echo "Open a NEW Terminal window so seavault is on your PATH."

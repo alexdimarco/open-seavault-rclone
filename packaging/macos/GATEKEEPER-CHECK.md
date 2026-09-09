@@ -5,10 +5,13 @@ headless CI runner cannot exercise the GUI dialog (design §6, C2). So before ea
 release tag a human must verify, on the macOS that ships today, that the
 `FIRST-LAUNCH.txt` workaround still works, and record it here.
 
-The release job asserts that a row for the tag being released exists in the table
-below (it greps this file for the tag). It does **not** and cannot check the GUI
-copy for correctness — that is what your sign-off attests. The job fails the
-release if no row names the tag, so this gate cannot be skipped silently.
+Before it publishes the GitHub Release, the release job asserts that a sign-off
+row for the tag being released exists in the table below. The match is an ANCHORED
+table row whose Tag column equals the tag EXACTLY (not a loose substring: a
+substring grep is spoofable — an example row, or `v0.2` inside `v0.22`). It does
+**not** and cannot check the GUI copy for correctness — that is what your sign-off
+attests. A missing row fails the job before anything is published, so this gate
+cannot be skipped silently.
 
 ## What to verify before signing off
 
@@ -32,4 +35,3 @@ Add one row per release tag. Keep newest at the top.
 
 | Tag | macOS version checked | Date | Signed off by | Result |
 |-----|-----------------------|------|---------------|--------|
-| v0.0.0-EXAMPLE | 15.x Sequoia | 2026-01-01 | (example row — not a real sign-off) | Open Anyway + xattr verified; delete when a real tag is added |

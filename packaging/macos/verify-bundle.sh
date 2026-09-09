@@ -188,6 +188,13 @@ if [ -n "${DMG:-}" ]; then
 	[ -f "$MP/FIRST-LAUNCH.txt" ] || { echo "  missing FIRST-LAUNCH.txt in DMG" >&2; dmg_ok=0; }
 	[ -f "$MP/SIGNING.txt" ] || { echo "  missing SIGNING.txt in DMG" >&2; dmg_ok=0; }
 	[ -f "$MP/Install command-line tool.command" ] || { echo "  missing .command in DMG" >&2; dmg_ok=0; }
+	# installer-scripts-2 (I-M4/M5): the DMG .command must be BYTE-IDENTICAL to the
+	# golden install-cli.sh, exactly as the M5 block cmp's the PKG postinstall. Without
+	# this the DMG's installer entry point could drift and only the PKG would be covered.
+	if [ -f "$MP/Install command-line tool.command" ]; then
+		cmp -s "$INSTALL_CLI_SRC" "$MP/Install command-line tool.command" \
+			|| { echo "  DMG .command is not byte-identical to the golden install-cli.sh" >&2; dmg_ok=0; }
+	fi
 	# Detach with bounded retries (C5): a just-mounted image can be busy.
 	detached=0
 	for _ in $(seq 1 5); do

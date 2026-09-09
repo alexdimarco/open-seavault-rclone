@@ -206,8 +206,15 @@ func TestUnsignedStateDeclaredInArtifacts(t *testing.T) {
 // the manual gate the human fills stays machine-checkable.
 func TestGatekeeperCheckIsGreppablePerTagGate(t *testing.T) {
 	rel := s3Doc(t, ".github", "workflows", "release.yml")
-	if !strings.Contains(rel, `grep -qF "$TAG" packaging/macos/GATEKEEPER-CHECK.md`) {
-		t.Error("release.yml must assert the per-tag Gatekeeper sign-off by grepping packaging/macos/GATEKEEPER-CHECK.md for the tag (design §6, C2)")
+	// release-ci-secrets-1: the gate is an ANCHORED table-row match, not the old
+	// spoofable unanchored substring grep. The exact anchored grep must be present…
+	if !strings.Contains(rel, `grep -qE "^\|[[:space:]]*${tag_re}[[:space:]]*\|" packaging/macos/GATEKEEPER-CHECK.md`) {
+		t.Error("release.yml must assert the per-tag Gatekeeper sign-off with an ANCHORED table-row grep (release-ci-secrets-1, design §6, C2)")
+	}
+	// …and the old unanchored substring grep must be gone (it matched the EXAMPLE
+	// row and cross-satisfied v0.2 ⊂ v0.22).
+	if strings.Contains(rel, `grep -qF "$TAG" packaging/macos/GATEKEEPER-CHECK.md`) {
+		t.Error("release.yml must NOT use the unanchored `grep -qF \"$TAG\"` Gatekeeper gate (spoofable; release-ci-secrets-1)")
 	}
 
 	md := s3Doc(t, "packaging", "macos", "GATEKEEPER-CHECK.md")

@@ -1,0 +1,11 @@
+open-seavault-rclone — first launch on macOS
+
+This build is signed with an Apple Developer ID and notarized by Apple, so macOS
+opens it normally. Double-click the app the way you would any other application —
+there is no first-launch workaround to perform.
+
+Launching opens the interface in your browser; there is no Dock icon, and the app
+quits when the page closes. The command-line tool installs from the DMG's
+"Install command-line tool.command" or from the .pkg.
+
+This artifact's exact signing state is recorded in SIGNING.txt.
