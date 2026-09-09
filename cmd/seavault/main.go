@@ -27,7 +27,9 @@ import (
 	"time"
 
 	"github.com/alexdimarco/open-seavault-rclone/internal/appconfig"
+	"github.com/alexdimarco/open-seavault-rclone/internal/appdir"
 	"github.com/alexdimarco/open-seavault-rclone/internal/authlimit"
+	"github.com/alexdimarco/open-seavault-rclone/internal/bundlelaunch"
 	"github.com/alexdimarco/open-seavault-rclone/internal/importer"
 	"github.com/alexdimarco/open-seavault-rclone/internal/keychain"
 	"github.com/alexdimarco/open-seavault-rclone/internal/localdav"
@@ -2140,6 +2142,133 @@ func resetLocalAppConfiguration(resetAll bool) error {
 	return nil
 }
 
+// defaultBundleGrace is the macOS bundle-launch grace period: a Finder/
+// LaunchServices launch whose browser page never connects exits after this,
+// overridable with --bundle-grace (design §2.2, I-M6). Terminal launches are
+// unaffected.
+const defaultBundleGrace = 60 * time.Second
+
+// bundleOSName and bundleExecutablePath are the injectable OS and executable-path
+// probes for the darwin-only bundle-launch behaviour (design §2.1/§2.2).
+// Production reads the real runtime.GOOS and os.Executable; the Linux tests set
+// "darwin" and a synthetic path so every branch is exercised off a Mac.
+var (
+	bundleOSName         = runtime.GOOS
+	bundleExecutablePath = os.Executable
+)
+
+// openBrowserFn is the injectable browser-open seam. Production opens the real
+// browser; the tests capture the URL a launch or a relaunch opens without
+// spawning anything.
+var openBrowserFn = openBrowser
+
+// currentBundleLaunch reports whether THIS process is a macOS .app bundle launch,
+// through the injectable seams so the Linux tests can drive the darwin path.
+func currentBundleLaunch() bool {
+	execPath, _ := bundleExecutablePath()
+	return bundlelaunch.Active(bundleOSName, os.Getenv, execPath)
+}
+
+// finderLaunchActive reports whether run() should default this invocation to the
+// gui command: a bundle launch carrying no real arguments (design §2.1). A
+// Terminal `seavault` with no arguments is not a Finder launch (I-M3).
+func finderLaunchActive(argv []string) bool {
+	execPath, _ := bundleExecutablePath()
+	return bundlelaunch.FinderLaunch(bundleOSName, os.Getenv, execPath, argv)
+}
+
+// runFinderLaunchGUI dispatches the gui command for a macOS Finder/bundle launch
+// with no arguments (design §2.1). It is a seam so the routing test can assert
+// run() reaches it without starting a real server. It registers NOTHING new in
+// the command table (H4 stays green): it calls the existing gui handler.
+var runFinderLaunchGUI = func() int {
+	if err := cmdGUI(nil); err != nil {
+		var ec *exitCodeError
+		if errors.As(err, &ec) {
+			return ec.code
+		}
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	return 0
+}
+
+// bundleLaunchSinks resolves the 0600 app-data log sink and the single-instance
+// lock path for a bundle launch (design §2.2, C7/C10, I-M8). The launch URL,
+// which carries the launch secret, is written ONLY to the log file this returns.
+func bundleLaunchSinks() (*bundlelaunch.LogSink, string, error) {
+	logDir, err := appdir.EnsureDataDir("logs")
+	if err != nil {
+		return nil, "", err
+	}
+	dataDir, err := appdir.DataDir()
+	if err != nil {
+		return nil, "", err
+	}
+	sink := bundlelaunch.NewLogSink(filepath.Join(logDir, "gui.log"), 0)
+	return sink, filepath.Join(dataDir, "gui.lock"), nil
+}
+
+// askRunningInstanceForLaunchURL asks the instance named by the app-data lock for
+// its current launch link over loopback, authenticating with the lock token
+// (design §2.2, C10, I-M7). A missing/stale lock or an unanswered call returns
+// ok=false, so the caller falls back to the ordinary bind error — a stale lock is
+// ignored, never followed.
+func askRunningInstanceForLaunchURL(lockPath string) (string, bool) {
+	lock, err := bundlelaunch.ReadLock(lockPath)
+	if err != nil || lock.Port <= 0 || lock.Token == "" {
+		return "", false
+	}
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/relaunch", lock.Port)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", false
+	}
+	req.Header.Set(bundlelaunch.RelaunchTokenHeader, lock.Token)
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", false // no live listener answered: a stale lock, ignored
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+	var body struct {
+		LaunchURL string `json:"launchURL"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&body); err != nil {
+		return "", false
+	}
+	if body.LaunchURL == "" {
+		return "", false
+	}
+	return body.LaunchURL, true
+}
+
+// startBundleGraceExit stops a bundle-launch GUI that no browser page ever reached
+// within grace (design §2.2, I-M6): when the timer fires and BrowserSeen is still
+// false, it records the grace-exit line to the 0600 log sink and requests
+// shutdown. A page that connected leaves BrowserSeen true and the GUI keeps
+// running; a shutdown from any other cause ends the timer.
+func startBundleGraceExit(s *webui.Server, grace time.Duration, sink *bundlelaunch.LogSink) {
+	if grace <= 0 {
+		return
+	}
+	go func() {
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			if !s.BrowserSeen() {
+				_ = sink.Writeln(fmt.Sprintf("grace-exit: no browser page connected within %s; exiting", grace))
+				s.RequestShutdown()
+			}
+		case <-s.ShutdownNotify():
+		}
+	}()
+}
+
 func cmdGUI(args []string) error {
 	// registry-cli-2: only the documented sub-actions are accepted; the former
 	// undocumented aliases (reset, reset-password, clear-login) are dropped so the
@@ -2169,6 +2298,7 @@ func cmdGUI(args []string) error {
 	authLimit := fs.String("auth-limit", "", "rate-limit the GUI login and vault open: on (default) or off (off is loud and unprotected; also settable via auth.limits.enabled)")
 	var allowHost repeatableString
 	fs.Var(&allowHost, "allow-host", "additional Host header value to accept besides loopback/localhost (repeatable)")
+	bundleGrace := fs.Duration("bundle-grace", defaultBundleGrace, "macOS bundle launch only: exit if no browser page connects within this period; Terminal launches are unaffected")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2267,10 +2397,65 @@ func cmdGUI(args []string) error {
 		s.EnableBrowserCloseShutdown(10 * time.Second)
 		fmt.Println("exit-on-browser-close enabled; the GUI will stop shortly after the browser page closes")
 	}
-	printLaunchGuidance(os.Stdout, os.Stderr, launchURL, !*noOpen, openBrowser)
+	// On a macOS .app bundle launch, LaunchServices discards stdout and a second
+	// double-click must re-open the running window, so resolve the 0600 log sink
+	// and the single-instance lock now (design §2.2). A Terminal launch is not a
+	// bundle launch: logSink stays nil (writes no file, I-M8) and none of the
+	// single-instance / grace behaviour runs.
+	bundle := currentBundleLaunch()
+	var logSink *bundlelaunch.LogSink
+	var lockPath string
+	if bundle {
+		var berr error
+		logSink, lockPath, berr = bundleLaunchSinks()
+		if berr != nil {
+			return berr
+		}
+	}
+	// (c) Bind BEFORE opening the browser (design §2.2, C10): a second launch must
+	// never open a link to a server that failed to come up.
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
+		if bundle {
+			// (d) Single instance: a bind conflict may be our own already-running
+			// instance. Ask it for its current launch link over loopback and open
+			// THAT, then exit. A stale lock (no live listener answering) is ignored
+			// and the ordinary bind error surfaces, exactly as a Terminal launch on a
+			// busy port sees today (I-M7).
+			if url, ok := askRunningInstanceForLaunchURL(lockPath); ok {
+				_ = logSink.Writeln("relaunch: reopened the already-running instance")
+				printLaunchGuidance(os.Stdout, os.Stderr, url, !*noOpen, openBrowserFn)
+				return nil
+			}
+		}
 		return listenErrorHint(*addr, err)
+	}
+	if bundle {
+		// Claim the single-instance lock with a fresh token and the bound port, and
+		// enable the authenticated /api/relaunch endpoint a second launch reads.
+		token, terr := bundlelaunch.NewToken()
+		if terr != nil {
+			return terr
+		}
+		boundPort := 0
+		if ta, ok := ln.Addr().(*net.TCPAddr); ok {
+			boundPort = ta.Port
+		}
+		if werr := bundlelaunch.WriteLock(lockPath, bundlelaunch.Lock{Token: token, Port: boundPort}); werr != nil {
+			return werr
+		}
+		defer func() { _ = bundlelaunch.RemoveLock(lockPath) }()
+		s.SetRelaunch(token, launchURL)
+		// (e) The launch URL carries the launch secret: it goes to the 0600 file
+		// sink ONLY, never to stdout, a response body, or any other sink.
+		_ = logSink.Writeln("launch: " + launchURL)
+	}
+	// (c) The browser opens only now, after a confirmed bind, through the injectable
+	// seam so a test can capture the URL without spawning a browser.
+	printLaunchGuidance(os.Stdout, os.Stderr, launchURL, !*noOpen, openBrowserFn)
+	if bundle {
+		// (b) A bundle launch whose page never connects exits after the grace period.
+		startBundleGraceExit(s, *bundleGrace, logSink)
 	}
 	// Start the TLS hot-reloader so a renewed pair is served within the poll and
 	// serving.json is written for `tls status` (reload-not-wired-1). It stops when

@@ -73,6 +73,14 @@ func hasHelpFlag(args []string) bool {
 // own code and has already printed its human line, so run neither reprints nor
 // forces 1).
 func run(argv []string) int {
+	// macOS Finder / LaunchServices double-click default (design §2.1): a .app
+	// bundle launch carrying no real arguments (or only the legacy -psn_ argument)
+	// opens the GUI with its defaults. A Terminal `seavault` with no arguments is
+	// NOT a bundle launch, so finderLaunchActive is false and it still prints usage
+	// (I-M3). Nothing new is registered in the command table (H4 stays green).
+	if finderLaunchActive(argv) {
+		return runFinderLaunchGUI()
+	}
 	if len(argv) == 0 {
 		usage()
 		return 2
