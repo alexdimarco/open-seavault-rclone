@@ -1,6 +1,6 @@
 # Design — Phase U5: a proper macOS bundle (unsigned tier), installers, and install docs
 
-STATUS: pre-code design, awaiting the 10-lens review. Revision 1.
+STATUS: Revision 2 — the 11 conditions of the pre-code review (`docs/review-u5-predesign.md`, GO_WITH_CONDITIONS; 55 judged / 40 refuted / 1 blocker rescued) are applied below and in §9. Ready to build.
 
 ## 1. Goal and scope
 
@@ -34,7 +34,10 @@ open-seavault-rclone.app/
     MacOS/open-seavault-rclone   the universal (amd64 + arm64, `lipo -create`) release binary —
                           byte-identical to the binaries in the two darwin tarballs (I-M1)
     Resources/open-seavault-rclone.icns   generated on the macOS runner from the 512×512
-                          internal/webui/assets/svlogo/icon.png via sips + iconutil
+                          internal/webui/assets/svlogo/icon.png via sips + iconutil. The
+                          source caps at 512 px, so the 1024-px Retina slot is omitted and
+                          the largest icon is soft on Retina displays — accepted for the
+                          unsigned tier; a 1024-px or vector master is a later asset (C11)
     Resources/FIRST-LAUNCH.txt            the Gatekeeper note (§5), also shown in the DMG
     Resources/SIGNING.txt                 "ad-hoc signed, not notarized" or "Developer ID
                           <team>, notarized <date>" — written by the release job (I-M5)
@@ -48,31 +51,48 @@ environment (set by `LSEnvironment`) OR the executable path contains `/Contents/
 `gui` with its defaults (open the browser, exit when the page closes). A Terminal user typing
 `seavault` with no arguments still gets usage (I-M3): neither condition holds there.
 
-### 2.2 Bundle-launch grace timeout (app-side, small)
+### 2.2 Bundle-launch grace timeout, single instance, and a real log sink (app-side, small)
 
 `gui` already exits when the browser page stops sending heartbeats, but if the browser never
 opens (blocked, misconfigured) a background process with no Dock icon would linger. On a bundle
 launch, `gui` also exits if no page connects within a grace period (60 s, `--bundle-grace`
-override), logging one line to the app log (I-M6). Terminal `gui` is unchanged.
+override) (I-M6). Terminal `gui` is unchanged.
+
+**Single instance (C10).** A Dock-iconless app invites a second double-click. On a bundle
+launch, `gui` binds its port FIRST and opens the browser only after a successful bind (today the
+browser is opened before `net.Listen`); if the bind fails because an instance is already serving,
+it asks that instance for its current launch link over loopback (a tiny authenticated
+`/api/relaunch` that only a process holding the app-data lock file's token can call) and opens
+THAT link instead of starting a second server, then exits. The lock file lives under the darwin
+data dir; a stale lock (no live listener) is ignored. Terminal `gui` keeps today's behaviour
+(port in use is an error) (I-M7).
+
+**Log sink (C7).** LaunchServices discards a bundle's stdout, so on a bundle launch the launch
+URL, the grace-exit line, and the relaunch line are written to
+`~/Library/Application Support/open-seavault-rclone/logs/gui.log` (0600, size-capped, rotated
+once) in addition to stdout; Terminal launches are unchanged (I-M8).
 
 ## 3. Installers
 
 - **DMG** `open-seavault-rclone_vX.Y.Z_macos_universal.dmg`: the `.app`, an `Applications` symlink,
   `FIRST-LAUNCH.txt`, `SIGNING.txt`, and `Install command-line tool.command` (a double-clickable
-  script that symlinks `/usr/local/bin/seavault` → the bundle binary, asking for the password via
-  `sudo` in Terminal; it does nothing else, I-M4).
+  script that ensures `/usr/local/bin` exists (`mkdir -p`, absent on a fresh Apple-silicon Mac)
+  and symlinks `/usr/local/bin/seavault` → the bundle binary, asking for the password via `sudo`
+  in Terminal; it does nothing else, I-M4, C4). The script and `install.md` tell the user to open
+  a new Terminal window, and how to add `/usr/local/bin` to `PATH` for shells that lack it.
 - **PKG** `open-seavault-rclone_vX.Y.Z_macos_universal.pkg` (`pkgbuild` + `productbuild`,
-  install location `/Applications`, a `postinstall` that only creates the same symlink, I-M4).
-  Distribution XML shows the first-launch note as the installer's readme pane.
+  install location `/Applications`, a `postinstall` that does exactly the same `mkdir -p` +
+  symlink, I-M4). Distribution XML shows the first-launch note as the installer's readme pane.
 - Both names are stable regardless of signing state; the signing state is declared inside
   (`SIGNING.txt`, the installer readme), never hidden or implied by a filename (I-M5).
 
 ## 4. The release job
 
 A second job `macos` (runs-on `macos-latest`) in `.github/workflows/release.yml`, needing the
-existing verify step to have passed: build both darwin binaries with the same flags as the Linux
-job, `lipo -create`, assemble the bundle, generate the `.icns`, write the plist with the tag
-version, then **sign**:
+existing verify-and-build job to have passed: it **downloads the two darwin binaries that job
+produced** (uploaded as workflow artifacts) rather than compiling again, so "no separate build
+path" is literally true (C8, I-M1); `lipo -create` them, assemble the bundle, generate the
+`.icns`, write the plist with the tag version, then **sign**:
 
 - Secrets present (`MACOS_DEVELOPER_ID_P12`, `MACOS_DEVELOPER_ID_P12_PASSWORD`,
   `APPLE_NOTARY_KEY_ID`, `APPLE_NOTARY_ISSUER_ID`, `APPLE_NOTARY_KEY_P8`): import the certificate
@@ -90,54 +110,98 @@ version, then **sign**:
   expand the PKG and check the postinstall does only the symlink, install the PKG on the runner
   and run `/usr/local/bin/seavault --version`.
 - Uploads: the DMG, the PKG, and their SHA256 lines appended to `SHA256SUMS.txt`. The two darwin
-  tarballs stay for scripts.
+  tarballs stay for scripts. **The release body carries the first-launch/Gatekeeper note (C3)**:
+  the job prepends `FIRST-LAUNCH.txt` to the generated release notes (`gh release edit --notes`),
+  so the declaration is present where a user clicks the `.dmg`, not only inside artifacts they
+  have not opened.
+- **Notarization is observable and bounded (C6):** `notarytool submit --wait` runs under an
+  explicit step timeout; on any result other than Accepted the job runs `notarytool log
+  <submission-id>`, prints it, and uploads it as a job artifact; a transient failure (network,
+  service) is retried with bounded backoff, a rejection fails fast with the log.
 - Secrets never appear in logs (the job masks them and never echoes the keychain password or the
   notary key, I-M2).
+- **`ci-macos.yml` is cheap and stable (C5):** `concurrency: { group: ci-macos-${{ github.ref }},
+  cancel-in-progress: true }`, `timeout-minutes: 30`, `on.push.paths` scoped to the packaging and
+  app inputs (the workflow files, `cmd/seavault`, `internal/webui/assets/svlogo`, the packaging
+  scripts and plist template) so doc-only commits skip it, and `hdiutil detach` / `installer`
+  wrapped in bounded retries.
 
 ## 5. Docs: the workaround, front and center
 
 `docs/install.md` (new, linked from a new README **Install** section): macOS first — download the
-DMG, drag to Applications, then **"macOS will say the app cannot be opened because Apple cannot
-check it for malicious software. This build is not yet signed with an Apple Developer ID. To open
-it: right-click (or Control-click) the app → Open → Open. You only need to do this once. Or, in
-Terminal: `xattr -dr com.apple.quarantine /Applications/open-seavault-rclone.app`."** — the same
-text in `FIRST-LAUNCH.txt`, the DMG, and the PKG readme pane; the PKG gets its own line
-("right-click the .pkg → Open"). Then the command-line tool, what launching does (the browser
-opens; the app quits when the page closes), where data lives, how to uninstall (drag to Trash,
-remove the symlink, the app-data path). Then Linux (tarball, where to put it) and Windows (zip
-and the SmartScreen "More info → Run anyway" note, since the same unsigned state applies). A
-sentence states that signed and notarized builds will remove the macOS step once a Developer ID
-is in place.
+DMG, drag to Applications, then the workaround **written for the macOS that ships today (C1)**,
+kept in ONE source file (`packaging/macos/FIRST-LAUNCH.txt`) that the release job copies into
+the DMG, the PKG readme pane, `SIGNING.txt`'s companion note, and that `install.md` includes
+verbatim (drift-guarded):
+
+> **This build is not yet signed with an Apple Developer ID, so macOS will refuse to open it the
+> first time.** Two ways to allow it, once:
+> 1. **macOS 13 Ventura, 14 Sonoma, 15 Sequoia:** open the app once (it will be blocked), then
+>    open **System Settings → Privacy & Security**, scroll to *Security*, click **Open Anyway**
+>    next to open-seavault-rclone, and confirm with Touch ID or your password.
+> 2. **Any version, in Terminal:** `xattr -dr com.apple.quarantine /Applications/open-seavault-rclone.app`
+>
+> On macOS 11–12 only, Control-click the app → Open → Open also works. For the installer package:
+> Control-click the .pkg → Open (all versions).
+
+Then the command-line tool (the `.command` or the PKG; open a new Terminal; `PATH` note), what
+launching does (the browser opens; there is no Dock icon; the app quits when the page closes or
+after 60 s if no page connects; a second double-click re-opens the running instance), where data
+and the log live, and **uninstall, precisely (C9)**: quit the running app first (it has no Dock
+icon — use Activity Monitor or `pkill -f open-seavault-rclone`), `sudo rm /usr/local/bin/seavault`
+(the symlink is root-owned when the PKG or the `.command` created it), drag
+`/Applications/open-seavault-rclone.app` to the Trash, `sudo pkgutil --forget
+io.github.alexdimarco.open-seavault-rclone` if the PKG was used, and delete
+`~/Library/Application Support/open-seavault-rclone` to remove app data (vaults live where the
+user put them and are untouched). Then Linux (tarball, where to put it) and Windows (zip and the
+SmartScreen "More info → Run anyway" note, since the same unsigned state applies). A sentence
+states that signed and notarized builds will remove the macOS step once a Developer ID is in
+place.
 
 ## 6. Security invariants (proven by §7 unless labeled)
 
-- **I-M1** The bundle executable is the same universal build of the same sources as the released
-  tarball binaries (same flags, same commit); no separate build path.
+- **I-M1** The bundle executable is `lipo` of the exact darwin binaries the Linux release job
+  built and uploaded (downloaded as artifacts, never recompiled): after `lipo -thin` each slice
+  is byte-identical to the corresponding tarball binary (C8).
 - **I-M2** No certificate password, notary key, or keychain password is ever printed; the job
   runs with secrets masked and the temporary keychain deleted after use.
 - **I-M3** The Finder-launch default changes nothing for Terminal use: `seavault` with no
   arguments in a shell prints usage exactly as before.
-- **I-M4** The installer scripts (DMG `.command`, PKG `postinstall`) create one symlink and
-  nothing else: no network, no other writes, no privilege beyond the symlink.
-- **I-M5** The signing state is declared inside every artifact and in the docs; an unsigned
-  build is never presented as signed; asset names do not encode signing state.
+- **I-M4** The installer scripts (DMG `.command`, PKG `postinstall`) ensure `/usr/local/bin`
+  exists and create one symlink, and nothing else: no network, no other writes, no privilege
+  beyond that (C4).
+- **I-M5** The signing state is declared inside every artifact, in the docs, and in the GitHub
+  Release body; an unsigned build is never presented as signed; asset names do not encode
+  signing state (C3).
 - **I-M6** A bundle launch never leaves an invisible lingering process: it exits when the page
   closes or when no page connects within the grace period.
-- **Conditional (labeled):** Gatekeeper behaviour is Apple's and version-dependent; the
-  workaround text matches macOS 11–15 and is re-checked per release on the runner's macOS.
+- **I-M7** A bundle launch binds its port before opening a browser and never starts a second
+  server: a second launch re-opens the running instance's current link and exits (C10).
+- **I-M8** On a bundle launch the launch URL and every exit reason are written to a real file
+  sink under the app-data dir, not only to a stdout LaunchServices discards (C7).
+- **Conditional (labeled, C2):** Gatekeeper behaviour is Apple's and version-dependent. The
+  workaround text names two version-keyed GUI flows — System Settings → Privacy & Security →
+  Open Anyway (macOS 13–15) and Control-click → Open (macOS 11–12) — plus the version-independent
+  `xattr` command. A headless runner cannot exercise the GUI dialog, so the per-release check of
+  the workaround against the current macOS is a **manual gate**: a dated human sign-off recorded
+  in `packaging/macos/GATEKEEPER-CHECK.md` before each tag.
 
 ## 7. Test matrix (red-first; every row asserts; the macOS rows run on the release runner and in a CI job on `macos-latest`)
 
 | ID | Proves | How |
 |---|---|---|
 | M1 | §2.1, I-M3 | on darwin, with `SEAVAULT_BUNDLE_LAUNCH=1` (or an executable path under `/Contents/MacOS/`) and no args → `gui` is dispatched (browser suppressed in the test); with neither → usage; on other OSes the env var is ignored |
-| M2 | §2.2, I-M6 | a bundle launch with no page connecting exits within the grace period with the log line; a connected page keeps it alive; Terminal `gui` has no grace exit |
-| M3 | §2, I-M1 | on the runner: `lipo -info` lists x86_64 and arm64; the bundle binary's hash equals the tarball binaries' per-arch hashes after `lipo -thin`; `plutil -lint` passes; the icns exists |
-| M4 | §4 signing | ad-hoc: `codesign --verify --deep --strict` passes and `spctl --assess` is recorded as rejected; with secrets: accepted and stapled (job-gated) |
-| M5 | §3, I-M4 | `pkgutil --expand`: the postinstall contains exactly the symlink logic (a golden file); `installer -pkg … -target /` then `/usr/local/bin/seavault --version` prints the version; the DMG `.command` is the same golden logic |
-| M6 | §3 | `hdiutil attach`: the DMG holds the app, the Applications link, `FIRST-LAUNCH.txt`, `SIGNING.txt`, and the `.command`; detach |
-| M7 | §5, I-M5 | `SIGNING.txt` and the PKG readme say "ad-hoc, not notarized" for the unsigned path; `docs/install.md` contains the right-click → Open and `xattr` workaround and every command it names exists in `--help` (drift guard) |
-| M8 | smoke | run the bundle binary as a bundle launch with the browser suppressed; the printed launch URL answers over loopback; the process exits after the page-close heartbeat stops |
+| M2 | §2.2, I-M6, I-M8 | a bundle launch with no page connecting exits within the grace period and the FILE `logs/gui.log` contains the launch URL and the grace-exit line (stdout capture is not the proof, C7); a connected page keeps it alive; Terminal `gui` has no grace exit and writes no file |
+| M3 | §2, I-M1 | RELEASE job only (C8): `lipo -info` lists x86_64 and arm64 and each `lipo -thin` slice is byte-identical to the downloaded tarball binary; `plutil -lint` passes; the icns exists. The push-time `ci-macos.yml` job assembles from a fresh local build and runs the same structural checks, explicitly labeled "self-consistency, does NOT prove I-M1" |
+| M4 | §4 signing | ad-hoc: `codesign --verify --deep --strict` passes and `spctl --assess` is recorded as rejected; with secrets: accepted and stapled — the row asserts whichever expectation matches the secrets present and never passes vacuously |
+| M5 | §3, I-M4 | `pkgutil --expand`: the postinstall equals the golden `mkdir -p /usr/local/bin` + symlink script; `installer -pkg … -target /` on a runner with `/usr/local/bin` REMOVED first, then `/usr/local/bin/seavault --version` prints the version (C4); the DMG `.command` equals the same golden logic |
+| M6 | §3 | `hdiutil attach`: the DMG holds the app, the Applications link, `FIRST-LAUNCH.txt`, `SIGNING.txt`, and the `.command`; detach (bounded retries) |
+| M7 | §5, I-M5, C2 | `SIGNING.txt` and the PKG readme say "ad-hoc, not notarized" for the unsigned path; `docs/install.md` includes `packaging/macos/FIRST-LAUNCH.txt` verbatim and that text contains "Privacy & Security", "Open Anyway", and the `xattr -dr com.apple.quarantine` command; every command the doc names exists in `--help`; `GATEKEEPER-CHECK.md` carries a dated sign-off for the current tag (release job asserts presence; the human writes it) |
+| M8 | smoke | run the bundle binary as a bundle launch with the browser suppressed; the launch URL from `logs/gui.log` answers over loopback; the process exits after the page-close heartbeat stops |
+| M9 | I-M5, C3 | after publish, `gh release view` shows the release body begins with the first-launch note |
+| M10 | I-M7, C10 | with an instance serving, a second bundle launch re-opens the running instance's current link (captured via the suppressed-browser seam) and exits without binding; the port is bound before the browser-open seam fires; a stale lock file is ignored; Terminal `gui` on a busy port still errors |
+| M11 | §3, C4 | the `.command` and postinstall handle a missing `/usr/local/bin`; `install.md` documents the new-Terminal and `PATH` notes (drift guard) |
+| M12 | C5 | `ci-macos.yml` declares concurrency cancel-in-progress, a 30-minute timeout, and path scoping; a doc-only commit does not trigger it (asserted by inspecting the workflow file in a Linux test) |
 | Z1 | discipline | no pre-U5 test edited except via the exemption list; the unfiltered race suite green on Linux; the macOS CI job green |
 
 ## 8. Build order
@@ -149,3 +213,19 @@ assembly and M3–M8 on every push to main so the packaging is exercised before 
 install.md, README Install, FIRST-LAUNCH/SIGNING text, changelog v0.22, drift guard). Each slice:
 builder, independent verifier, one fix cycle; the final verifier confirms the packaging job ran
 green on a macOS runner (a pushed branch build), not only that the YAML parses.
+
+## 9. Revision 2 — how each review condition was applied
+
+| Cond | Applied as |
+|---|---|
+| C1 | §5 workaround rewritten for macOS 13–15 (Privacy & Security → Open Anyway) with `xattr` co-primary and Control-click → Open demoted to 11–12; one source file `packaging/macos/FIRST-LAUNCH.txt` propagated everywhere |
+| C2 | §6 conditional names the version-keyed flows + the version-independent command; the per-release Gatekeeper check is a manual, dated sign-off in `GATEKEEPER-CHECK.md`; M7 asserts the Open Anyway/xattr text and the sign-off's presence |
+| C3 | §4 the release body carries the first-launch note; I-M5; M9 |
+| C4 | §3 scripts `mkdir -p /usr/local/bin` then symlink; I-M4 relaxed accordingly; PATH/new-Terminal notes; M5 runs with the dir removed; M11 |
+| C5 | §4 `ci-macos.yml` concurrency cancel-in-progress, 30-min timeout, path scoping, bounded retries; M12 |
+| C6 | §4 notarization under a step timeout; `notarytool log` printed and uploaded on non-Accepted; transient retry vs fail-fast rejection |
+| C7 | §2.2 a real file sink `logs/gui.log` for bundle launches; I-M8; M2 asserts the file |
+| C8 | §4 the macOS job downloads the Linux-built darwin binaries and lipos those; I-M1 = per-slice byte identity; M3 release-only, the push-time job labeled self-consistency |
+| C9 | §5 uninstall precisely: quit the Dock-iconless app (Activity Monitor / pkill), `sudo rm` the symlink, Trash the app, `pkgutil --forget`, delete app data |
+| C10 | §2.2 bind before browser-open; single-instance via an app-data lock + an authenticated relaunch call; I-M7; M10 |
+| C11 | §2 the 512-px icon cap stated; a 1024/vector master is a later asset |
