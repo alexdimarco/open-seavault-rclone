@@ -674,7 +674,13 @@ func (s *Server) handleRelaunch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]string{"launchURL": launchURL})
+	// Authenticate the RESPONDER to the caller: the MAC is HMAC-SHA256 of the
+	// launch URL keyed by the lock token, so a second launch that reads the same
+	// lock verifies this instance holds the token before opening anything. A
+	// squatting listener that never held the token cannot produce it
+	// (relaunch-lock-log-1).
+	mac := bundlelaunch.RelaunchMAC(token, launchURL)
+	writeJSON(w, http.StatusOK, map[string]string{"launchURL": launchURL, bundlelaunch.RelaunchMACField: mac})
 }
 
 // peerIsLoopback reports whether remoteAddr (an http.Request.RemoteAddr,
@@ -1693,6 +1699,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	vaultOpen := s.vault != nil
 	vaultPath := s.vaultPath
+	quitOnClose := s.browserCloseEnabled
 	s.mu.Unlock()
 	vaultName := ""
 	if vaultOpen {
@@ -1729,7 +1736,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		VaultOpen       bool
 		VaultName       string
 		ShowAdvanced    bool
-	}{Token: s.token, InitialPath: s.vaultPath, SuggestedPaths: userpath.SuggestedVaultPaths(), RsyncHint: rsyncput.DefaultBinaryHint(), AuthEnabled: s.guiAuthEnabled(), FirstRun: s.firstRun(r), SkippedFirstRun: s.skippedFirstRun(r), View: view, VaultOpen: vaultOpen, VaultName: vaultName, ShowAdvanced: q.Get("advanced") == "1"})
+		QuitOnClose     bool
+	}{Token: s.token, InitialPath: s.vaultPath, SuggestedPaths: userpath.SuggestedVaultPaths(), RsyncHint: rsyncput.DefaultBinaryHint(), AuthEnabled: s.guiAuthEnabled(), FirstRun: s.firstRun(r), SkippedFirstRun: s.skippedFirstRun(r), View: view, VaultOpen: vaultOpen, VaultName: vaultName, ShowAdvanced: q.Get("advanced") == "1", QuitOnClose: quitOnClose})
 }
 
 // firstRun reports whether the GUI should render the first-run stepper instead
@@ -4908,6 +4916,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
   {{if .SkippedFirstRun}}<div id="backToGuided" class="notice-banner" role="status"><span class="notice-title">Guided setup</span> You skipped the first-run wizard. <a href="/?guided=1">Back to guided setup</a> &mdash; available until you create your first vault.</div>{{end}}
   <div id="recoveryReminder" class="notice-banner" role="status" hidden><button class="notice-dismiss" type="button" aria-label="Dismiss" onclick="dismissRecoveryReminder()">x</button><span class="notice-title">No recovery key</span> This vault has no recovery key. Without one, a forgotten password means the vault cannot be opened. Create one from the Password &amp; recovery panel with &ldquo;Generate recovery key&rdquo;.</div>
   <div id="noticeBanner" class="notice-banner" role="status" hidden></div>
+  {{if .QuitOnClose}}<p class="hint quit-hint" role="note">Closing this tab quits the app.</p>{{end}}
 </header>
 <main class="app-shell">
 <div class="content">

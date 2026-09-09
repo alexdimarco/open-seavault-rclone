@@ -11,11 +11,17 @@
 package bundlelaunch
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -24,9 +30,58 @@ import (
 // running instance for its current launch link.
 const RelaunchTokenHeader = "X-Seavault-Relaunch-Token"
 
+// RelaunchMACField is the JSON key the running instance returns its responder MAC
+// under on /api/relaunch, fixed here so client and server agree.
+const RelaunchMACField = "mac"
+
 // EnvBundleLaunch is the environment variable the bundle's Info.plist
 // LSEnvironment sets to 1 so the process knows LaunchServices started it.
 const EnvBundleLaunch = "SEAVAULT_BUNDLE_LAUNCH"
+
+// RelaunchMAC returns the hex HMAC-SHA256 of launchURL keyed by the lock token.
+// The running instance returns it alongside the launch link on /api/relaunch so a
+// second bundle launch can authenticate the RESPONDER — not only itself — before
+// opening anything: only a process holding the app-data lock token can produce
+// this tag over the launch URL it hands back, so a squatting listener that never
+// held the token cannot forge an acceptance (design §2.2, C10, relaunch-lock-log-1).
+func RelaunchMAC(token, launchURL string) string {
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte(launchURL))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// VerifyRelaunchMAC reports, in constant time, whether providedHex is the correct
+// RelaunchMAC for launchURL under token. A malformed or empty tag is not equal, so
+// a responder that returns no MAC (or the wrong one) is refused.
+func VerifyRelaunchMAC(token, launchURL, providedHex string) bool {
+	want := RelaunchMAC(token, launchURL)
+	return subtle.ConstantTimeCompare([]byte(providedHex), []byte(want)) == 1
+}
+
+// ValidLoopbackLaunchURL reports whether raw is a launch URL a second bundle
+// launch may open: an http or https URL whose host is a loopback IP and whose
+// port equals expectedPort — the port the running instance was contacted on, read
+// from the lock file. It refuses an external host, a non-loopback IP, a foreign
+// port, and any non-http(s) scheme, so a squatting responder cannot redirect the
+// launch off the machine even if it produced a valid MAC (relaunch-lock-log-1).
+func ValidLoopbackLaunchURL(raw string, expectedPort int) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	ip := net.ParseIP(u.Hostname())
+	if ip == nil || !ip.IsLoopback() {
+		return false
+	}
+	p, err := strconv.Atoi(u.Port())
+	if err != nil || p != expectedPort {
+		return false
+	}
+	return true
+}
 
 // Active reports whether this process is a macOS .app bundle launch: the target
 // OS is darwin AND either LSEnvironment set SEAVAULT_BUNDLE_LAUNCH=1 or the
