@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  open-seavault-rclone.app Info.plist template (design §2).
+  packaging/macos/build-bundle.sh fills __SHORT_VERSION__ and __BUNDLE_VERSION__
+  from the release tag. LSUIElement=true keeps the agent out of the Dock (the
+  browser is the interface, there is no window); LSEnvironment sets
+  SEAVAULT_BUNDLE_LAUNCH=1 so a LaunchServices launch is distinguishable from a
+  Terminal invocation (design §2.1).
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>open-seavault-rclone</string>
+	<key>CFBundleDisplayName</key>
+	<string>open-seavault-rclone</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.alexdimarco.open-seavault-rclone</string>
+	<key>CFBundleExecutable</key>
+	<string>open-seavault-rclone</string>
+	<key>CFBundleIconFile</key>
+	<string>open-seavault-rclone.icns</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__SHORT_VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__BUNDLE_VERSION__</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>LSEnvironment</key>
+	<dict>
+		<key>SEAVAULT_BUNDLE_LAUNCH</key>
+		<string>1</string>
+	</dict>
+</dict>
+</plist>
