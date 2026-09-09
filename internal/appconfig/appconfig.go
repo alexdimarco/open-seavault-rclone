@@ -85,13 +85,15 @@ func (a AuthLimits) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
 
 // StatusLine renders the one-line operator-facing auth-limit status used by `tls
 // status`, the GUI settings surface, and the non-loopback startup exposure line
-// (C7 / §2.3). Enabled: the thresholds and the lock band. Disabled: the "OFF"
-// state, dated when a persisted disable recorded DisabledSince, always with the
-// re-enable remedy. Call it on a normalized AuthLimits (Load/Normalize fill the
-// values); it never emits a credential.
+// (C7 / §2.3). Enabled: the threshold, the streak Window, and the lock band —
+// the Window is surfaced so a hostile-but-normalized value is visible in the
+// readout, never hidden. Disabled: the "OFF" state, dated when a persisted
+// disable recorded DisabledSince, always with the re-enable remedy. Call it on a
+// normalized AuthLimits (Load/Normalize fill the values); it never emits a
+// credential.
 func (a AuthLimits) StatusLine() string {
 	if a.IsEnabled() {
-		return fmt.Sprintf("auth limits: on (%d failures → %s…%s)", a.FailuresBeforeLock, a.LockStart, a.LockMax)
+		return fmt.Sprintf("auth limits: on (%d failures in %s → %s…%s)", a.FailuresBeforeLock, a.Window, a.LockStart, a.LockMax)
 	}
 	if strings.TrimSpace(a.DisabledSince) != "" {
 		return fmt.Sprintf("auth limits: OFF since %s — re-enable with --auth-limit on or auth.limits.enabled=true", a.DisabledSince)
@@ -259,32 +261,50 @@ func normalizeTLS(t TLSSection) TLSSection {
 	return t
 }
 
+// Normalization bounds for the auth-limit knobs. Values outside these ranges are
+// not clamped-to-edge but replaced by the default, because a degenerate-but-valid
+// config value is as dangerous as a blank one: a threshold of two billion, or a
+// one-nanosecond window (which resets the streak between any two real attempts,
+// so nothing ever locks), would silently NEUTRALIZE the limiter while a naive
+// readout still said "on". The floors keep a lock meaningful; the ceilings keep a
+// threshold and the map bound from wandering off to "effectively unlimited".
+const (
+	minAuthWindow                = time.Minute
+	minAuthLockStart             = time.Second
+	maxFailuresBeforeLock        = 1000
+	maxAccountFailuresBeforeLock = 100000
+	maxAuthMaxKeys               = 10000000
+)
+
 // normalizeAuthLimits fills zero/blank/invalid auth-limit fields from the
-// defaults so a misconfigured file can never silently produce a lock-on-first-
-// attempt threshold, an unbounded map, or an unparsable duration. A blank or
-// invalid duration string falls back to its default; the human form of a valid
-// duration is preserved. When the limiter is enabled, DisabledSince is cleared
-// (it is meaningless), so re-enabling by flipping "enabled" back to true drops
-// the stale timestamp on the next save.
+// defaults, floors the durations, and caps the thresholds and the map bound, so
+// a misconfigured OR degenerate-but-valid file can never silently produce a
+// lock-on-first-attempt threshold, an effectively-unlimited threshold, an
+// unbounded map, an unparsable duration, or a window/lock so small the limiter
+// never locks. A blank, invalid, sub-floor, or over-cap value falls back to its
+// default; the human form of an in-range duration is preserved. LockMax is
+// raised to at least the (already-floored) LockStart. When the limiter is
+// enabled, DisabledSince is cleared (it is meaningless), so re-enabling by
+// flipping "enabled" back to true drops the stale timestamp on the next save.
 func normalizeAuthLimits(a AuthLimits) AuthLimits {
 	d := DefaultAuthLimits()
 	if a.Enabled == nil {
 		enabled := true
 		a.Enabled = &enabled
 	}
-	if a.FailuresBeforeLock <= 0 {
+	if a.FailuresBeforeLock <= 0 || a.FailuresBeforeLock > maxFailuresBeforeLock {
 		a.FailuresBeforeLock = d.FailuresBeforeLock
 	}
-	if a.AccountFailuresBeforeLock <= 0 {
+	if a.AccountFailuresBeforeLock <= 0 || a.AccountFailuresBeforeLock > maxAccountFailuresBeforeLock {
 		a.AccountFailuresBeforeLock = d.AccountFailuresBeforeLock
 	}
-	a.Window = normalizeDurationString(a.Window, d.Window, false)
-	a.LockStart = normalizeDurationString(a.LockStart, d.LockStart, false)
-	a.LockMax = normalizeDurationString(a.LockMax, d.LockMax, false)
-	a.FailureDelay = normalizeDurationString(a.FailureDelay, d.FailureDelay, true)
-	if a.MaxKeys <= 0 {
+	if a.MaxKeys <= 0 || a.MaxKeys > maxAuthMaxKeys {
 		a.MaxKeys = d.MaxKeys
 	}
+	a.Window = normalizeDurationFloor(a.Window, d.Window, minAuthWindow)
+	a.LockStart = normalizeDurationFloor(a.LockStart, d.LockStart, minAuthLockStart)
+	a.LockMax = normalizeLockMax(a.LockStart, a.LockMax, d.LockMax)
+	a.FailureDelay = normalizeDurationString(a.FailureDelay, d.FailureDelay, true)
 	a.DisabledSince = strings.TrimSpace(a.DisabledSince)
 	if a.IsEnabled() {
 		a.DisabledSince = ""
@@ -308,6 +328,41 @@ func normalizeDurationString(s, def string, allowZero bool) string {
 	}
 	if dur < 0 || (dur == 0 && !allowZero) {
 		return def
+	}
+	return s
+}
+
+// normalizeDurationFloor trims s and keeps it only when it parses to a duration
+// of at least min; a blank, unparsable, or sub-floor value falls back to def
+// (which is itself at least min). The floor is what stops a degenerate value
+// like "1ns" from silently disabling the limiter.
+func normalizeDurationFloor(s, def string, min time.Duration) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def
+	}
+	dur, err := time.ParseDuration(s)
+	if err != nil || dur < min {
+		return def
+	}
+	return s
+}
+
+// normalizeLockMax keeps lockMax only when it parses and is at least the
+// already-normalized lockStart; a blank or unparsable value falls back to def,
+// and any value below lockStart is raised to lockStart (LockMax < LockStart would
+// make the doubling band incoherent). lockStartStr is trusted to be a valid,
+// floored duration string (normalizeDurationFloor produced it).
+func normalizeLockMax(lockStartStr, lockMaxStr, def string) string {
+	start, _ := time.ParseDuration(lockStartStr)
+	s := strings.TrimSpace(lockMaxStr)
+	dur, err := time.ParseDuration(s)
+	if s == "" || err != nil {
+		s = def
+		dur, _ = time.ParseDuration(def)
+	}
+	if dur < start {
+		return lockStartStr
 	}
 	return s
 }

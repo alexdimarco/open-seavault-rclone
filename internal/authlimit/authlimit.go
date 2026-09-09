@@ -18,7 +18,13 @@
 // Concurrency model: every exported method takes the single mutex. Check
 // RESERVES an in-flight attempt (a pending count) so that N concurrent requests
 // for one key cannot all pass the pre-check and all reach credential
-// verification (C4 / I-R10); Fail and Success each consume one reservation.
+// verification (C4 / I-R10); Fail and Success each consume one reservation, and
+// Attempt.Release returns one without counting either. A key holding a
+// reservation is non-evictable (like a lock), so eviction can never drop a live
+// reservation and break the bound; a reservation still in flight past Window (a
+// handler that ran neither Fail, Success, nor Release) decays on the next
+// refresh, so a leaked reservation self-heals instead of becoming a permanent,
+// cross-peer denial.
 package authlimit
 
 import (
@@ -166,28 +172,48 @@ func (l *Limiter) getOrCreateLocked(k Key, now time.Time) *state {
 	return st
 }
 
-// evictOneLocked removes the entry with the oldest lastSeen among keys that are
-// NOT currently locked. A locked key is never evicted before its lock expires,
-// so spraying source addresses can neither grow memory past MaxKeys (I-R3) nor
-// evict — and thereby unlock — the attacker's own locked key. If every key is
-// currently locked (which requires FailuresBeforeLock failures on each and so
-// cannot arise from a cheap spray), no eviction happens and the map is allowed
-// to grow by one rather than break the never-evict-locked invariant.
+// evictOneLocked keeps the map bounded by MaxKeys (I-R3). It prefers the oldest
+// key that is neither locked nor holding an in-flight reservation. A key with
+// pending > 0 is NEVER a victim: an in-flight reservation makes a key
+// non-evictable like a lock, so eviction can never drop a live reservation and
+// break the concurrency bound (I-R10 / C4). When no unlocked, non-pending victim
+// exists — a spray of LOCKED source addresses would otherwise grow the map
+// without bound — the oldest LOCKED (still non-pending) key is evicted instead,
+// so the total-key bound holds even under a locked spray; a locked key is never
+// evicted while any unlocked key remains, so a cheap spray cannot unlock the
+// attacker's own key. Only when EVERY key holds a reservation (which cannot
+// arise from a cheap spray) does the map grow by one rather than evict a pending
+// key.
 func (l *Limiter) evictOneLocked(now time.Time) {
-	var victim Key
-	var victimSeen time.Time
-	found := false
+	var (
+		idle       Key
+		idleSeen   time.Time
+		idleFound  bool
+		lockd      Key
+		lockdSeen  time.Time
+		lockdFound bool
+	)
 	for k, st := range l.keys {
+		if st.pending > 0 {
+			continue // in-flight reservation: non-evictable, like a lock
+		}
 		if !st.lockedUntil.IsZero() && now.Before(st.lockedUntil) {
-			continue // locked: never evict before expiry
+			if !lockdFound || st.lastSeen.Before(lockdSeen) {
+				lockd, lockdSeen, lockdFound = k, st.lastSeen, true
+			}
+			continue
 		}
-		if !found || st.lastSeen.Before(victimSeen) {
-			victim, victimSeen, found = k, st.lastSeen, true
+		if !idleFound || st.lastSeen.Before(idleSeen) {
+			idle, idleSeen, idleFound = k, st.lastSeen, true
 		}
 	}
-	if found {
-		delete(l.keys, victim)
+	switch {
+	case idleFound:
+		delete(l.keys, idle) // preferred: oldest unlocked, non-pending key
+	case lockdFound:
+		delete(l.keys, lockd) // hard total-key ceiling: oldest locked, non-pending
 	}
+	// else every key holds a reservation: grow by one rather than evict one.
 }
 
 // refreshLocked applies lock expiry and window expiry to st before a decision.
@@ -208,6 +234,22 @@ func (l *Limiter) refreshLocked(k Key, st *state, now time.Time) {
 		st.lockLen = 0
 		st.lastFailure = time.Time{}
 	}
+	// Decay a leaked reservation: an unlocked key untouched for a whole Window
+	// cannot have a real verification still in flight (a KDF finishes in
+	// milliseconds), so a surviving pending count is a handler that ran neither
+	// Fail, Success, nor Release. Dropping it here makes the leak self-heal
+	// instead of wedging the key — or, for the shared account ceiling, the whole
+	// account — denied forever (I-R10 hygiene). lastSeen carries the pre-refresh
+	// value here (callers stamp it after this returns).
+	if st.lockedUntil.IsZero() && st.pending > 0 && !st.lastSeen.IsZero() && now.Sub(st.lastSeen) >= l.policy.Window {
+		st.pending = 0
+	}
+	// Defence in depth: Check grants only while failures+pending < threshold, so
+	// pending can never legitimately exceed the threshold; a larger value is a
+	// leak — clamp it so a stray reservation can never wedge a key shut.
+	if st.pending > threshold {
+		st.pending = threshold
+	}
 }
 
 // Check is called BEFORE verifying a credential. It reserves an in-flight
@@ -222,8 +264,8 @@ func (l *Limiter) Check(k Key) (allowed bool, retryAfter time.Duration) {
 	defer l.mu.Unlock()
 	now := l.clock()
 	st := l.getOrCreateLocked(k, now)
-	st.lastSeen = now
 	l.refreshLocked(k, st, now)
+	st.lastSeen = now
 	if !st.lockedUntil.IsZero() && now.Before(st.lockedUntil) {
 		return false, st.lockedUntil.Sub(now)
 	}
@@ -252,8 +294,8 @@ func (l *Limiter) failReport(k Key) (locked bool, retryAfter time.Duration, fail
 	defer l.mu.Unlock()
 	now := l.clock()
 	st := l.getOrCreateLocked(k, now)
-	st.lastSeen = now
 	l.refreshLocked(k, st, now)
+	st.lastSeen = now
 	if st.pending > 0 {
 		st.pending--
 	}
@@ -317,9 +359,10 @@ func (l *Limiter) release(k Key) {
 // account is "". Call Attempt before verifying; on the returned handle call
 // Fail after a failed verification or Success after a good one.
 type Attempt struct {
-	l     *Limiter
-	keys  []Key
-	locks []lockRecord // keys that transitioned to locked during Fail (for LockLines)
+	l        *Limiter
+	keys     []Key
+	locks    []lockRecord // keys that transitioned to locked during Fail (for LockLines)
+	consumed bool         // set once Fail, Success, or Release has resolved the attempt
 }
 
 // lockRecord captures what a single lock transition needs for its operator log
@@ -362,6 +405,10 @@ func (l *Limiter) Attempt(surface Surface, remoteAddr, account string) (att *Att
 // Fail records a failed verification on every consulted key, returning whether
 // any key is now locked and the longest lock duration.
 func (a *Attempt) Fail() (locked bool, retryAfter time.Duration) {
+	if a.consumed {
+		return false, 0
+	}
+	a.consumed = true
 	for _, k := range a.keys {
 		lk, ra, failures := a.l.failReport(k)
 		if lk {
@@ -393,8 +440,32 @@ func (a *Attempt) LockLines() []string {
 
 // Success records a successful verification, clearing every consulted key.
 func (a *Attempt) Success() {
+	if a.consumed {
+		return
+	}
+	a.consumed = true
 	for _, k := range a.keys {
 		a.l.Success(k)
+	}
+}
+
+// Release returns the reservations this Attempt holds WITHOUT counting a failure
+// or a success: it decrements only the pending count on each consulted key and
+// touches neither the failure streak nor the lock state. Callers use it on an
+// infrastructure error — a keychain read that fails before any credential was
+// judged, say — where neither Fail nor Success is the truthful outcome; resetting
+// the streak there (as Success would) would wrongly clear the shared account
+// ceiling on an error the attacker did not earn. Like Fail and Success it
+// resolves the attempt at most once, so `defer att.Release()` no-ops once a Fail
+// or Success has already run and otherwise frees a reservation a handler path
+// forgot to resolve.
+func (a *Attempt) Release() {
+	if a.consumed {
+		return
+	}
+	a.consumed = true
+	for _, k := range a.keys {
+		a.l.release(k)
 	}
 }
 
@@ -446,23 +517,41 @@ func SurfaceWords(s Surface) string {
 // takes no credential and emits none (I-R2) — the username is an identifier,
 // not a secret, and no password, hash, secret, or phrase is a parameter.
 func LockLine(k Key, d time.Duration, failures int) string {
-	who := k.Peer
-	if k.Account != "" {
+	var who string
+	switch {
+	case k.Peer == "" && k.Account != "":
+		// The per-account ceiling locks the account across EVERY source, so there
+		// is no single peer to name; say that plainly instead of leaving an empty
+		// gap (which read "for  (user …)" with a stray double space).
+		who = fmt.Sprintf("account %q (from any source)", k.Account)
+	case k.Account != "":
 		who = fmt.Sprintf("%s (user %q)", k.Peer, k.Account)
+	default:
+		who = k.Peer
 	}
 	return fmt.Sprintf(
 		"auth-limit: locked %s for %s for %s after %d failures; unlocks automatically, or restart with --auth-limit off for an incident",
-		SurfaceWords(k.Surface), who, minutesPhrase(d), failures,
+		SurfaceWords(k.Surface), who, lockDurationPhrase(d), failures,
 	)
 }
 
-// minutesPhrase renders d as whole minutes, rounded up, with a floor of one
-// minute so a sub-minute lock never prints "0 minutes".
-func minutesPhrase(d time.Duration) string {
-	m := int((d + time.Minute - 1) / time.Minute)
-	if m < 1 {
-		m = 1
+// lockDurationPhrase renders d as a human duration for the operator lock line,
+// honestly enough to agree with the Retry-After the same lock sets: a sub-minute
+// lock reads in whole seconds (rounded up, floored at one second), so a
+// 30-second first lock says "30 seconds" rather than a rounded-up, contradictory
+// "1 minute"; a lock of a minute or more reads in whole minutes (rounded up).
+func lockDurationPhrase(d time.Duration) string {
+	if d < time.Minute {
+		s := int((d + time.Second - 1) / time.Second)
+		if s < 1 {
+			s = 1
+		}
+		if s == 1 {
+			return "1 second"
+		}
+		return fmt.Sprintf("%d seconds", s)
 	}
+	m := int((d + time.Minute - 1) / time.Minute)
 	if m == 1 {
 		return "1 minute"
 	}

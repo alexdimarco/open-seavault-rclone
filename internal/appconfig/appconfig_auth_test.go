@@ -94,6 +94,22 @@ func TestAuthLimitsNormalizeDefaults(t *testing.T) {
 		if !strings.Contains(on, "on (") || !strings.Contains(on, "failures") {
 			t.Fatalf("enabled StatusLine is wrong: %q", on)
 		}
+		// The Window must be surfaced so a hostile-but-normalized value is visible
+		// in the readout (off-switch-config-2), never hidden behind "on". Use a
+		// config whose Window is DISTINCT from LockStart/LockMax so the check is not
+		// satisfied vacuously by another field that happens to share the value.
+		cfg := Default()
+		cfg.Auth.Limits.Window = "7m"
+		cfg.Auth.Limits.LockStart = "30s"
+		cfg.Auth.Limits.LockMax = "9m"
+		distinct := Normalize(cfg).Auth.Limits
+		if distinct.Window != "7m" {
+			t.Fatalf("test premise wrong: normalized window %q want 7m", distinct.Window)
+		}
+		line7 := distinct.StatusLine()
+		if !strings.Contains(line7, "7m") {
+			t.Fatalf("enabled StatusLine must surface the Window (7m), distinct from the lock band: %q", line7)
+		}
 		disabled := AuthLimits{DisabledSince: "2026-01-02T03:04:05Z"}
 		enabledFalse := false
 		disabled.Enabled = &enabledFalse
@@ -103,6 +119,56 @@ func TestAuthLimitsNormalizeDefaults(t *testing.T) {
 		}
 		if !strings.Contains(line, "--auth-limit on") && !strings.Contains(line, "auth.limits.enabled=true") {
 			t.Fatalf("disabled StatusLine must name the re-enable remedy: %q", line)
+		}
+	})
+
+	// off-switch-config-2: a degenerate-but-valid config value must not silently
+	// neutralize the limiter. A one-nanosecond window (which would reset the streak
+	// between any two real attempts, so nothing ever locks), a sub-second lock, and
+	// a two-billion threshold or map bound are out of range and fall back to the
+	// defaults; a LockMax below LockStart is raised to LockStart; and the normalized
+	// Window is visible in the status line.
+	t.Run("degenerate_but_valid_values_are_clamped", func(t *testing.T) {
+		cfg := Default()
+		cfg.Auth.Limits.Window = "1ns"                         // resets the streak instantly
+		cfg.Auth.Limits.LockStart = "1ms"                      // sub-second lock
+		cfg.Auth.Limits.LockMax = "500us"                      // below LockStart, and tiny
+		cfg.Auth.Limits.FailuresBeforeLock = 2000000000        // effectively unlimited
+		cfg.Auth.Limits.AccountFailuresBeforeLock = 2000000000 // effectively unlimited
+		cfg.Auth.Limits.MaxKeys = 2000000000                   // effectively unbounded
+		got := Normalize(cfg).Auth.Limits
+		def := DefaultAuthLimits()
+		if got.Window != def.Window {
+			t.Fatalf("a 1ns window must be floored to the default, got %q", got.Window)
+		}
+		if got.LockStart != def.LockStart {
+			t.Fatalf("a sub-second lockStart must be floored to the default, got %q", got.LockStart)
+		}
+		if got.FailuresBeforeLock != def.FailuresBeforeLock {
+			t.Fatalf("a huge failuresBeforeLock must fall back to the default, got %d", got.FailuresBeforeLock)
+		}
+		if got.AccountFailuresBeforeLock != def.AccountFailuresBeforeLock {
+			t.Fatalf("a huge accountFailuresBeforeLock must fall back to the default, got %d", got.AccountFailuresBeforeLock)
+		}
+		if got.MaxKeys != def.MaxKeys {
+			t.Fatalf("a huge maxKeys must fall back to the default, got %d", got.MaxKeys)
+		}
+		// The floored window is now visible in the readout — no silent neutralization.
+		if !strings.Contains(got.StatusLine(), got.Window) {
+			t.Fatalf("StatusLine must surface the normalized Window: %q", got.StatusLine())
+		}
+	})
+
+	t.Run("lockMax_below_lockStart_is_raised", func(t *testing.T) {
+		cfg := Default()
+		cfg.Auth.Limits.LockStart = "2m"
+		cfg.Auth.Limits.LockMax = "30s" // below LockStart
+		got := Normalize(cfg).Auth.Limits
+		if got.LockStart != "2m" {
+			t.Fatalf("a valid in-range lockStart must be preserved, got %q", got.LockStart)
+		}
+		if got.LockMax != "2m" {
+			t.Fatalf("a lockMax below lockStart must be raised to lockStart, got %q", got.LockMax)
 		}
 	})
 }

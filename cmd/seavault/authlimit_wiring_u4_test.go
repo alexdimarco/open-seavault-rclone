@@ -760,15 +760,21 @@ func TestS1NoCredentialInLogsOrBodies(t *testing.T) {
 		}
 	}
 	// The log sink must carry the operator lock lines (basic + login + open), each
-	// in operator WORDS and a MINUTES duration, never the raw surface enum.
+	// in operator WORDS and an HONEST human duration, never the raw surface enum.
+	// The default first lock is 30 seconds, so the line reads "30 seconds" and
+	// agrees with the Retry-After: 30 the same lock sets (wiring-3) — it must NOT
+	// round up to "1 minute", which would contradict the header.
 	logs := sink.joined()
 	for _, phrase := range []string{"WebDAV auth", "GUI login", "vault open"} {
 		if !strings.Contains(logs, phrase) {
 			t.Fatalf("lock log missing the operator phrase %q; got:\n%s", phrase, logs)
 		}
 	}
-	if !strings.Contains(logs, "minute") {
-		t.Fatalf("lock log lines must state a minutes duration; got:\n%s", logs)
+	if !strings.Contains(logs, "30 seconds") {
+		t.Fatalf("lock log lines must state the honest 30-second first-lock duration; got:\n%s", logs)
+	}
+	if strings.Contains(logs, "1 minute") {
+		t.Fatalf("a 30-second first lock must not round up to \"1 minute\" (contradicts Retry-After: 30); got:\n%s", logs)
 	}
 	// Every lock line must also carry the remedy so an operator knows the escape
 	// hatch (C6), and never the raw surface enum on its own (SurfaceWords maps it).

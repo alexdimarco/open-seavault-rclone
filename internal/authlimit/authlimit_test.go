@@ -550,23 +550,316 @@ func TestLockLineFormatting(t *testing.T) {
 		t.Fatalf("lock line leaked the raw surface enum:\n%s", line)
 	}
 
-	// Minutes round up with a floor of one; a sub-minute lock never prints "0".
+	// A sub-minute lock reads honestly in seconds (wiring-3); a lock of a minute
+	// or more reads in whole minutes, rounded up. Nothing ever prints "0".
 	for _, c := range []struct {
 		d    time.Duration
 		want string
 	}{
-		{30 * time.Second, "1 minute"},
+		{time.Second, "1 second"},
+		{30 * time.Second, "30 seconds"},
+		{45 * time.Second, "45 seconds"},
 		{time.Minute, "1 minute"},
 		{90 * time.Second, "2 minutes"},
 		{15 * time.Minute, "15 minutes"},
 	} {
 		got := LockLine(Key{Surface: SurfaceOpen, Peer: "p"}, c.d, 1)
 		if !strings.Contains(got, c.want) {
-			t.Fatalf("LockLine minutes for %v missing %q:\n%s", c.d, c.want, got)
+			t.Fatalf("LockLine duration for %v missing %q:\n%s", c.d, c.want, got)
 		}
+	}
+	// The default first lock is 30 seconds; the operator line must NOT round it up
+	// to "1 minute" (wiring-3: that would contradict the Retry-After: 30 the same
+	// lock sets on its response).
+	if first := LockLine(Key{Surface: SurfaceOpen, Peer: "p"}, 30*time.Second, 5); strings.Contains(first, "minute") {
+		t.Fatalf("a 30-second first lock must not render minutes:\n%s", first)
 	}
 	// The peer-only key (no account) omits the user clause.
 	if strings.Contains(LockLine(Key{Surface: SurfaceLogin, Peer: "192.0.2.8"}, time.Minute, 3), "user ") {
 		t.Fatal("peer-only lock line printed an empty user clause")
 	}
+}
+
+// TestLockLineFirstLockAgreesWithRetryAfter (wiring-3): for the default 30-second
+// first lock the operator lock line's duration phrase must agree with the whole
+// seconds a Retry-After header would carry for the same duration — no "1 minute"
+// vs "Retry-After: 30" contradiction on one response.
+func TestLockLineFirstLockAgreesWithRetryAfter(t *testing.T) {
+	const first = 30 * time.Second
+	// The Retry-After a caller derives from this lock (whole seconds, rounded up).
+	retryAfterSeconds := int((first + time.Second - 1) / time.Second)
+	if retryAfterSeconds != 30 {
+		t.Fatalf("test premise wrong: retryAfterSeconds=%d want 30", retryAfterSeconds)
+	}
+	line := LockLine(Key{Surface: SurfaceBasic, Peer: "192.0.2.7"}, first, 5)
+	want := fmt.Sprintf("%d seconds", retryAfterSeconds)
+	if !strings.Contains(line, want) {
+		t.Fatalf("first-lock line must state %q to agree with Retry-After: %d:\n%s", want, retryAfterSeconds, line)
+	}
+	if strings.Contains(line, "minute") {
+		t.Fatalf("first-lock line rounds up to minutes, contradicting Retry-After: %d:\n%s", retryAfterSeconds, line)
+	}
+}
+
+// TestLockLineAccountCeiling (lockout-dos-5): the per-account ceiling key has no
+// peer (Peer==""); its lock line must name the whole-account lock plainly, with
+// no empty peer and no double space, and still carry the surface words, the
+// duration, and the remedy.
+func TestLockLineAccountCeiling(t *testing.T) {
+	k := Key{Surface: SurfaceBasic, Account: "seavault"} // Peer == "" — the ceiling
+	line := LockLine(k, 2*time.Minute, 20)
+	if strings.Contains(line, "for  ") {
+		t.Fatalf("account-ceiling line has an empty peer / double space:\n%s", line)
+	}
+	for _, want := range []string{
+		`account "seavault" (from any source)`,
+		"WebDAV auth",
+		"2 minutes",
+		"after 20 failures",
+		"--auth-limit off",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("account-ceiling line missing %q:\n%s", want, line)
+		}
+	}
+	// It must not read as a peer key with an empty address followed by a user clause.
+	if strings.Contains(line, `(user "seavault")`) {
+		t.Fatalf("account-ceiling line used the peer+user form instead of the whole-account form:\n%s", line)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// L2b — locked-spray total bound (lockout-dos-1 / I-R3): a spray of distinct
+// peers that each LOCK must still leave the map bounded by MaxKeys. Before the
+// fix, evictOneLocked skipped every locked key and getOrCreateLocked added
+// anyway, so a locked spray grew the map without bound.
+// ---------------------------------------------------------------------------
+
+func TestL2LockedSprayBounded(t *testing.T) {
+	clk := newClock()
+	p := Policy{
+		FailuresBeforeLock: 3, AccountFailuresBeforeLock: 6,
+		Window: time.Hour, LockStart: time.Hour, LockMax: time.Hour,
+		FailureDelay: 0, MaxKeys: 500,
+	}
+	l := New(p, clk.now)
+
+	const spray = 5000
+	for i := 0; i < spray; i++ {
+		clk.advance(time.Millisecond) // strictly increasing lastSeen
+		k := Key{Surface: SurfaceBasic, Peer: fmt.Sprintf("198.51.%d.%d", i/256, i%256)}
+		for f := 0; f < p.FailuresBeforeLock; f++ {
+			l.Fail(k) // lock this key (LockStart == Window == 1h, so it stays locked)
+		}
+	}
+
+	if got := l.lenForTest(); got > p.MaxKeys {
+		t.Fatalf("a spray of LOCKED peers grew the map past MaxKeys: len=%d MaxKeys=%d (I-R3 total bound broken)", got, p.MaxKeys)
+	}
+	// The most recent locked key must survive; the hard ceiling evicts the OLDEST
+	// locked key, not a random or the newest one.
+	recent := Key{Surface: SurfaceBasic, Peer: fmt.Sprintf("198.51.%d.%d", (spray-1)/256, (spray-1)%256)}
+	if !l.hasKeyTest(recent) {
+		t.Fatal("the most-recent locked key was evicted; the hard ceiling must drop the OLDEST locked key")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// concurrency-reservation-1 (I-R10 / C4): a key holding in-flight reservations
+// is never evicted. Under a small MaxKeys, a Check on a new peer must not evict a
+// pending target and reset its reservation count — that would let another full
+// FailuresBeforeLock reservations pass, so > FailuresBeforeLock verifications run
+// on one threshold-F key. Runs under -race in the unfiltered suite.
+// ---------------------------------------------------------------------------
+
+func TestEvictionNeverDropsPendingReservations(t *testing.T) {
+	clk := newClock()
+	const F = 3
+	p := Policy{
+		FailuresBeforeLock: F, AccountFailuresBeforeLock: 20,
+		Window: time.Hour, LockStart: time.Minute, LockMax: time.Minute,
+		FailureDelay: 0, MaxKeys: 1, // one slot: any new key forces an eviction
+	}
+	l := New(p, clk.now)
+	target := Key{Surface: SurfaceOpen, Peer: "192.0.2.50"}
+
+	// Hold F reservations on the target (Checks with no Fail/Success yet).
+	held := 0
+	for i := 0; i < F; i++ {
+		if allowed, _ := l.Check(target); allowed {
+			held++
+		}
+	}
+	if held != F {
+		t.Fatalf("setup: %d reservations granted, want %d", held, F)
+	}
+	if got := l.pendingForTest(target); got != F {
+		t.Fatalf("setup: target pending=%d want %d", got, F)
+	}
+
+	// A Check on a NEW peer at MaxKeys=1 would evict. The pending target must NOT
+	// be the victim: the map grows by one instead.
+	other := Key{Surface: SurfaceOpen, Peer: "192.0.2.51"}
+	l.Check(other)
+	if !l.hasKeyTest(target) {
+		t.Fatal("a key holding in-flight reservations was evicted (I-R10/C4 broken)")
+	}
+	if got := l.pendingForTest(target); got != F {
+		t.Fatalf("eviction dropped the target's reservations: pending=%d want %d", got, F)
+	}
+
+	// The property the finding names: after the eviction attempt, no more than
+	// FailuresBeforeLock reservations can be live on the target. If eviction had
+	// reset pending, these F extra Checks would all pass, giving 2F live.
+	extra := 0
+	for i := 0; i < F; i++ {
+		if allowed, _ := l.Check(target); allowed {
+			extra++
+		}
+	}
+	if live := held + extra; live > F {
+		t.Fatalf("%d live reservations on a threshold-%d key after eviction (want <= %d): pending was reset", live, F, F)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// concurrency-reservation-2: a leaked reservation decays. Three Checks with no
+// Fail/Success fill the reservation to the threshold and the key denies; after a
+// whole Window of inactivity the stale reservations must decay so the key is
+// usable again — a leak must self-heal, not become a permanent lockout.
+// ---------------------------------------------------------------------------
+
+func TestReservationDecaysAfterWindow(t *testing.T) {
+	clk := newClock()
+	p := Policy{
+		FailuresBeforeLock: 3, AccountFailuresBeforeLock: 20,
+		Window: 15 * time.Minute, LockStart: time.Minute, LockMax: 15 * time.Minute,
+		FailureDelay: 0, MaxKeys: 100,
+	}
+	l := New(p, clk.now)
+	k := Key{Surface: SurfaceOpen, Peer: "192.0.2.44"}
+
+	for i := 0; i < 3; i++ {
+		if allowed, _ := l.Check(k); !allowed {
+			t.Fatalf("check %d denied before the reservation filled", i)
+		}
+	}
+	if got := l.pendingForTest(k); got != 3 {
+		t.Fatalf("pending=%d want 3 after three granted Checks", got)
+	}
+	if allowed, _ := l.Check(k); allowed {
+		t.Fatal("a fourth Check must be denied while three reservations are in flight")
+	}
+
+	// No handler ever ran Fail/Success/Release (a leaked reservation). Advance past
+	// the Window: the stale reservations must decay.
+	clk.advance(p.Window + time.Second)
+	allowed, ra := l.Check(k)
+	if !allowed {
+		t.Fatalf("a Window-stale leaked reservation never decayed: Check allowed=false retryAfter=%v pending=%d (permanent lockout)", ra, l.pendingForTest(k))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// peer-spoofing-2 / concurrency-reservation-2 — Attempt.Release: it returns the
+// reservations WITHOUT counting a failure or a success, so it never resets the
+// failure streak or clears a lock (calling Success on an infrastructure error
+// would wrongly clear the shared account ceiling). A deferred Release also
+// no-ops once Fail or Success has already resolved the attempt.
+// ---------------------------------------------------------------------------
+
+func TestAttemptReleaseOnlyDecrementsPending(t *testing.T) {
+	clk := newClock()
+	p := Policy{
+		FailuresBeforeLock: 5, AccountFailuresBeforeLock: 20,
+		Window: 15 * time.Minute, LockStart: time.Minute, LockMax: 15 * time.Minute,
+		FailureDelay: 0, MaxKeys: 100,
+	}
+	const account = "vault"
+
+	t.Run("release keeps failures and the account ceiling", func(t *testing.T) {
+		l := New(p, clk.now)
+		peerAcct := Key{Surface: SurfaceLogin, Peer: "192.0.2.1", Account: account}
+		acctCeil := Key{Surface: SurfaceLogin, Account: account}
+
+		// Accrue two real failures across the account keys.
+		for i := 0; i < 2; i++ {
+			att, allowed, _ := l.Attempt(SurfaceLogin, "192.0.2.1:5000", account)
+			if !allowed {
+				t.Fatalf("attempt %d denied before the threshold", i)
+			}
+			att.Fail()
+		}
+		if got := l.failuresForTest(peerAcct); got != 2 {
+			t.Fatalf("setup: peer+account failures=%d want 2", got)
+		}
+		if got := l.failuresForTest(acctCeil); got != 2 {
+			t.Fatalf("setup: account-ceiling failures=%d want 2", got)
+		}
+
+		// A third attempt reserves, then hits an infrastructure error and RELEASES.
+		att, allowed, _ := l.Attempt(SurfaceLogin, "192.0.2.1:5000", account)
+		if !allowed {
+			t.Fatal("third attempt denied before its Release")
+		}
+		if got := l.pendingForTest(acctCeil); got != 1 {
+			t.Fatalf("account-ceiling pending=%d want 1 after Check", got)
+		}
+		att.Release()
+
+		// Release drops only the reservations; the failure streaks stand.
+		if got := l.pendingForTest(peerAcct); got != 0 {
+			t.Fatalf("Release left a reservation on peer+account: pending=%d want 0", got)
+		}
+		if got := l.pendingForTest(acctCeil); got != 0 {
+			t.Fatalf("Release left a reservation on the account ceiling: pending=%d want 0", got)
+		}
+		if got := l.failuresForTest(peerAcct); got != 2 {
+			t.Fatalf("Release reset peer+account failures: got %d want 2 (Release must not clear the streak)", got)
+		}
+		if got := l.failuresForTest(acctCeil); got != 2 {
+			t.Fatalf("Release reset the shared account ceiling: got %d want 2 (peer-spoofing-2)", got)
+		}
+	})
+
+	t.Run("deferred release no-ops after Fail", func(t *testing.T) {
+		l := New(p, clk.now)
+		func() {
+			att, allowed, _ := l.Attempt(SurfaceLogin, "192.0.2.2:5000", account)
+			if !allowed {
+				t.Fatal("attempt denied before Fail")
+			}
+			defer att.Release() // must no-op: Fail already consumed the attempt
+			att.Fail()
+		}()
+		k := Key{Surface: SurfaceLogin, Peer: "192.0.2.2", Account: account}
+		if got := l.failuresForTest(k); got != 1 {
+			t.Fatalf("a Fail then a deferred Release must leave one counted failure, got %d (double-resolve?)", got)
+		}
+		if got := l.pendingForTest(k); got != 0 {
+			t.Fatalf("pending=%d want 0 after Fail + deferred Release", got)
+		}
+	})
+
+	t.Run("deferred release no-ops after Success", func(t *testing.T) {
+		l := New(p, clk.now)
+		peer := Key{Surface: SurfaceLogin, Peer: "192.0.2.3", Account: account}
+		// One failure first, then a success that a deferred Release must not undo-twice.
+		att, _, _ := l.Attempt(SurfaceLogin, "192.0.2.3:5000", account)
+		att.Fail()
+		func() {
+			att, allowed, _ := l.Attempt(SurfaceLogin, "192.0.2.3:5000", account)
+			if !allowed {
+				t.Fatal("attempt denied before Success")
+			}
+			defer att.Release()
+			att.Success()
+		}()
+		if got := l.failuresForTest(peer); got != 0 {
+			t.Fatalf("Success must clear the streak; got %d", got)
+		}
+		if got := l.pendingForTest(peer); got != 0 {
+			t.Fatalf("pending=%d want 0 after Success + deferred Release", got)
+		}
+	})
 }
