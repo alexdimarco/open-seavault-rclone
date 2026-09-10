@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/alexdimarco/open-seavault-rclone/internal/vault"
 )
 
 // TestU4GUIOwn4ReadbackNamesFirstDifferingWord proves the design §3 P-GUI GUI-OWN 4
@@ -58,10 +60,51 @@ func TestU4GUIOwn4ReadbackNamesFirstDifferingWord(t *testing.T) {
 	}
 	// No phrase material: the correct word at the mistyped position must not appear
 	// as a token anywhere in the response (the server diffs internally only).
+	//
+	// The message's own fixed English vocabulary overlaps the BIP-39 wordlist
+	// ("word", "first", "that", "match", "order", "phrase", "secret", "security",
+	// "control", "unknown", "neither"), so a random correct word 7 that happens to
+	// be one of those would trip a naive token scan (~1 in 190 runs). Render the
+	// message once for the SAME error class with a readback whose word 7 cannot
+	// leak anything (a second wrong token) and treat every token of that rendering
+	// as the fixed vocabulary; a leak is a token of the real message that is the
+	// correct word AND is not fixed vocabulary. The guard never passes vacuously:
+	// it still fails when the server includes the correct word anywhere.
+	cleanTok := func(tok string) string {
+		return strings.ToLower(strings.Map(func(r rune) rune {
+			if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+				return r
+			}
+			return -1
+		}, tok))
+	}
+	fixedBad := append([]string(nil), gen.Words...)
+	fixedBad[k-1] = "qqqqqq"
+	fixed := map[string]bool{}
+	for _, tok := range strings.Fields(recoveryReadbackMessage(vault.ErrRecoveryWordUnknown, strings.Join(gen.Words, " "), strings.Join(fixedBad, " "))) {
+		fixed[cleanTok(tok)] = true
+	}
+	if len(fixed) == 0 {
+		t.Fatal("fixed-vocabulary rendering produced no tokens; the leak guard would be vacuous")
+	}
+	want := strings.ToLower(correctWordK)
 	for _, tok := range strings.Fields(body.Error) {
-		clean := strings.ToLower(strings.Trim(tok, ".,;:\"'"))
-		if clean == strings.ToLower(correctWordK) {
+		if clean := cleanTok(tok); clean == want && !fixed[clean] {
 			t.Fatalf("the read-back error must not leak any phrase word, but token %q matched the correct word 7", tok)
+		}
+	}
+	// And the guard itself is live: a message that DOES embed the correct word must
+	// be caught when that word is not part of the fixed vocabulary.
+	if !fixed[want] {
+		leaky := body.Error + " " + correctWordK
+		caught := false
+		for _, tok := range strings.Fields(leaky) {
+			if clean := cleanTok(tok); clean == want && !fixed[clean] {
+				caught = true
+			}
+		}
+		if !caught {
+			t.Fatal("the leak guard must catch a message that embeds the correct word")
 		}
 	}
 }
