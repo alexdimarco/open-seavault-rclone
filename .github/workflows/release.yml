@@ -26,6 +26,10 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME}"
+          # The binary reports the tag WITHOUT its leading v, injected at link time
+          # into main.version (friction C/C4/C6: the version is a linker-overridable
+          # var, not a hand-maintained const that drifts from the tag/plist).
+          BUILD_VERSION="${VERSION#v}"
           mkdir -p dist
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
             GOOS="${target%/*}"; GOARCH="${target#*/}"
@@ -33,12 +37,48 @@ jobs:
             BIN="seavault"; [ "$GOOS" = "windows" ] && BIN="seavault.exe"
             mkdir -p "dist/$NAME"
             CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
-              go build -trimpath -ldflags "-s -w" -o "dist/$NAME/$BIN" ./cmd/seavault
+              go build -trimpath -ldflags "-s -w -X main.version=${BUILD_VERSION}" -o "dist/$NAME/$BIN" ./cmd/seavault
             cp LICENSE README.md THIRD_PARTY_NOTICES.md TRADEMARKS.md "dist/$NAME/"
             ( cd dist && if [ "$GOOS" = "windows" ]; then zip -qr "$NAME.zip" "$NAME"; else tar -czf "$NAME.tar.gz" "$NAME"; fi )
           done
           ( cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS.txt )
           ls -l dist
+      - name: Stage the darwin binaries for the macOS packaging job (I-M1, C8)
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p darwin-bins
+          # The macOS job lipos EXACTLY these binaries (never recompiles), so
+          # "no separate build path" is literally true (I-M1).
+          cp "dist/open-seavault-rclone_${VERSION}_darwin_amd64/seavault" darwin-bins/seavault-darwin-amd64
+          cp "dist/open-seavault-rclone_${VERSION}_darwin_arm64/seavault" darwin-bins/seavault-darwin-arm64
+      - name: Upload the darwin binaries as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-binaries
+          path: darwin-bins/
+          retention-days: 1
+      - name: Assert the per-tag Gatekeeper sign-off exists BEFORE publishing (design §6, C2; release-ci-secrets-1)
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          # release-ci-secrets-1: this gate runs in the RELEASE job, before
+          # `gh release create`, so a missing sign-off blocks the whole release, not
+          # merely the DMG/PKG attach (which needs: this job). It needs only the
+          # checked-out file. The match is an ANCHORED table row whose Tag column
+          # equals THIS tag exactly: anchor to the row-start `|`, bound the tag by
+          # the next `|`, and escape every regex metacharacter in the tag. An
+          # unanchored substring grep is spoofable (an example row, or v0.2 ⊂ v0.22).
+          tag_re="$(printf '%s' "$TAG" | sed 's/[^[:alnum:]]/\\&/g')"
+          if ! grep -qE "^\|[[:space:]]*${tag_re}[[:space:]]*\|" packaging/macos/GATEKEEPER-CHECK.md; then
+            echo "No Gatekeeper sign-off ROW for $TAG in packaging/macos/GATEKEEPER-CHECK.md (design §6, C2)." >&2
+            echo "A human must verify the FIRST-LAUNCH workaround on the shipping macOS and add a dated table row" >&2
+            echo "  | $TAG | <macOS version> | <date> | <who> | <result> |" >&2
+            echo "before tagging. The release is blocked until that row exists." >&2
+            exit 1
+          fi
+          echo "Gatekeeper sign-off row for $TAG present; proceeding to publish."
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -46,3 +86,265 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS.txt \
             --title "${GITHUB_REF_NAME}" --generate-notes
+
+  macos:
+    # The macOS packaging job (design §4): download the darwin binaries the linux
+    # job produced, lipo them into a universal .app, sign (ad-hoc, or Developer ID
+    # + notarize when the secrets exist), verify and smoke-test, build the DMG and
+    # PKG, and attach them to the release the first job created. It needs the first
+    # job so it never runs against binaries that job did not produce (I-M1).
+    needs: release
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: darwin-binaries
+          path: darwin-bins
+
+      # The Gatekeeper sign-off gate now runs in the `release` job BEFORE
+      # `gh release create` (release-ci-secrets-1), so a missing sign-off blocks the
+      # whole release rather than only the DMG/PKG attach. This job `needs: release`,
+      # so it never runs unless that gate already passed.
+
+      - name: Assemble, sign, verify, and package
+        env:
+          MACOS_DEVELOPER_ID_P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          MACOS_INSTALLER_ID_P12: ${{ secrets.MACOS_INSTALLER_ID_P12 }}
+          MACOS_INSTALLER_ID_P12_PASSWORD: ${{ secrets.MACOS_INSTALLER_ID_P12_PASSWORD }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          APP="out/open-seavault-rclone.app"
+          DMG="out/open-seavault-rclone_${VERSION}_macos_universal.dmg"
+          PKG="out/open-seavault-rclone_${VERSION}_macos_universal.pkg"
+          mkdir -p out
+
+          # --- Fail-closed signing config (release-ci-secrets-4, friction C/C1) ---
+          # The signed tier needs ALL of these. Partial signing secrets must NEVER
+          # silently degrade to the unsigned tier — that would ship a silently
+          # unsigned release while signing secrets are present. We log only the
+          # NAMES of the missing secrets, never any value (I-M2).
+          req_names="MACOS_DEVELOPER_ID_P12 MACOS_DEVELOPER_ID_P12_PASSWORD APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID APPLE_NOTARY_KEY_P8"
+          present=0; total=0; missing=""
+          for n in $req_names; do
+            total=$((total+1))
+            eval "v=\${$n:-}"
+            if [ -n "$v" ]; then present=$((present+1)); else missing="$missing $n"; fi
+          done
+          # The optional Developer ID Installer cert signs the PKG only; if EITHER of
+          # its secrets is set, a signing config is in play.
+          opt_present=0
+          [ -n "${MACOS_INSTALLER_ID_P12:-}" ] && opt_present=1
+          [ -n "${MACOS_INSTALLER_ID_P12_PASSWORD:-}" ] && opt_present=1
+
+          have_devid=0
+          if [ "$present" -eq "$total" ]; then
+            have_devid=1
+          elif [ "$present" -gt 0 ] || [ "$opt_present" -eq 1 ]; then
+            echo "::error::partial macOS signing secrets present: refusing to ship a silently-unsigned release (release-ci-secrets-4)"
+            echo "missing required signing secrets:${missing:- none} (set ALL of: $req_names, or NONE for the unsigned/ad-hoc tier)" >&2
+            exit 1
+          fi
+
+          # installer-scripts-3: tier-gate the first-launch note. The unsigned note
+          # (with the Gatekeeper workaround) ships ONLY on the ad-hoc path; the
+          # notarized path substitutes the signed-tier note (no workaround) into the
+          # app, the DMG, the PKG readme, and the release body.
+          if [ "$have_devid" = "1" ]; then
+            NOTE_SRC="packaging/macos/FIRST-LAUNCH-SIGNED.txt"
+          else
+            NOTE_SRC="packaging/macos/FIRST-LAUNCH.txt"
+          fi
+
+          if [ "$have_devid" = "1" ]; then
+            # ---- Developer ID + notarization path -----------------------------
+            # Import the certificate into a throwaway keychain. The keychain
+            # password is generated here and masked; no secret is ever echoed (I-M2).
+            KPW="$(openssl rand -hex 24)"
+            echo "::add-mask::$KPW"
+            KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+            security create-keychain -p "$KPW" "$KEYCHAIN"
+            security set-keychain-settings -lut 3600 "$KEYCHAIN"
+            security unlock-keychain -p "$KPW" "$KEYCHAIN"
+            security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+            printf '%s' "$MACOS_DEVELOPER_ID_P12" | base64 --decode > "$RUNNER_TEMP/devid.p12"
+            security import "$RUNNER_TEMP/devid.p12" -k "$KEYCHAIN" -P "$MACOS_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign
+            if [ -n "${MACOS_INSTALLER_ID_P12:-}" ]; then
+              printf '%s' "$MACOS_INSTALLER_ID_P12" | base64 --decode > "$RUNNER_TEMP/installerid.p12"
+              security import "$RUNNER_TEMP/installerid.p12" -k "$KEYCHAIN" -P "${MACOS_INSTALLER_ID_P12_PASSWORD:-}" -T /usr/bin/productsign
+            fi
+            security set-key-partition-list -S apple-tool:,apple: -k "$KPW" "$KEYCHAIN" >/dev/null
+            APP_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+            [ -n "$APP_IDENTITY" ] || { echo "no Developer ID Application identity in the keychain" >&2; exit 1; }
+            TEAM_ID="$(printf '%s' "$APP_IDENTITY" | sed -n 's/.*(\([A-Z0-9]\{10\}\)).*/\1/p')"
+            SIGNING_TEXT="Developer ID ${TEAM_ID:-unknown}, notarized $(date -u +%Y-%m-%d)"
+
+            SIGNING_TEXT="$SIGNING_TEXT" FIRST_LAUNCH_SRC="$NOTE_SRC" \
+              bash packaging/macos/build-bundle.sh \
+                darwin-bins/seavault-darwin-amd64 darwin-bins/seavault-darwin-arm64 "$VERSION" out
+
+            codesign --force --deep --options runtime --timestamp \
+              --keychain "$KEYCHAIN" -s "$APP_IDENTITY" "$APP"
+
+            # Notarize (design §4, C6): bounded and observable.
+            printf '%s' "$APPLE_NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+            notarize() {
+              local target="$1" tries=0 subid result out_json rc
+              while :; do
+                tries=$((tries+1))
+                set +e
+                out_json="$(xcrun notarytool submit "$target" \
+                  --key "$RUNNER_TEMP/notary.p8" --key-id "$APPLE_NOTARY_KEY_ID" \
+                  --issuer "$APPLE_NOTARY_ISSUER_ID" --output-format json --wait 2>&1)"
+                rc=$?
+                set -e
+                subid="$(printf '%s' "$out_json" | /usr/bin/python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)"
+                result="$(printf '%s' "$out_json" | /usr/bin/python3 -c 'import sys,json; print(json.load(sys.stdin).get("status",""))' 2>/dev/null || true)"
+                if [ "$result" = "Accepted" ]; then
+                  return 0
+                fi
+                # On any non-Accepted result, fetch, print, and upload the log.
+                if [ -n "$subid" ]; then
+                  xcrun notarytool log "$subid" \
+                    --key "$RUNNER_TEMP/notary.p8" --key-id "$APPLE_NOTARY_KEY_ID" \
+                    --issuer "$APPLE_NOTARY_ISSUER_ID" "out/notary-log-$subid.json" || true
+                  echo "---- notarytool log ($subid) ----"; cat "out/notary-log-$subid.json" || true; echo "---- end log ----"
+                fi
+                if [ "$result" = "Invalid" ] || [ "$result" = "Rejected" ]; then
+                  echo "notarization REJECTED for $target; failing fast (C6)" >&2
+                  return 1
+                fi
+                if [ "$tries" -ge 3 ]; then
+                  echo "notarization did not reach Accepted after $tries tries (last: '$result', rc=$rc)" >&2
+                  return 1
+                fi
+                echo "transient notarization result '$result' (rc=$rc); retrying with backoff..." >&2
+                sleep $((tries*20))
+              done
+            }
+
+            ( cd out && ditto -c -k --keepParent "open-seavault-rclone.app" "app.zip" )
+            notarize "out/app.zip"
+            xcrun stapler staple "$APP"
+
+            FIRST_LAUNCH_SRC="$NOTE_SRC" bash packaging/macos/build-dmg.sh "$APP" "$VERSION" "$DMG"
+            FIRST_LAUNCH_SRC="$NOTE_SRC" bash packaging/macos/build-pkg.sh "$APP" "$VERSION" "$PKG"
+
+            # Sign the installer package with the Developer ID Installer cert if present.
+            pkg_signed=0
+            if [ -n "${MACOS_INSTALLER_ID_P12:-}" ]; then
+              INSTALLER_IDENTITY="$(security find-identity -v "$KEYCHAIN" | awk -F'"' '/Developer ID Installer/ {print $2; exit}')"
+              if [ -n "$INSTALLER_IDENTITY" ]; then
+                productsign --keychain "$KEYCHAIN" --sign "$INSTALLER_IDENTITY" "$PKG" "$PKG.signed"
+                mv "$PKG.signed" "$PKG"
+                pkg_signed=1
+              fi
+            fi
+            codesign --force --keychain "$KEYCHAIN" -s "$APP_IDENTITY" "$DMG" || true
+            notarize "$DMG"; xcrun stapler staple "$DMG" || true
+            # release-ci-secrets-4: only notarize/staple the PKG when it was actually
+            # productsigned with a Developer ID Installer cert. Submitting an UNSIGNED
+            # pkg to notarytool returns Invalid and `notarize` fails fast, which would
+            # abort the whole release AFTER the tarballs are already live — a
+            # half-populated release. Instead ship the PKG un-notarized; its state is
+            # declared inside (SIGNING.txt / the readme, I-M5).
+            if [ "$pkg_signed" = "1" ]; then
+              notarize "$PKG"; xcrun stapler staple "$PKG" || true
+            else
+              echo "PKG was not Installer-signed (no Developer ID Installer identity present); shipping it un-notarized (release-ci-secrets-4)."
+            fi
+
+            APP="$APP" DMG="$DMG" PKG="$PKG" MODE=release EXPECT_SPCTL=accept \
+              SRC_AMD64=darwin-bins/seavault-darwin-amd64 SRC_ARM64=darwin-bins/seavault-darwin-arm64 \
+              bash packaging/macos/verify-bundle.sh
+
+            security delete-keychain "$KEYCHAIN" || true
+            rm -f "$RUNNER_TEMP/devid.p12" "$RUNNER_TEMP/installerid.p12" "$RUNNER_TEMP/notary.p8"
+          else
+            # ---- Ad-hoc (unsigned tier) path ----------------------------------
+            # friction C/C3: the ad-hoc SIGNING.txt text is single-sourced from
+            # build-bundle.sh's default; this path passes NO SIGNING_TEXT so it can
+            # never drift from that source. NOTE_SRC is the unsigned FIRST-LAUNCH.txt
+            # (the build scripts default to it), so no note override is needed either.
+            bash packaging/macos/build-bundle.sh \
+                darwin-bins/seavault-darwin-amd64 darwin-bins/seavault-darwin-arm64 "$VERSION" out
+
+            # Ad-hoc sign so the universal binary is a valid signed object on Apple
+            # silicon (design §4, secrets-absent path).
+            codesign --force --deep -s - "$APP"
+
+            bash packaging/macos/build-dmg.sh "$APP" "$VERSION" "$DMG"
+            bash packaging/macos/build-pkg.sh "$APP" "$VERSION" "$PKG"
+
+            APP="$APP" DMG="$DMG" PKG="$PKG" MODE=release EXPECT_SPCTL=reject \
+              SRC_AMD64=darwin-bins/seavault-darwin-amd64 SRC_ARM64=darwin-bins/seavault-darwin-arm64 \
+              bash packaging/macos/verify-bundle.sh
+          fi
+
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+          # installer-scripts-3: carry the tier-selected note to the prepend step.
+          echo "NOTE_SRC=$NOTE_SRC" >> "$GITHUB_ENV"
+
+      - name: Upload the DMG and PKG and append their hashes to SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          gh release upload "$TAG" "$DMG" "$PKG" --clobber
+          # Append the DMG/PKG hashes to the release's SHA256SUMS.txt.
+          gh release download "$TAG" -p SHA256SUMS.txt -D sums || true
+          [ -f sums/SHA256SUMS.txt ] || { mkdir -p sums; : > sums/SHA256SUMS.txt; }
+          ( cd out && shasum -a 256 "$(basename "$DMG")" "$(basename "$PKG")" ) >> sums/SHA256SUMS.txt
+          gh release upload "$TAG" sums/SHA256SUMS.txt --clobber
+
+      - name: Prepend the first-launch note to the Release body (C3, M9, release-ci-secrets-2)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          # installer-scripts-3: NOTE_SRC is the tier-selected note (unsigned note on
+          # the ad-hoc path, signed-tier note on the notarized path). Fall back to the
+          # unsigned note if the env var was not carried (defensive).
+          NOTE_SRC="${NOTE_SRC:-packaging/macos/FIRST-LAUNCH.txt}"
+          firstline="$(head -1 "$NOTE_SRC")"
+          body="$(gh release view "$TAG" --json body -q .body || echo '')"
+          # release-ci-secrets-2: the prepend is IDEMPOTENT. A re-run of the macos job
+          # must not stack a second copy of the note. If the body already begins with
+          # the note's first line, leave it; otherwise prepend the note once.
+          case "$body" in
+            "$firstline"*)
+              echo "release body already begins with the first-launch note; skipping prepend (idempotent)"
+              ;;
+            *)
+              {
+                cat "$NOTE_SRC"
+                echo
+                echo '---'
+                echo
+                printf '%s\n' "$body"
+              } > note-body.md
+              gh release edit "$TAG" --notes-file note-body.md
+              ;;
+          esac
+          # M9 (release-ci-secrets-2): the published body must begin with the note AND
+          # carry it EXACTLY ONCE. A doubled body (a non-idempotent re-run) must FAIL.
+          newbody="$(gh release view "$TAG" --json body -q .body)"
+          case "$newbody" in
+            "$firstline"*) : ;;
+            *) echo "M9 FAIL: release body does not begin with the first-launch note" >&2; exit 1 ;;
+          esac
+          count="$(printf '%s\n' "$newbody" | grep -Fxc -- "$firstline" || true)"
+          if [ "${count:-0}" != "1" ]; then
+            echo "M9 FAIL: the first-launch note appears ${count:-0} times in the release body (want exactly 1; doubled body, release-ci-secrets-2)" >&2
+            exit 1
+          fi
+          echo "M9 ok: release body begins with the first-launch note, exactly once"

@@ -1,0 +1,92 @@
+name: CI macOS packaging
+
+# Push-time packaging exercise (design §4/§8, C5). It assembles the bundle from a
+# FRESH LOCAL darwin build and runs the same verify-bundle.sh the release job runs,
+# so the packaging is proven before a tag. It is labeled self-consistency and does
+# NOT prove I-M1 (byte identity to the released tarball binaries) — that is
+# release-only, because only the release job downloads the linux-built darwin
+# binaries.
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+    paths:
+      - 'packaging/macos/**'
+      - '.github/workflows/ci-macos.yml'
+      - '.github/workflows/release.yml'
+      - 'cmd/seavault/**'
+      - 'internal/webui/assets/svlogo/**'
+      # release-ci-secrets-3: the M8 smoke reads the launch URL from bundlelaunch's
+      # sink and POSTs the webui heartbeat handler, so a push touching only those
+      # packages must exercise the packaging job — not slip through unscoped.
+      - 'internal/bundlelaunch/**'
+      - 'internal/webui/**'
+
+# C5: one run per ref, cancel the older one.
+concurrency:
+  group: ci-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Build darwin binaries (self-consistency, does NOT prove I-M1)
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # Non-tag build: the binary reports 0.0.0-ci-<sha>, injected into
+          # main.version at link time (friction C/C4/C6: version is a
+          # linker-overridable var), so a self-consistency artifact is never mistaken
+          # for a real tagged release.
+          BUILD_VERSION="0.0.0-ci-${GITHUB_SHA:0:7}"
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 \
+            go build -trimpath -ldflags "-s -w -X main.version=${BUILD_VERSION}" -o out/seavault-darwin-amd64 ./cmd/seavault
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
+            go build -trimpath -ldflags "-s -w -X main.version=${BUILD_VERSION}" -o out/seavault-darwin-arm64 ./cmd/seavault
+
+      - name: Assemble, ad-hoc sign, package, and verify
+        run: |
+          set -euo pipefail
+          VERSION="0.0.0-ci-${GITHUB_SHA:0:7}"
+          DMG="out/open-seavault-rclone_${VERSION}_macos_universal.dmg"
+          PKG="out/open-seavault-rclone_${VERSION}_macos_universal.pkg"
+          APP="out/open-seavault-rclone.app"
+
+          # friction C/C3: the ad-hoc SIGNING.txt text is single-sourced from
+          # build-bundle.sh's default; this job passes NO SIGNING_TEXT so it cannot
+          # drift from that source (the release job's ad-hoc path does the same).
+          bash packaging/macos/build-bundle.sh \
+              out/seavault-darwin-amd64 out/seavault-darwin-arm64 "$VERSION" out
+
+          # Ad-hoc sign so the universal binary is a valid signed object on Apple
+          # silicon (design §4, secrets-absent path).
+          codesign --force --deep -s - "$APP"
+
+          bash packaging/macos/build-dmg.sh "$APP" "$VERSION" "$DMG"
+          bash packaging/macos/build-pkg.sh "$APP" "$VERSION" "$PKG"
+
+          APP="$APP" DMG="$DMG" PKG="$PKG" \
+          MODE=selfcheck EXPECT_SPCTL=reject \
+            bash packaging/macos/verify-bundle.sh
+
+      - name: Upload packaging artifacts (for inspection)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-macos-packaging
+          path: |
+            out/*.dmg
+            out/*.pkg
+          if-no-files-found: ignore
+          retention-days: 7

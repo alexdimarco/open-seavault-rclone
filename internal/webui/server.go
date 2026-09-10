@@ -31,6 +31,7 @@ import (
 
 	"github.com/alexdimarco/open-seavault-rclone/internal/appconfig"
 	"github.com/alexdimarco/open-seavault-rclone/internal/authlimit"
+	"github.com/alexdimarco/open-seavault-rclone/internal/bundlelaunch"
 	"github.com/alexdimarco/open-seavault-rclone/internal/dependencies"
 	"github.com/alexdimarco/open-seavault-rclone/internal/importer"
 	"github.com/alexdimarco/open-seavault-rclone/internal/keychain"
@@ -143,6 +144,15 @@ type Server struct {
 	browserCloseTimeout  time.Duration
 	shutdownOnce         sync.Once
 	shutdownCh           chan struct{}
+	// relaunchToken and relaunchURL back the loopback /api/relaunch endpoint the
+	// single-instance flow uses (design §2.2, C10, I-M7). cmd gui sets them after a
+	// successful bind on a bundle launch: a second bundle double-click that fails
+	// to bind reads the app-data lock token and asks this instance, over loopback
+	// ONLY, for its CURRENT launch link (relaunchURL) so it can open THAT instead
+	// of starting a second server. Both are empty on a Terminal launch, which never
+	// enables the endpoint. Guarded by mu.
+	relaunchToken string
+	relaunchURL   string
 	// pendingRecovery holds an in-flight recovery-key generation awaiting its
 	// mandatory read-back: the minted phrase and the
 	// commit closure that writes the entry only after the owner re-enters the
@@ -534,6 +544,32 @@ func (s *Server) EnableBrowserCloseShutdown(timeout time.Duration) {
 
 func (s *Server) ShutdownNotify() <-chan struct{} { return s.shutdownCh }
 
+// BrowserSeen reports whether any browser page has connected to this server (a
+// heartbeat or session request arrived). The bundle-launch grace timer reads it
+// to decide whether to exit a launch no page ever reached (design §2.2, I-M6).
+func (s *Server) BrowserSeen() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.browserSeen
+}
+
+// RequestShutdown closes the shutdown channel once, so a caller (the bundle-grace
+// timer) can stop the server the same way the browser-close watcher does.
+func (s *Server) RequestShutdown() {
+	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
+}
+
+// SetRelaunch enables the loopback /api/relaunch endpoint with the app-data lock
+// token that authenticates it and the current launch URL it returns (design
+// §2.2, C10). cmd gui calls it after a successful bind on a bundle launch; a
+// Terminal launch never calls it, so the endpoint stays disabled (404) there.
+func (s *Server) SetRelaunch(token, launchURL string) {
+	s.mu.Lock()
+	s.relaunchToken = token
+	s.relaunchURL = launchURL
+	s.mu.Unlock()
+}
+
 // StartSyncWatcher launches a background poller that periodically refreshes the
 // open vault's cached index when another process (e.g. the Nextcloud sync
 // client) changes.seavault on disk underneath this long-lived server. The
@@ -608,6 +644,56 @@ func (s *Server) watchBrowserHeartbeat() {
 			return
 		}
 	}
+}
+
+// handleRelaunch answers a second bundle launch's request for the current launch
+// link (design §2.2, C10, I-M7). It is the single sanctioned channel that hands
+// out the launch URL (which carries the launch secret), and it is triple-gated:
+// the peer must be a loopback address, the endpoint must be enabled (SetRelaunch
+// ran on a bundle launch), and the caller must present the app-data lock token in
+// the X-Seavault-Relaunch-Token header, compared in constant time. It carries no
+// session and mints none; it only returns the running instance's link so the
+// second double-click re-opens the running window instead of starting a second
+// server. Every rejection names no secret.
+func (s *Server) handleRelaunch(w http.ResponseWriter, r *http.Request) {
+	if !peerIsLoopback(r.RemoteAddr) {
+		http.Error(w, "relaunch is available on loopback only", http.StatusForbidden)
+		return
+	}
+	s.mu.Lock()
+	token := s.relaunchToken
+	launchURL := s.relaunchURL
+	s.mu.Unlock()
+	if token == "" {
+		http.Error(w, "relaunch is not enabled", http.StatusNotFound)
+		return
+	}
+	provided := r.Header.Get(bundlelaunch.RelaunchTokenHeader)
+	if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
+		http.Error(w, "invalid relaunch token", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	// Authenticate the RESPONDER to the caller: the MAC is HMAC-SHA256 of the
+	// launch URL keyed by the lock token, so a second launch that reads the same
+	// lock verifies this instance holds the token before opening anything. A
+	// squatting listener that never held the token cannot produce it
+	// (relaunch-lock-log-1).
+	mac := bundlelaunch.RelaunchMAC(token, launchURL)
+	writeJSON(w, http.StatusOK, map[string]string{"launchURL": launchURL, bundlelaunch.RelaunchMACField: mac})
+}
+
+// peerIsLoopback reports whether remoteAddr (an http.Request.RemoteAddr,
+// host:port) names a loopback IP. An unparsable or non-loopback address is not
+// loopback, so /api/relaunch refuses any peer that is not on this machine's
+// loopback interface even if the Host allowlist were widened by --allow-host.
+func peerIsLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) handleBrowserHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -739,6 +825,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// handler runs, and before the favicon/asset/session branches..
 	if !loopback.HostAllowed(r.Host, s.AllowedHosts) {
 		http.Error(w, hostForbiddenBody(r.Host, s.AllowedHosts), http.StatusForbidden)
+		return
+	}
+
+	// The single-instance relaunch endpoint is session-less: a second bundle
+	// launch that could not bind proves itself with the app-data lock token, not a
+	// GUI session, and reaches this ONLY over loopback (design §2.2, C10, I-M7). It
+	// sits before every session branch and is disabled (404) unless SetRelaunch ran
+	// (a bundle launch); a Terminal launch never enables it.
+	if r.URL.Path == "/api/relaunch" {
+		s.handleRelaunch(w, r)
 		return
 	}
 
@@ -1603,6 +1699,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	vaultOpen := s.vault != nil
 	vaultPath := s.vaultPath
+	quitOnClose := s.browserCloseEnabled
 	s.mu.Unlock()
 	vaultName := ""
 	if vaultOpen {
@@ -1639,7 +1736,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		VaultOpen       bool
 		VaultName       string
 		ShowAdvanced    bool
-	}{Token: s.token, InitialPath: s.vaultPath, SuggestedPaths: userpath.SuggestedVaultPaths(), RsyncHint: rsyncput.DefaultBinaryHint(), AuthEnabled: s.guiAuthEnabled(), FirstRun: s.firstRun(r), SkippedFirstRun: s.skippedFirstRun(r), View: view, VaultOpen: vaultOpen, VaultName: vaultName, ShowAdvanced: q.Get("advanced") == "1"})
+		QuitOnClose     bool
+	}{Token: s.token, InitialPath: s.vaultPath, SuggestedPaths: userpath.SuggestedVaultPaths(), RsyncHint: rsyncput.DefaultBinaryHint(), AuthEnabled: s.guiAuthEnabled(), FirstRun: s.firstRun(r), SkippedFirstRun: s.skippedFirstRun(r), View: view, VaultOpen: vaultOpen, VaultName: vaultName, ShowAdvanced: q.Get("advanced") == "1", QuitOnClose: quitOnClose})
 }
 
 // firstRun reports whether the GUI should render the first-run stepper instead
@@ -4818,6 +4916,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
   {{if .SkippedFirstRun}}<div id="backToGuided" class="notice-banner" role="status"><span class="notice-title">Guided setup</span> You skipped the first-run wizard. <a href="/?guided=1">Back to guided setup</a> &mdash; available until you create your first vault.</div>{{end}}
   <div id="recoveryReminder" class="notice-banner" role="status" hidden><button class="notice-dismiss" type="button" aria-label="Dismiss" onclick="dismissRecoveryReminder()">x</button><span class="notice-title">No recovery key</span> This vault has no recovery key. Without one, a forgotten password means the vault cannot be opened. Create one from the Password &amp; recovery panel with &ldquo;Generate recovery key&rdquo;.</div>
   <div id="noticeBanner" class="notice-banner" role="status" hidden></div>
+  {{if .QuitOnClose}}<p class="hint quit-hint" role="note">Closing this tab quits the app.</p>{{end}}
 </header>
 <main class="app-shell">
 <div class="content">

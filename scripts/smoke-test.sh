@@ -124,9 +124,16 @@ printf '%s\n' "$TLS_STATUS" | grep -q 'tls source: none' || {
 	echo "expected fresh tls status to report source none, got: $TLS_STATUS" >&2; exit 1; }
 printf '%s\n' "$TLS_STATUS" | grep -q 'no certificate configured' || {
 	echo "expected fresh tls status to say no certificate configured" >&2; exit 1; }
-"$BIN" tls check | grep -q 'nothing to validate' || {
-	echo "expected tls check to report nothing to validate on a fresh app-home" >&2; exit 1; }
-"$BIN" tls reset | grep -q 'returned to the default' || {
-	echo "expected tls reset to confirm the default state" >&2; exit 1; }
+# Capture-then-grep (as with TLS_STATUS above): `tls check`/`tls reset` print a
+# trailing status block after the asserted line, so piping straight into `grep -q`
+# lets grep close the pipe on the first match and the command dies with SIGPIPE
+# under `set -o pipefail` (a flaky exit 141). Capturing the full output first keeps
+# the exact same assertion without the race.
+TLS_CHECK="$("$BIN" tls check)"
+printf '%s\n' "$TLS_CHECK" | grep -q 'nothing to validate' || {
+	echo "expected tls check to report nothing to validate on a fresh app-home, got: $TLS_CHECK" >&2; exit 1; }
+TLS_RESET="$("$BIN" tls reset)"
+printf '%s\n' "$TLS_RESET" | grep -q 'returned to the default' || {
+	echo "expected tls reset to confirm the default state, got: $TLS_RESET" >&2; exit 1; }
 
 echo 'smoke test passed'

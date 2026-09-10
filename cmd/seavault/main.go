@@ -18,16 +18,20 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/alexdimarco/open-seavault-rclone/internal/appconfig"
+	"github.com/alexdimarco/open-seavault-rclone/internal/appdir"
 	"github.com/alexdimarco/open-seavault-rclone/internal/authlimit"
+	"github.com/alexdimarco/open-seavault-rclone/internal/bundlelaunch"
 	"github.com/alexdimarco/open-seavault-rclone/internal/importer"
 	"github.com/alexdimarco/open-seavault-rclone/internal/keychain"
 	"github.com/alexdimarco/open-seavault-rclone/internal/localdav"
@@ -49,7 +53,15 @@ import (
 	"github.com/alexdimarco/open-seavault-rclone/internal/webui"
 )
 
-const version = "0.21.0"
+// version is the build version string reported by `seavault version` and the
+// usage banner. It is a var, not a const, so the release and CI workflows can set
+// it at link time — `go build -ldflags "-X main.version=<value>"` — without
+// editing source: the release job passes the git tag with its leading "v" removed
+// (e.g. 0.22.0) and a non-tag CI build passes 0.0.0-ci-<sha>. The dev tree keeps
+// the "-dev" default below, so a locally built binary is never mistaken for a
+// released one. The shipped binary's version therefore comes from the tag, not
+// from this line (C/C4, C/C6).
+var version = "0.22.0-dev"
 
 func main() {
 	// main() dispatches FROM the command registry (commands.go). All command
@@ -2140,6 +2152,187 @@ func resetLocalAppConfiguration(resetAll bool) error {
 	return nil
 }
 
+// defaultBundleGrace is the macOS bundle-launch grace period: a Finder/
+// LaunchServices launch whose browser page never connects exits after this,
+// overridable with --bundle-grace (design §2.2, I-M6). Terminal launches are
+// unaffected.
+const defaultBundleGrace = 60 * time.Second
+
+// bundleOSName and bundleExecutablePath are the injectable OS and executable-path
+// probes for the darwin-only bundle-launch behaviour (design §2.1/§2.2).
+// Production reads the real runtime.GOOS and os.Executable; the Linux tests set
+// "darwin" and a synthetic path so every branch is exercised off a Mac.
+var (
+	bundleOSName         = runtime.GOOS
+	bundleExecutablePath = os.Executable
+)
+
+// openBrowserFn is the injectable browser-open seam. Production opens the real
+// browser; the tests capture the URL a launch or a relaunch opens without
+// spawning anything.
+var openBrowserFn = openBrowser
+
+// currentBundleLaunch reports whether THIS process is a macOS .app bundle launch,
+// through the injectable seams so the Linux tests can drive the darwin path.
+func currentBundleLaunch() bool {
+	execPath, _ := bundleExecutablePath()
+	return bundlelaunch.Active(bundleOSName, os.Getenv, execPath)
+}
+
+// finderLaunchActive reports whether run() should default this invocation to the
+// gui command: a bundle launch carrying no real arguments (design §2.1). A
+// Terminal `seavault` with no arguments is not a Finder launch (I-M3).
+func finderLaunchActive(argv []string) bool {
+	execPath, _ := bundleExecutablePath()
+	return bundlelaunch.FinderLaunch(bundleOSName, os.Getenv, execPath, argv)
+}
+
+// runFinderLaunchGUI dispatches the gui command for a macOS Finder/bundle launch
+// with no arguments (design §2.1). It is a seam so the routing test can assert
+// run() reaches it without starting a real server. It registers NOTHING new in
+// the command table (H4 stays green): it calls the existing gui handler.
+var runFinderLaunchGUI = func() int {
+	if err := cmdGUI(nil); err != nil {
+		var ec *exitCodeError
+		if errors.As(err, &ec) {
+			return ec.code
+		}
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	return 0
+}
+
+// bundleLaunchSinks resolves the 0600 app-data log sink and the single-instance
+// lock path for a bundle launch (design §2.2, C7/C10, I-M8). The launch URL,
+// which carries the launch secret, is written ONLY to the log file this returns.
+func bundleLaunchSinks() (*bundlelaunch.LogSink, string, error) {
+	logDir, err := appdir.EnsureDataDir("logs")
+	if err != nil {
+		return nil, "", err
+	}
+	dataDir, err := appdir.DataDir()
+	if err != nil {
+		return nil, "", err
+	}
+	sink := bundlelaunch.NewLogSink(filepath.Join(logDir, "gui.log"), 0)
+	return sink, filepath.Join(dataDir, "gui.lock"), nil
+}
+
+// askRunningInstanceForLaunchURL asks the instance named by the app-data lock for
+// its current launch link over loopback, authenticating with the lock token
+// (design §2.2, C10, I-M7). A missing/stale lock or an unanswered call returns
+// ok=false, so the caller falls back to the ordinary bind error — a stale lock is
+// ignored, never followed.
+//
+// It authenticates the RESPONDER before returning a link a caller would open
+// (relaunch-lock-log-1): the running instance must return a MAC = HMAC-SHA256 of
+// the launch URL keyed by the lock token (proving it holds the token), and the
+// launch URL itself must be an http(s) URL on a loopback host and the exact port
+// we contacted. A squatting listener returning an attacker URL — with no MAC, a
+// wrong MAC, or an off-machine/foreign-port host — fails one of these checks and
+// is refused, so the second launch never opens an attacker-chosen destination.
+func askRunningInstanceForLaunchURL(lockPath string) (string, bool) {
+	lock, err := bundlelaunch.ReadLock(lockPath)
+	if err != nil || lock.Port <= 0 || lock.Token == "" {
+		return "", false
+	}
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/relaunch", lock.Port)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", false
+	}
+	req.Header.Set(bundlelaunch.RelaunchTokenHeader, lock.Token)
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", false // no live listener answered: a stale lock, ignored
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+	var body struct {
+		LaunchURL string `json:"launchURL"`
+		MAC       string `json:"mac"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&body); err != nil {
+		return "", false
+	}
+	if body.LaunchURL == "" {
+		return "", false
+	}
+	// Verify the responder holds the lock token (MAC over the launch URL) and that
+	// the URL is loopback http(s) on the exact port we contacted, BEFORE any caller
+	// opens it. Either failure means the responder is not our authenticated running
+	// instance: refuse.
+	if !bundlelaunch.VerifyRelaunchMAC(lock.Token, body.LaunchURL, body.MAC) {
+		return "", false
+	}
+	if !bundlelaunch.ValidLoopbackLaunchURL(body.LaunchURL, lock.Port) {
+		return "", false
+	}
+	return body.LaunchURL, true
+}
+
+// startBundleGraceExit stops a bundle-launch GUI that no browser page ever reached
+// within grace (design §2.2, I-M6): when the timer fires and BrowserSeen is still
+// false, it records the grace-exit line to the 0600 log sink and requests
+// shutdown. A page that connected leaves BrowserSeen true and the GUI keeps
+// running; a shutdown from any other cause ends the timer.
+func startBundleGraceExit(s *webui.Server, grace time.Duration, sink *bundlelaunch.LogSink) {
+	if grace <= 0 {
+		return
+	}
+	go func() {
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			if !s.BrowserSeen() {
+				_ = sink.Writeln(fmt.Sprintf("grace-exit: no browser page connected within %s; exiting", grace))
+				// The launch failed invisibly (no Dock icon, no window, no page): tell
+				// the user where to find the link, in a notification that NEVER carries
+				// the launch URL or its secret (friction A/C3).
+				notifyUser("could not open the browser; the link is in the log file at the app-data path")
+				s.RequestShutdown()
+			}
+		case <-s.ShutdownNotify():
+		}
+	}()
+}
+
+// bundleSignalSource returns a channel delivering SIGINT/SIGTERM and a stop
+// function. It is a seam: production wires os/signal; the bundle tests feed the
+// channel directly so the lock-cleanup handler is exercised deterministically
+// without a real process-wide signal that would race sibling tests.
+var bundleSignalSource = func() (<-chan os.Signal, func()) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	return ch, func() { signal.Stop(ch) }
+}
+
+// notifyUser posts a desktop notification for a macOS bundle launch (friction
+// A/C3). It is a seam so the Linux tests assert the calls and their exact text;
+// the default implementation runs `osascript display notification` and only on a
+// real Mac. Callers pass FIXED text and NEVER the launch URL or its secret.
+var notifyUser = displayBundleNotification
+
+func displayBundleNotification(text string) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	// AppleScript string literals share Go's double-quote/backslash escaping for the
+	// plain ASCII text these calls use; strconv.Quote keeps a stray quote from
+	// breaking the script. The text is a compile-time constant with no secret.
+	script := "display notification " + strconv.Quote(text) + " with title " + strconv.Quote("open-seavault-rclone")
+	// Fire-and-forget under a short deadline: a desktop notification is never worth
+	// stalling a launch (or a headless CI runner with no notification session).
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "osascript", "-e", script).Run()
+}
+
 func cmdGUI(args []string) error {
 	// registry-cli-2: only the documented sub-actions are accepted; the former
 	// undocumented aliases (reset, reset-password, clear-login) are dropped so the
@@ -2169,6 +2362,7 @@ func cmdGUI(args []string) error {
 	authLimit := fs.String("auth-limit", "", "rate-limit the GUI login and vault open: on (default) or off (off is loud and unprotected; also settable via auth.limits.enabled)")
 	var allowHost repeatableString
 	fs.Var(&allowHost, "allow-host", "additional Host header value to accept besides loopback/localhost (repeatable)")
+	bundleGrace := fs.Duration("bundle-grace", defaultBundleGrace, "macOS bundle launch only: exit if no browser page connects within this period; Terminal launches are unaffected")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2267,10 +2461,96 @@ func cmdGUI(args []string) error {
 		s.EnableBrowserCloseShutdown(10 * time.Second)
 		fmt.Println("exit-on-browser-close enabled; the GUI will stop shortly after the browser page closes")
 	}
-	printLaunchGuidance(os.Stdout, os.Stderr, launchURL, !*noOpen, openBrowser)
+	// On a macOS .app bundle launch, LaunchServices discards stdout and a second
+	// double-click must re-open the running window, so resolve the 0600 log sink
+	// and the single-instance lock now (design §2.2). A Terminal launch is not a
+	// bundle launch: logSink stays nil (writes no file, I-M8) and none of the
+	// single-instance / grace behaviour runs.
+	bundle := currentBundleLaunch()
+	var logSink *bundlelaunch.LogSink
+	var lockPath string
+	if bundle {
+		var berr error
+		logSink, lockPath, berr = bundleLaunchSinks()
+		if berr != nil {
+			return berr
+		}
+	}
+	// (c) Bind BEFORE opening the browser (design §2.2, C10): a second launch must
+	// never open a link to a server that failed to come up.
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
+		if bundle {
+			// (d) Single instance: a bind conflict may be our own already-running
+			// instance. Ask it for its current launch link over loopback and open
+			// THAT, then exit. A stale lock (no live listener answering) is ignored
+			// and the ordinary bind error surfaces, exactly as a Terminal launch on a
+			// busy port sees today (I-M7).
+			if url, ok := askRunningInstanceForLaunchURL(lockPath); ok {
+				_ = logSink.Writeln("relaunch: reopened the already-running instance")
+				printLaunchGuidance(os.Stdout, os.Stderr, url, !*noOpen, openBrowserFn)
+				return nil
+			}
+			// The bind failed AND no authenticated running instance answered — a
+			// stale lock, a refused/failed relaunch, or an unrelated squatter on the
+			// port. A bundle launch has no window, so this exit must not be silent
+			// (relaunch-silent-1, I-M8): record the reason to the 0600 sink before
+			// returning. Drop the stale/attacker lock so the next launch starts clean
+			// and never re-follows it (relaunch-lock-log-1).
+			_ = logSink.Writeln("relaunch refused: bind failed and no authenticated running instance answered; exiting")
+			_ = bundlelaunch.RemoveLock(lockPath)
+		}
 		return listenErrorHint(*addr, err)
+	}
+	if bundle {
+		// Claim the single-instance lock with a fresh token and the bound port, and
+		// enable the authenticated /api/relaunch endpoint a second launch reads.
+		token, terr := bundlelaunch.NewToken()
+		if terr != nil {
+			_ = logSink.Writeln("exit: could not mint the single-instance lock token; exiting")
+			return terr
+		}
+		boundPort := 0
+		if ta, ok := ln.Addr().(*net.TCPAddr); ok {
+			boundPort = ta.Port
+		}
+		if werr := bundlelaunch.WriteLock(lockPath, bundlelaunch.Lock{Token: token, Port: boundPort}); werr != nil {
+			_ = logSink.Writeln("exit: could not write the single-instance lock; exiting")
+			return werr
+		}
+		defer func() { _ = bundlelaunch.RemoveLock(lockPath) }()
+		s.SetRelaunch(token, launchURL)
+		// (e) The launch URL carries the launch secret: it goes to the 0600 file
+		// sink ONLY, never to stdout, a response body, or any other sink.
+		_ = logSink.Writeln("launch: " + launchURL)
+		// A bundle launch has no Dock icon and no window, so a SIGINT/SIGTERM
+		// (Activity Monitor Quit, a shell kill, a logout) would otherwise leave the
+		// single-instance lock behind and poison the next launch. Install a handler
+		// that removes the lock and requests shutdown so cmdGUI returns through its
+		// normal path (relaunch-lock-log-1, I-M7). The deferred RemoveLock stays as
+		// the normal-exit cleanup; RemoveLock is idempotent.
+		sigCh, stopSig := bundleSignalSource()
+		defer stopSig()
+		go func() {
+			select {
+			case <-sigCh:
+				_ = logSink.Writeln("signal: removing the single-instance lock and shutting down")
+				_ = bundlelaunch.RemoveLock(lockPath)
+				s.RequestShutdown()
+			case <-s.ShutdownNotify():
+			}
+		}()
+	}
+	// (c) The browser opens only now, after a confirmed bind, through the injectable
+	// seam so a test can capture the URL without spawning a browser.
+	printLaunchGuidance(os.Stdout, os.Stderr, launchURL, !*noOpen, openBrowserFn)
+	if bundle {
+		// A bundle launch has no window until the browser paints, so tell the user
+		// it started — via a desktop notification that NEVER carries the launch URL
+		// or its secret (friction A/C3). The seam no-ops off a real Mac.
+		notifyUser("open-seavault-rclone is running in your browser")
+		// (b) A bundle launch whose page never connects exits after the grace period.
+		startBundleGraceExit(s, *bundleGrace, logSink)
 	}
 	// Start the TLS hot-reloader so a renewed pair is served within the poll and
 	// serving.json is written for `tls status` (reload-not-wired-1). It stops when

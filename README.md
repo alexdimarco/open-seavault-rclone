@@ -4,6 +4,21 @@ open-seavault-rclone is a cross-platform prototype for client-side encrypted sto
 
 This repository is a working MVP, not an audited production replacement for Cryptomator.
 
+## Install
+
+Download the build for your platform from the [Releases](https://github.com/alexdimarco/open-seavault-rclone/releases) page. Full per-platform steps &mdash; including the one-time macOS Gatekeeper and Windows SmartScreen unlocks, the `seavault` command-line tool, where data and the log live, and how to uninstall &mdash; are in **[docs/install.md](docs/install.md)**.
+
+Each release publishes:
+
+- `open-seavault-rclone_vX.Y.Z_macos_universal.dmg` &mdash; macOS app, drag to Applications
+- `open-seavault-rclone_vX.Y.Z_macos_universal.pkg` &mdash; macOS installer (app + `seavault` CLI)
+- `open-seavault-rclone_vX.Y.Z_linux_amd64.tar.gz`, `open-seavault-rclone_vX.Y.Z_linux_arm64.tar.gz`
+- `open-seavault-rclone_vX.Y.Z_windows_amd64.zip`, `open-seavault-rclone_vX.Y.Z_windows_arm64.zip`
+- `open-seavault-rclone_vX.Y.Z_darwin_amd64.tar.gz`, `open-seavault-rclone_vX.Y.Z_darwin_arm64.tar.gz` &mdash; raw macOS binaries for scripts
+- `SHA256SUMS.txt` &mdash; checksums for every archive, the DMG, and the PKG
+
+The macOS and Windows desktop builds are not yet code-signed; [docs/install.md](docs/install.md) covers the one-time "Open Anyway" / "Run anyway" step each needs. Signed builds will remove those steps with no change to the file names.
+
 ## Quick start
 
 New here? Run the guided wizard:
@@ -70,6 +85,47 @@ open-seavault-rclone is free software, licensed under the **GNU General Public L
 This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details. You are free to use, study, modify, and redistribute it under the terms of the GPL.
 
 Vendored and bundled third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The GPL does not grant trademark rights: the **open-seavault-rclone** and **Crescendum** names, logos, icons, favicons, wordmarks, and visual identity remain reserved &mdash; see [TRADEMARKS.md](TRADEMARKS.md).
+
+## What changed in v0.22 (a proper macOS bundle, installers, and install docs)
+
+Phase U5 makes the macOS release present as an installed program instead of a raw binary in a
+tarball, without waiting for an Apple Developer ID. Nothing about what the binary does once
+running changes, and Terminal use is unchanged.
+
+- **A real macOS app bundle.** The release ships `open-seavault-rclone.app` around a universal
+  (Intel + Apple-silicon) binary, with an icon, a `CFBundleIdentifier`, and an agent
+  (`LSUIElement`) presentation &mdash; the interface is your browser, so there is no bouncing Dock
+  icon. Double-clicking it in Finder opens the browser interface; a Terminal `seavault` with no
+  arguments still prints usage exactly as before.
+- **Grace timeout, single instance, and a real log.** A double-clicked launch quits on its own if
+  no page connects within 60 seconds (`--bundle-grace` overrides), binds its port before opening
+  the browser, and re-opens the running instance on a second double-click instead of starting a
+  second server. Because LaunchServices discards a bundle's console output, the launch URL and
+  every exit reason are written to `~/Library/Application Support/open-seavault-rclone/logs/gui.log`
+  (owner-only, `0600`) &mdash; never to any other sink.
+- **DMG and PKG installers.** A drag-to-Applications `.dmg` and a `.pkg` that installs the app and
+  symlinks the `seavault` command-line tool (creating `/usr/local/bin` if a fresh Apple-silicon
+  Mac lacks it, and doing nothing else). Both carry the first-launch note; both file names are
+  stable regardless of signing state.
+- **Signing wired but optional.** The macOS release job ad-hoc signs today and switches to
+  Developer-ID signing, notarization, and stapling the day the certificate secrets exist &mdash;
+  same artifact names either way. Each artifact records its exact signing state inside it
+  (`SIGNING.txt`); the unsigned state is declared in the docs and in the GitHub Release body,
+  never implied by a filename.
+- **Version stamped from the release tag.** `seavault version` and the bundle's `Info.plist` both
+  report the git tag the release was cut from: the workflow injects it at link time
+  (`-ldflags "-X main.version=&hellip;"`), so there is no separately hand-maintained version
+  constant to drift out of step with the tag, the artifact names, or these notes. A locally built
+  binary keeps a `-dev` version so it is never mistaken for a release.
+- **Install docs, front and center.** New [docs/install.md](docs/install.md) leads with the
+  one-time macOS "Open Anyway" / `xattr` unlock written for macOS 13 Ventura and later (with the
+  `xattr` command as a version-independent fallback, and Control-click &rarr; Open kept only for
+  the older macOS 11&ndash;12), then the CLI, what launching does, where data and the log live, a
+  precise uninstall, and the Linux and Windows steps (including the Windows SmartScreen note). A
+  per-release manual Gatekeeper sign-off
+  ([packaging/macos/GATEKEEPER-CHECK.md](packaging/macos/GATEKEEPER-CHECK.md), enforced by the
+  release job and recorded in the [release checklist](docs/release-checklist.md)) keeps the
+  Apple-controlled copy honest against the shipping macOS.
 
 ## What changed in v0.21 (authentication rate limiting + lockout, and the polish backlog)
 
