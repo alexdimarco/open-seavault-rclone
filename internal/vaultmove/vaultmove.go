@@ -69,6 +69,9 @@ func Move(source, destination string, opts Options) (Result, error) {
 	if err := validateRelationship(sourceAbs, destAbs); err != nil {
 		return res, err
 	}
+	if err := validateNotSameDirectory(sourceAbs, destAbs); err != nil {
+		return res, err
+	}
 	if err := prepareDestination(destAbs, opts.Replace); err != nil {
 		return res, err
 	}
@@ -129,6 +132,42 @@ func validateRelationship(source, dest string) error {
 		return errors.New("destination cannot be a parent of the source vault directory")
 	}
 	return nil
+}
+
+// validateNotSameDirectory is the identity-based counterpart of
+// validateRelationship, which only compares path text. Another spelling of the
+// same directory (a case variant on a case-insensitive filesystem, a symlink, a
+// symlinked parent, /tmp vs /private/tmp) defeats a string comparison, and with
+// Replace prepareDestination would then RemoveAll the source vault itself. Walk
+// each side's ancestor chain and refuse when any existing ancestor of one is the
+// very directory the other names.
+func validateNotSameDirectory(source, dest string) error {
+	srcInfo, err := os.Stat(source)
+	if err != nil {
+		return fmt.Errorf("source vault path is not accessible: %w", err)
+	}
+	if ancestorIs(dest, srcInfo) {
+		return errors.New("destination is the source vault directory (or inside it) under another spelling; choose a different location")
+	}
+	if destInfo, err := os.Stat(dest); err == nil && ancestorIs(source, destInfo) {
+		return errors.New("destination is the source vault directory (or a parent of it) under another spelling; choose a different location")
+	}
+	return nil
+}
+
+// ancestorIs reports whether path, or any ancestor of it that exists, is the
+// same file-system object as target.
+func ancestorIs(path string, target os.FileInfo) bool {
+	for p := path; ; {
+		if info, err := os.Stat(p); err == nil && os.SameFile(info, target) {
+			return true
+		}
+		next := filepath.Dir(p)
+		if next == p {
+			return false
+		}
+		p = next
+	}
 }
 
 func prepareDestination(dest string, replace bool) error {
