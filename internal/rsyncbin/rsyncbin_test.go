@@ -145,7 +145,7 @@ func TestInstallFromBinaryNotMarkedVerified(t *testing.T) {
 }
 
 func writeFakeRsync(path, version string) error {
-	body := "#!/usr/bin/bash\nif [ \"$1\" = \"--version\" ]; then echo 'rsync  version " + version + "  protocol version 31'; exit 0; fi\nexit 0\n"
+	body := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'rsync  version " + version + "  protocol version 31'; exit 0; fi\nexit 0\n"
 	return os.WriteFile(path, []byte(body), 0o700)
 }
 
