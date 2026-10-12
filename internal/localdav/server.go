@@ -1200,10 +1200,9 @@ func directoryExists(files map[string]vault.FileRecord, vp string) bool {
 }
 
 func (s *Server) requestVirtualPath(r *http.Request) (string, error) {
-	p, err := url.PathUnescape(r.URL.Path)
-	if err != nil {
-		return "", err
-	}
+	// r.URL.Path is already percent-decoded by net/http; decoding it again would
+	// turn a literal "%" in a file name into an escape ("%2e%2e" -> "..").
+	p := r.URL.Path
 	base := s.basePrefix()
 	if base != "" && strings.HasPrefix(p, base) {
 		p = strings.TrimPrefix(p, base)
@@ -1213,13 +1212,17 @@ func (s *Server) requestVirtualPath(r *http.Request) (string, error) {
 }
 
 func (s *Server) virtualPathFromDestination(destination string) (string, error) {
-	p := destination
+	// url.Parse already decodes u.Path; only the raw fallback (unparsable or
+	// path-less value) still holds escapes, so decode exactly once either way.
+	var p string
 	if u, err := url.Parse(destination); err == nil && u.Path != "" {
 		p = u.Path
-	}
-	p, err := url.PathUnescape(p)
-	if err != nil {
-		return "", err
+	} else {
+		raw, uerr := url.PathUnescape(destination)
+		if uerr != nil {
+			return "", uerr
+		}
+		p = raw
 	}
 	base := s.basePrefix()
 	if base != "" && strings.HasPrefix(p, base) {
