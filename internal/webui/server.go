@@ -5870,7 +5870,7 @@ async function listRecovery(){
     // triggers the consequence-naming confirmation before its revoke.
     const isLast = rows.length === 1;
     box.innerHTML = '<table><thead><tr><th>Recovery key</th><th></th></tr></thead><tbody>' +
-      rows.map(r => '<tr><td>'+esc(r.display || ('Recovery key #' + (r.handle||'')))+'</td><td><button class="secondary" onclick="revokeRecovery(\''+esc(r.id)+'\','+(isLast?'true':'false')+')">Revoke</button></td></tr>').join('') +
+      rows.map(r => '<tr><td>'+esc(r.display || ('Recovery key #' + (r.handle||'')))+'</td><td><button class="secondary" data-id="'+esc(r.id)+'" data-last="'+(isLast?'true':'false')+'" onclick="revokeRecovery(this.dataset.id, this.dataset.last===\'true\')">Revoke</button></td></tr>').join('') +
       '</tbody></table>';
   } catch(e){ showError('Could not list recovery keys', e.message); }
 }
@@ -6664,7 +6664,7 @@ function renderDavBreadcrumb(){
   const parent = parts.length > 1 ? parts.slice(0, -1).join('/') : 'content';
   let tools = '<button onclick="selectCurrentDavFolder()">Select current folder</button>';
   tools += '<button class="secondary" onclick="copyCurrentDavPath()">Copy full path</button>';
-  if(clean !== 'content') tools += '<button class="secondary" onclick="openDavFolder('+JSON.stringify(parent)+')">Up one level</button>';
+  if(clean !== 'content') tools += '<button class="secondary" data-path="'+esc(parent)+'" onclick="openDavFolder(this.dataset.path)">Up one level</button>';
   $('davBreadcrumb').innerHTML =
     '<div class="dav-toolbar">' +
       '<div class="dav-toolbar-heading">' +
@@ -6857,7 +6857,7 @@ async function refreshFiles(){
     box.className = 'table-wrap raw-file-list' + (rows.length > 10 ? ' scroll-y' : '');
     if(rows.length === 0){ box.innerHTML = '<p>No files in the open vault.</p>'; return; }
     box.innerHTML = '<table><thead><tr><th>Path</th><th>Size</th><th>Chunks</th><th>Updated</th><th>Actions</th></tr></thead><tbody>' +
-      rows.map(f => '<tr><td class="path">'+esc(f.path)+(f.conflictOf?' <small>conflict of '+esc(f.conflictOf)+'</small>':'')+'</td><td>'+fmtBytes(f.size)+'</td><td>'+f.chunks+'</td><td>'+esc(f.updatedAt||'')+'</td><td class="row-actions"><button onclick="downloadFile(\''+encodeURIComponent(f.path)+'\')">Download</button><button data-export-path="'+encodeURIComponent(dirname(f.path))+'" onclick="setExportPath(decodeURIComponent(this.dataset.exportPath))">Use folder</button><button class="danger" onclick="deleteFile(\''+encodeURIComponent(f.path)+'\')">Delete</button></td></tr>').join('') + '</tbody></table>';
+      rows.map(f => '<tr><td class="path">'+esc(f.path)+(f.conflictOf?' <small>conflict of '+esc(f.conflictOf)+'</small>':'')+'</td><td>'+fmtBytes(f.size)+'</td><td>'+f.chunks+'</td><td>'+esc(f.updatedAt||'')+'</td><td class="row-actions"><button data-path="'+esc(f.path)+'" onclick="downloadFile(encodeURIComponent(this.dataset.path))">Download</button><button data-export-path="'+encodeURIComponent(dirname(f.path))+'" onclick="setExportPath(decodeURIComponent(this.dataset.exportPath))">Use folder</button><button class="danger" data-path="'+esc(f.path)+'" onclick="deleteFile(encodeURIComponent(this.dataset.path))">Delete</button></td></tr>').join('') + '</tbody></table>';
   } catch(e){ box.className = 'table-wrap raw-file-list'; box.innerHTML = '<p>'+esc(e.message)+'</p>'; }
 }
 function dirname(p){ const i=String(p).lastIndexOf('/'); return i>0?String(p).slice(0,i):'.'; }
@@ -7081,7 +7081,7 @@ async function deleteRemote(name){ try { const res=await api('/api/remote?name='
 async function generateSSHKey(){ try { const res=await api('/api/ssh-keys',{method:'POST',headers:jsonHeaders,body:JSON.stringify({name:$('sshKeyName').value,path:$('sshKeyPath').value})}); $('remoteOutput').textContent=JSON.stringify(res,null,2); showHuman('SSH key operation complete', res, 'success'); await loadSSHKeys(); } catch(e){ $('remoteOutput').textContent=e.message; showError('SSH key operation failed', e.message); } }
 async function loadSSHKeys(){ try { const data=await api('/api/ssh-keys'); const rows=data.keys||[]; $('sshKeys').innerHTML = rows.length ? '<table><thead><tr><th>Name</th><th>Private key</th><th>Public key</th><th>Actions</th></tr></thead><tbody>'+rows.map(k=>'<tr><td>'+esc(k.name)+'</td><td class="path">'+esc(k.privatePath)+'</td><td class="path">'+esc(k.publicPath)+'</td><td><button data-key="'+encodeURIComponent(k.name)+'" onclick="showPublicKey(decodeURIComponent(this.dataset.key))">Show public key</button></td></tr>').join('')+'</tbody></table>' : '<p>No managed SSH keys.</p>'; } catch(e){ $('sshKeys').innerHTML='<p>'+esc(e.message)+'</p>'; } }
 async function showPublicKey(name){ try { const res=await api('/api/ssh-key-public?name='+encodeURIComponent(name)); $('remoteOutput').textContent=res.publicKey; showHuman('Public key loaded', res.publicKey); } catch(e){ $('remoteOutput').textContent=e.message; showError('Could not load public key', e.message); } }
-function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function reportBrowserSupport(){
   const missing = [];
   if(!window.fetch) missing.push('Fetch API');
