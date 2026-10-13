@@ -800,7 +800,7 @@ func RedactText(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
 		lower := strings.ToLower(line)
-		for _, key := range []string{"token", "refresh_token", "access_token", "client_secret", "password", "pass", "secret", "key_file_pass", "authorization"} {
+		for _, key := range []string{"token", "refresh_token", "access_token", "client_secret", "password", "pass", "secret", "key_file_pass", "authorization", "key", "credential", "sas_url", "connection_string", "bearer"} {
 			if strings.Contains(lower, key) && strings.Contains(line, "=") {
 				parts := strings.SplitN(line, "=", 2)
 				lines[i] = parts[0] + "= [REDACTED]"
