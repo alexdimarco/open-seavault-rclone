@@ -5,8 +5,12 @@ package vault
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +35,8 @@ func TestDeriveWrapKeyRejectsOutOfRangeParams(t *testing.T) {
 		{"argon2 memory in the TiB", KDFConfig{Algorithm: "ARGON2ID", Time: 3, MemoryKiB: 1 << 32, Parallelism: 1, Salt: salt}},
 		{"scrypt N in the billions", KDFConfig{Algorithm: "SCRYPT", ScryptN: 1 << 30, ScryptR: 8, ScryptP: 1, Salt: salt}},
 		{"scrypt r large", KDFConfig{Algorithm: "SCRYPT", ScryptN: 32768, ScryptR: 1 << 20, ScryptP: 1, Salt: salt}},
+		// N*r is tiny, but scrypt's B buffer is p*128*r: 2^24*128*16 = 32 GiB.
+		{"scrypt p*r buffer in the tens of GiB", KDFConfig{Algorithm: "SCRYPT", ScryptN: 2, ScryptR: 1 << 24, ScryptP: 16, Salt: salt}},
 		{"pbkdf2 iterations in the trillions", KDFConfig{Algorithm: "PBKDF2-HMAC-SHA256", Iterations: 1 << 40, Salt: salt}},
 	}
 	for _, r := range rows {
@@ -112,4 +118,64 @@ func TestRewrapDoesNotInheritWeakKDF(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("recovery wrap entry", entry.KDF)
+}
+
+// raiseToFloor must only RAISE: a stored scrypt with strong N but r below the
+// floor (N=2^20, r=4) used to be replaced wholesale by the 32768x8 default,
+// which has a LOWER N.
+func TestRaiseToFloorNeverLowersAnyParameter(t *testing.T) {
+	got, err := raiseToFloor(KDFConfig{Algorithm: "SCRYPT", ScryptN: 1 << 20, ScryptR: 4, ScryptP: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ScryptN < 1<<20 {
+		t.Errorf("N lowered from 2^20 to %d", got.ScryptN)
+	}
+	if got.ScryptR < minScryptR {
+		t.Errorf("r = %d is still below the floor %d", got.ScryptR, minScryptR)
+	}
+	n, err := NormalizeKDFConfig(got, true)
+	if err != nil || ValidateKDFStrength(n) != nil {
+		t.Errorf("result must meet the floor: %v / %v", err, ValidateKDFStrength(n))
+	}
+}
+
+// vault.json is read whole and every wrap entry is a full KDF derivation at
+// unlock, so both its size and its entry count are bounded.
+func TestReadConfigRefusesOversizedOrEntryStuffedConfig(t *testing.T) {
+	isolateAppHome(t)
+	root := filepath.Join(t.TempDir(), "vault")
+	createTestVault(t, root, rotOldPassword)
+	cfgPath := filepath.Join(metaRootOf(t, root), ConfigFileName)
+	orig, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadConfig(root); err != nil {
+		t.Fatalf("control: a normal config must read: %v", err)
+	}
+
+	// 1. Far too many wrap entries.
+	var cfg VaultConfig
+	if err := json.Unmarshal(orig, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 500; i++ {
+		cfg.WrapEntries = append(cfg.WrapEntries, WrapEntry{ID: fmt.Sprintf("e%d", i), Type: WrapTypeRecovery, KDF: cfg.KDF})
+	}
+	stuffed, _ := json.Marshal(cfg)
+	if err := os.WriteFile(cfgPath, stuffed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadConfig(root); !errors.Is(err, ErrConfigTooLarge) {
+		t.Errorf("500 wrap entries: want ErrConfigTooLarge, got %v", err)
+	}
+
+	// 2. A file far beyond any plausible config.
+	if err := os.WriteFile(cfgPath, append(orig[:len(orig)-1:len(orig)-1], []byte(strings.Repeat(" ", 4<<20)+"}")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadConfig(root); !errors.Is(err, ErrConfigTooLarge) {
+		t.Errorf("4 MiB vault.json: want ErrConfigTooLarge, got %v", err)
+	}
 }
