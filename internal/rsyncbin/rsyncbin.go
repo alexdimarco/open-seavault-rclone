@@ -565,12 +565,17 @@ func exeName(goos string) string {
 // URL host must be a member. This prevents a tampered or attacker-supplied
 // runtime base URL from causing code execution via an unverified download.
 func (i *Installer) allowedDownloadURL(raw string) error {
-	if strings.HasPrefix(raw, "http://127.0.0.1") || strings.HasPrefix(raw, "http://localhost") {
-		return nil
-	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("invalid download URL %q: %w", raw, err)
+	}
+	// Loopback HTTP is allowed for tests. Match the parsed HOST exactly: a string
+	// prefix test accepted http://localhost.evil.tld/ and http://localhost@evil.tld/.
+	if u.Scheme == "http" {
+		switch strings.ToLower(u.Hostname()) {
+		case "127.0.0.1", "localhost", "::1":
+			return nil
+		}
 	}
 	if u.Scheme != "https" {
 		return fmt.Errorf("refusing non-HTTPS managed-runtime download URL %q", raw)
@@ -602,7 +607,14 @@ func (i *Installer) fetch(ctx context.Context, url string, max int64) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	res, err := i.Client.Do(req)
+	// Every redirect hop must pass the same guard; an allowed host that answers 302
+	// to a plain-HTTP or off-allowlist URL must not be followed. (A caller-set
+	// CheckRedirect is respected.)
+	client := *i.Client
+	if client.CheckRedirect == nil {
+		client.CheckRedirect = i.redirectHop
+	}
+	res, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -611,6 +623,33 @@ func (i *Installer) fetch(ctx context.Context, url string, max int64) ([]byte, e
 		return nil, fmt.Errorf("GET %s: %s", url, res.Status)
 	}
 	return io.ReadAll(io.LimitReader(res.Body, max))
+}
+
+// redirectHop is the CheckRedirect policy for runtime downloads.
+func (i *Installer) redirectHop(r *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	// Loopback is only a legitimate hop for a request that began on loopback
+	// (tests); a remote host must not be able to point the installer at a local
+	// service.
+	if isLoopbackHTTP(r.URL) && len(via) > 0 && !isLoopbackHTTP(via[0].URL) {
+		return fmt.Errorf("refusing redirect from %s to a loopback address", via[0].URL.Host)
+	}
+	return i.allowedDownloadURL(r.URL.String())
+}
+
+// isLoopbackHTTP reports whether u is an http URL whose host is exactly a
+// loopback name or address.
+func isLoopbackHTTP(u *url.URL) bool {
+	if u == nil || u.Scheme != "http" {
+		return false
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	return false
 }
 
 func fileSHA256(p string) (string, error) {
