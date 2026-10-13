@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"fmt"
 	"io"
 	"net/http"
@@ -683,7 +684,18 @@ func (i *Installer) fetch(ctx context.Context, raw string, max int64) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	res, err := client.Do(req)
+	// Every redirect hop must pass the same guard (a caller-set CheckRedirect is
+	// respected): an official host that answers 302 to another URL is not trusted.
+	c := *client
+	if c.CheckRedirect == nil {
+		c.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return allowedDownloadURL(r.URL.String())
+		}
+	}
+	res, err := c.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -695,8 +707,13 @@ func (i *Installer) fetch(ctx context.Context, raw string, max int64) ([]byte, e
 }
 
 func allowedDownloadURL(raw string) error {
-	if strings.HasPrefix(raw, "http://127.0.0.1") || strings.HasPrefix(raw, "http://localhost") {
-		return nil
+	// Loopback HTTP is allowed for tests: match the parsed HOST exactly (a string
+	// prefix test accepted http://localhost.evil.tld/ and http://localhost@evil.tld/).
+	if u, err := url.Parse(raw); err == nil && u.Scheme == "http" {
+		switch strings.ToLower(u.Hostname()) {
+		case "127.0.0.1", "localhost", "::1":
+			return nil
+		}
 	}
 	if !strings.HasPrefix(raw, "https://downloads.rclone.org/") && !strings.HasPrefix(raw, "https://beta.rclone.org/") && !strings.HasPrefix(raw, "https://rclone.org/") {
 		return fmt.Errorf("refusing non-official rclone download URL %s", raw)
