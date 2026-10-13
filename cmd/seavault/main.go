@@ -3841,7 +3841,7 @@ func execRclone(args []string) error {
 		fromBinary := fs.String("from-binary", "", "register/copy an existing rclone-compatible binary into the managed runtime")
 		offlineArchive := fs.String("offline-archive", "", "install from a local rclone zip archive")
 		offlineSHA := fs.String("offline-sha256sums", "", "SHA256SUMS file for --offline-archive")
-		sig := fs.String("signature", "optional", "signature mode: optional, required, or skip")
+		sig := signatureFlag(fs)
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -3865,7 +3865,7 @@ func execRclone(args []string) error {
 		fs := flag.NewFlagSet("rclone update", flag.ExitOnError)
 		ver := fs.String("version", "", "rclone version to install; default latest")
 		channel := fs.String("channel", "", "release channel")
-		sig := fs.String("signature", "optional", "signature mode: optional, required, or skip")
+		sig := signatureFlag(fs)
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -4194,6 +4194,14 @@ func execSSHKey(args []string) error {
 	default:
 		return fmt.Errorf("unknown ssh-key command %q", args[0])
 	}
+}
+
+// signatureFlag registers --signature for the rclone install/update commands.
+// It has NO default of its own: the installer resolves an empty mode from
+// policy.json's signatureMode (itself defaulting to optional), so a hard-coded
+// "optional" here would override an administrator's "required".
+func signatureFlag(fs *flag.FlagSet) *string {
+	return fs.String("signature", "", "signature mode: optional, required, or skip (default: policy.json signatureMode, else optional)")
 }
 
 func printJSON(v any) error {
