@@ -33,3 +33,23 @@ func TestRedactTextCoversKeysAndCredentials(t *testing.T) {
 		}
 	}
 }
+
+// RedactText only redacted after the first "=" and skipped lines with none, so
+// header-style, JSON-style and URL-error lines leaked their values.
+func TestRedactTextHandlesColonAndUrlStyleLines(t *testing.T) {
+	rows := []struct{ line, leak string }{
+		{`Authorization: Bearer ZQXBEARER==`, "ZQXBEARER"},
+		{`"private_key": "ZQXJSONPEM"`, "ZQXJSONPEM"},
+		{`  "client_secret" : "ZQXCS",`, "ZQXCS"},
+		{`GET https://acct.blob.core.windows.net/c?sv=1&sig=ZQXSIG: 403 Forbidden`, "ZQXSIG"},
+	}
+	for _, r := range rows {
+		out := RedactText("before\n" + r.line + "\nafter region=us-east-1")
+		if strings.Contains(out, r.leak) {
+			t.Errorf("%q survived RedactText of %q: %q", r.leak, r.line, out)
+		}
+		if !strings.Contains(out, "before") || !strings.Contains(out, "after region=us-east-1") {
+			t.Errorf("unrelated lines must be preserved: %q", out)
+		}
+	}
+}
