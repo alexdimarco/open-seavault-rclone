@@ -839,11 +839,21 @@ func RedactText(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
 		lower := strings.ToLower(line)
-		for _, key := range []string{"token", "refresh_token", "access_token", "client_secret", "password", "pass", "secret", "key_file_pass", "authorization"} {
-			if strings.Contains(lower, key) && strings.Contains(line, "=") {
-				parts := strings.SplitN(line, "=", 2)
-				lines[i] = parts[0] + "= [REDACTED]"
+		hit := false
+		for _, key := range []string{"token", "refresh_token", "access_token", "client_secret", "password", "pass", "secret", "key_file_pass", "authorization", "key", "credential", "sas_url", "connection_string", "bearer", "sig="} {
+			if strings.Contains(lower, key) {
+				hit = true
+				break
 			}
+		}
+		if !hit {
+			continue
+		}
+		// Redact everything after the FIRST separator, "=" (INI/env style) or ":"
+		// (HTTP header, JSON, URL-error style). A line with neither has no value
+		// boundary to cut at and is left as is.
+		if idx := strings.IndexAny(line, "=:"); idx >= 0 {
+			lines[i] = line[:idx+1] + " [REDACTED]"
 		}
 	}
 	return strings.Join(lines, "\n")

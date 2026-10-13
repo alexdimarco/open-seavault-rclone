@@ -349,7 +349,7 @@ func RedactConfig(text string) string {
 }
 
 func looksSecret(key string) bool {
-	for _, s := range []string{"token", "secret", "password", "pass", "key", "client_id", "client_secret", "access", "refresh", "private"} {
+	for _, s := range []string{"token", "secret", "password", "pass", "key", "client_id", "client_secret", "access", "refresh", "private", "credential", "sas", "connection_string", "bearer"} {
 		if strings.Contains(key, s) {
 			return true
 		}
