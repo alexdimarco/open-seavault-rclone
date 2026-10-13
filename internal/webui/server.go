@@ -5481,6 +5481,7 @@ body.view-welcome .result-panel, body.view-stepper .result-panel { display: none
     </label>
     <label>Signature mode
       <select id="rcloneSignature">
+        <option value="">Use the configured policy (default: optional)</option>
         <option value="optional">Optional GPG verification</option>
         <option value="required">Require GPG verification</option>
         <option value="skip">Skip GPG verification</option>
