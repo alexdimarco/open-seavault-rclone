@@ -281,12 +281,21 @@ func checkKDFRange(cfg KDFConfig) error {
 	return nil
 }
 
+// enforceRewrapFloor is always true in production. It exists only so this
+// package's test suite, which rewraps hundreds of times with a deliberately tiny
+// test KDF, does not pay full production cost on every rewrap (under -race that
+// was a 17x slowdown). The tests that exercise the floor switch it on explicitly.
+var enforceRewrapFloor = true
+
 // raiseToFloor returns base unchanged when it already meets the creation floors,
 // and otherwise the same algorithm at the default (floor-meeting) cost. Used
 // whenever a wrap is REBUILT: the stored KDF came from an unauthenticated
 // vault.json, and re-wrapping a new password at an inherited weak cost would hand
 // whoever planted it an offline guessing target.
 func raiseToFloor(base KDFConfig) (KDFConfig, error) {
+	if !enforceRewrapFloor {
+		return base, nil
+	}
 	n, err := NormalizeKDFConfig(base, true)
 	if err != nil {
 		return KDFConfig{}, err
