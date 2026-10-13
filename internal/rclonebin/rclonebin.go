@@ -688,12 +688,7 @@ func (i *Installer) fetch(ctx context.Context, raw string, max int64) ([]byte, e
 	// respected): an official host that answers 302 to another URL is not trusted.
 	c := *client
 	if c.CheckRedirect == nil {
-		c.CheckRedirect = func(r *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return errors.New("stopped after 10 redirects")
-			}
-			return allowedDownloadURL(r.URL.String())
-		}
+		c.CheckRedirect = i.redirectHop
 	}
 	res, err := c.Do(req)
 	if err != nil {
@@ -704,6 +699,33 @@ func (i *Installer) fetch(ctx context.Context, raw string, max int64) ([]byte, e
 		return nil, fmt.Errorf("GET %s returned %s", raw, res.Status)
 	}
 	return io.ReadAll(io.LimitReader(res.Body, max))
+}
+
+// redirectHop is the CheckRedirect policy for rclone downloads.
+func (i *Installer) redirectHop(r *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	// Loopback is only a legitimate hop for a request that began on loopback
+	// (tests); an official host must not be able to point the installer at a
+	// local service.
+	if isLoopbackHTTP(r.URL) && len(via) > 0 && !isLoopbackHTTP(via[0].URL) {
+		return fmt.Errorf("refusing redirect from %s to a loopback address", via[0].URL.Host)
+	}
+	return allowedDownloadURL(r.URL.String())
+}
+
+// isLoopbackHTTP reports whether u is an http URL whose host is exactly a
+// loopback name or address.
+func isLoopbackHTTP(u *url.URL) bool {
+	if u == nil || u.Scheme != "http" {
+		return false
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	return false
 }
 
 func allowedDownloadURL(raw string) error {
