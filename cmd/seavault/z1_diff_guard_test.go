@@ -15,9 +15,9 @@ import (
 // tests, never weaken the pre-U2 suite. This guard diffs the whole working tree
 // against the branch base (merge-base with main) and fails if any *_test.go file
 // is Modified, Deleted, or Renamed — an edited or removed pre-U2 test. New test
-// files (status Added) are exactly what a feature branch should carry, so the
-// guard also asserts at least one *_test.go was Added, so it can never pass
-// vacuously on an empty diff.
+// files (status Added) are fine and are not required: a docs-only, refactor-only
+// or test-repair branch legitimately adds none (maintainer decision 2026-10-12).
+// The guard still fails on an empty diff, so it can never pass vacuously.
 //
 // It is a repository-integrity check, not a unit test, so it needs git and the
 // base ref; when neither `main` nor `origin/main` resolves (a detached/shallow
@@ -65,7 +65,6 @@ func TestZ1NoPreU2TestEditedOrDeleted(t *testing.T) {
 		t.Fatalf("the branch shows no changes against its base %s; the guard would be vacuous", base)
 	}
 
-	addedTests := 0
 	var offenders []string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -89,8 +88,6 @@ func TestZ1NoPreU2TestEditedOrDeleted(t *testing.T) {
 			continue
 		}
 		switch {
-		case status == "A":
-			addedTests++
 		case strings.HasPrefix(status, "M") || strings.HasPrefix(status, "D") || strings.HasPrefix(status, "R"):
 			offenders = append(offenders, line)
 		}
@@ -98,9 +95,6 @@ func TestZ1NoPreU2TestEditedOrDeleted(t *testing.T) {
 
 	if len(offenders) != 0 {
 		t.Fatalf("pre-U2 tests must not be edited, deleted, or renamed (I-U1/I-U8); offending diff rows:\n%s", strings.Join(offenders, "\n"))
-	}
-	if addedTests == 0 {
-		t.Fatalf("expected the U2 branch to ADD at least one *_test.go against base %s; found none (the guard would be vacuous)", base)
 	}
 }
 
