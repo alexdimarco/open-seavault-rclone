@@ -97,6 +97,9 @@ func logFormatValue(args []string) (string, bool) {
 // constructed value on the real base-arg builder AND on the full Test sequence,
 // so RemoteTest can actually reach a remote.
 func TestBaseArgsLogFormatTokensAreValid(t *testing.T) {
+	// Test() resolves the managed rclone config under the app home; without this
+	// the test touched the developer's real ~/Library/Application Support.
+	t.Setenv("SEAVAULT_APP_HOME", t.TempDir())
 	p := remotes.DefaultProfile("remote", t.TempDir(), "remote:bucket/path", "s3")
 
 	// 1. Directly on the base-arg builder for a non-transfer command (lsf).
