@@ -949,6 +949,15 @@ func (v *Vault) storeChunk(plaintext []byte) (ChunkRef, bool, error) {
 	ref := ChunkRef{ID: id, Size: len(plaintext)}
 	objectPath := v.chunkPath(id)
 	if _, err := os.Stat(objectPath); err == nil {
+		// Dedup reuse: the chunk is referenced again now. Refresh its mtime so the
+		// fresh timestamp syncs out and another device's GC phase-2 mtime gate
+		// ("a re-uploaded chunk is young", gc.go) protects it until this put's
+		// manifest propagates. Without this, a chunk another device had already
+		// aged and queued for deletion stays old-mtimed and can be reaped before
+		// the reference arrives — online data loss to sync lag. A best-effort
+		// touch: a failure here only forfeits that extra protection.
+		now := time.Now()
+		_ = os.Chtimes(objectPath, now, now)
 		return ref, false, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return ChunkRef{}, false, err
