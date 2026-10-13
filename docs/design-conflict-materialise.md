@@ -1,7 +1,19 @@
 # Design: conflict copies must not overwrite real records
 
-Status: PROPOSED, awaiting design review (storage-core semantics).
-No code is written until this note is approved.
+Status: IMPLEMENTED (2026-10-13, maintainer delegated the decision). The chosen
+trade-off is "drop": once the user edits or deletes a conflict copy, the old
+losing content is not kept as a second copy.
+
+The fix is one rule in `loadManifestIndex` (internal/vault/manifest.go): a planned
+conflict whose target path already has its OWN real manifest group is suppressed
+— it is neither written into the index nor handed to compact. The real record at
+that path (the user's edit, or a tombstone if they deleted it) is therefore
+authoritative, so compact can no longer overwrite an edited copy with the old
+loser, and a deleted copy is not resurrected on reload. The losing source
+manifest is left in place (not reclaimed) while it keeps regenerating a
+suppressed conflict; that is untidy but never loses data. Out of scope: the
+compact-vs-sync-client TOCTOU (create-if-absent on materialise) noted below,
+which pre-exists for all of compact.
 
 ## Background
 

@@ -159,6 +159,15 @@ func (v *Vault) loadManifestIndex() (Index, reconcilePlan, error) {
 			idx.Files[p] = *live
 		}
 		for _, c := range conflicts {
+			// If the conflict path already has its OWN real manifest group, that
+			// record is authoritative: the user materialised, edited, or deleted
+			// the copy. Defer to it — never overwrite it with the synthetic loser
+			// (which compact would otherwise write, reverting the edit) and never
+			// resurrect a deleted copy. The real group's own live/tombstone outcome
+			// already set (or cleared) idx.Files[c.Path].
+			if _, realPath := byPath[c.Path]; realPath {
+				continue
+			}
 			idx.Files[c.Path] = c.Rec
 			plan.conflicts = append(plan.conflicts, c)
 		}
