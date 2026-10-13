@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/alexdimarco/open-seavault-rclone/internal/xcrypto/argon2"
@@ -56,6 +57,16 @@ type Keys struct {
 	MasterKey []byte
 	IndexKey  []byte
 }
+
+// ErrKDFParamsOutOfRange reports a KDF cost outside the range this client will
+// run. vault.json is read before its integrity tag can be verified, so these
+// parameters are attacker controlled at unlock time.
+var ErrKDFParamsOutOfRange = errors.New("vault KDF parameters are outside the supported range")
+
+// ErrConfigTooLarge reports a vault.json that is implausibly large or carries an
+// implausible number of wrap entries (each entry is a full KDF derivation at
+// unlock, so an unbounded count is an unbounded CPU/memory bill).
+var ErrConfigTooLarge = errors.New("vault.json is larger than this client will process")
 
 func DefaultKDFConfig() KDFConfig {
 	return KDFConfig{Algorithm: "ARGON2ID", Time: DefaultArgon2Time, MemoryKiB: DefaultArgon2Memory, Parallelism: DefaultArgon2Threads}
@@ -100,6 +111,11 @@ func NormalizeKDFConfig(cfg KDFConfig, creating bool) (KDFConfig, error) {
 		}
 		if cfg.ScryptP == 0 {
 			cfg.ScryptP = DefaultScryptP
+		}
+		// Range-check BEFORE the probe derivation below: the probe itself runs
+		// scrypt with these (possibly attacker-supplied) parameters.
+		if err := checkKDFRange(cfg); err != nil {
+			return KDFConfig{}, err
 		}
 		if _, err := scryptKey([]byte("probe"), []byte("salt"), cfg.ScryptN, cfg.ScryptR, cfg.ScryptP, 1); err != nil {
 			return KDFConfig{}, err
@@ -199,6 +215,9 @@ func deriveWrapKey(password string, cfg KDFConfig) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkKDFRange(cfg); err != nil {
+		return nil, err
+	}
 	salt, err := base64.StdEncoding.DecodeString(cfg.Salt)
 	if err != nil {
 		return nil, fmt.Errorf("decode KDF salt: %w", err)
@@ -213,6 +232,86 @@ func deriveWrapKey(password string, cfg KDFConfig) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unsupported KDF algorithm %q", cfg.Algorithm)
 	}
+}
+
+// Upper bounds on a KDF cost this client will run. They sit far above any sane
+// setting (the defaults are 64 MiB / t=3, scrypt 32 MiB, PBKDF2 600k) and exist
+// only so an attacker-edited vault.json cannot crash the process (argon2 narrows
+// time to uint32, where 1<<32 becomes 0 and panics) or exhaust memory/CPU.
+const (
+	maxArgon2Time      = 100
+	maxArgon2MemoryKiB = 4 * 1024 * 1024 // 4 GiB
+	maxScryptMemory    = 4 << 30         // N*r*128 bytes
+	maxScryptP         = 16
+	maxPBKDF2Iter      = 100_000_000
+)
+
+// checkKDFRange rejects a normalised KDF config whose cost is outside the
+// supported range with ErrKDFParamsOutOfRange.
+func checkKDFRange(cfg KDFConfig) error {
+	bad := func(format string, a ...any) error {
+		return fmt.Errorf("%w: %s", ErrKDFParamsOutOfRange, fmt.Sprintf(format, a...))
+	}
+	switch normalizeKDF(cfg.Algorithm) {
+	case "argon2id", "argon2-id":
+		if cfg.Time < 1 || cfg.Time > maxArgon2Time {
+			return bad("argon2id time %d (allowed 1..%d)", cfg.Time, maxArgon2Time)
+		}
+		if cfg.MemoryKiB < 1 || cfg.MemoryKiB > maxArgon2MemoryKiB {
+			return bad("argon2id memoryKiB %d (allowed 1..%d)", cfg.MemoryKiB, maxArgon2MemoryKiB)
+		}
+	case "scrypt":
+		if cfg.ScryptN < 2 || cfg.ScryptR < 1 || cfg.ScryptP < 1 || cfg.ScryptP > maxScryptP {
+			return bad("scrypt N=%d r=%d p=%d", cfg.ScryptN, cfg.ScryptR, cfg.ScryptP)
+		}
+		// Overflow-safe form of N*r*128 <= maxScryptMemory.
+		if cfg.ScryptR > maxScryptMemory/128 || cfg.ScryptN > maxScryptMemory/128/cfg.ScryptR {
+			return bad("scrypt N=%d r=%d needs more than %d bytes", cfg.ScryptN, cfg.ScryptR, maxScryptMemory)
+		}
+		// scrypt's working buffer B is also p*128*r bytes (N does not enter), and
+		// a second PBKDF2 output of the same size is held alongside it.
+		if cfg.ScryptP > maxScryptMemory/128/cfg.ScryptR {
+			return bad("scrypt r=%d p=%d needs more than %d bytes", cfg.ScryptR, cfg.ScryptP, maxScryptMemory)
+		}
+	case "pbkdf2", "pbkdf2-hmac-sha256":
+		if cfg.Iterations < 1 || cfg.Iterations > maxPBKDF2Iter {
+			return bad("pbkdf2 iterations %d (allowed 1..%d)", cfg.Iterations, maxPBKDF2Iter)
+		}
+	}
+	return nil
+}
+
+// raiseToFloor returns base unchanged when it already meets the creation floors,
+// and otherwise the same algorithm at the default (floor-meeting) cost. Used
+// whenever a wrap is REBUILT: the stored KDF came from an unauthenticated
+// vault.json, and re-wrapping a new password at an inherited weak cost would hand
+// whoever planted it an offline guessing target.
+func raiseToFloor(base KDFConfig) (KDFConfig, error) {
+	n, err := NormalizeKDFConfig(base, true)
+	if err != nil {
+		return KDFConfig{}, err
+	}
+	if ValidateKDFStrength(n) == nil {
+		return base, nil
+	}
+	switch normalizeKDF(n.Algorithm) {
+	// Raise each parameter to at least its default and never lower any: a stored
+	// scrypt with a strong N but r below the floor must not be swapped for a
+	// default with a smaller N.
+	case "scrypt":
+		return KDFConfig{Algorithm: "SCRYPT", ScryptN: maxInt(n.ScryptN, DefaultScryptN), ScryptR: maxInt(n.ScryptR, DefaultScryptR), ScryptP: maxInt(n.ScryptP, DefaultScryptP), Salt: base.Salt}, nil
+	case "pbkdf2", "pbkdf2-hmac-sha256":
+		return KDFConfig{Algorithm: "PBKDF2-HMAC-SHA256", Iterations: maxInt(n.Iterations, DefaultKDFIterations), Salt: base.Salt}, nil
+	default:
+		return KDFConfig{Algorithm: "ARGON2ID", Time: maxInt(n.Time, DefaultArgon2Time), MemoryKiB: maxInt(n.MemoryKiB, DefaultArgon2Memory), Parallelism: maxInt(n.Parallelism, 1), Salt: base.Salt}, nil
+	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func normalizeKDF(name string) string {
@@ -418,4 +517,28 @@ func hkdfSHA256(ikm, salt, info []byte, length int) []byte {
 		counter++
 	}
 	return okm[:length]
+}
+
+// vault.json is read whole before it can be authenticated, and every wrap entry
+// costs one full KDF derivation at unlock; bound both.
+const (
+	maxConfigBytes = 1 << 20 // a real config is a few KiB
+	maxWrapEntries = 64
+)
+
+// readCapped reads a file but refuses one larger than max with ErrConfigTooLarge.
+func readCapped(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("%w: larger than %d bytes", ErrConfigTooLarge, max)
+	}
+	return b, nil
 }

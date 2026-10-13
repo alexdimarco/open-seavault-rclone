@@ -365,13 +365,16 @@ func ReadConfig(root string) (VaultConfig, error) {
 	if err != nil {
 		return VaultConfig{}, err
 	}
-	cfgBytes, err := os.ReadFile(filepath.Join(root, name, ConfigFileName))
+	cfgBytes, err := readCapped(filepath.Join(root, name, ConfigFileName), maxConfigBytes)
 	if err != nil {
 		return VaultConfig{}, err
 	}
 	var cfg VaultConfig
 	if err := json.Unmarshal(cfgBytes, &cfg); err != nil {
 		return VaultConfig{}, err
+	}
+	if len(cfg.WrapEntries) > maxWrapEntries {
+		return VaultConfig{}, fmt.Errorf("%w: %d wrap entries (limit %d)", ErrConfigTooLarge, len(cfg.WrapEntries), maxWrapEntries)
 	}
 	if cfg.VaultID == "" {
 		cfg.VaultID = legacyVaultID(root, cfg)

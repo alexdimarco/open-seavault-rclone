@@ -59,7 +59,10 @@ func freshWrapKDF(base KDFConfig) (KDFConfig, error) {
 	if err != nil {
 		return KDFConfig{}, err
 	}
-	k := base
+	k, err := raiseToFloor(base)
+	if err != nil {
+		return KDFConfig{}, err
+	}
 	k.Salt = base64.StdEncoding.EncodeToString(salt)
 	return k, nil
 }
