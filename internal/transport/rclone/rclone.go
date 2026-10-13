@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,6 +20,10 @@ import (
 	"github.com/alexdimarco/open-seavault-rclone/internal/userpath"
 	"github.com/alexdimarco/open-seavault-rclone/internal/vault"
 )
+
+// vaultIDPattern matches the non-secret "vaultId" field in a vault.json. It is
+// used only by the remote-identity safety net, never for unlocking.
+var vaultIDPattern = regexp.MustCompile(`"vaultId"\s*:\s*"([^"]+)"`)
 
 type Runner interface {
 	Run(ctx context.Context, args []string) (string, error)
@@ -113,11 +118,71 @@ func (b *Backend) DryRunPush(ctx context.Context) (transport.Result, error) {
 }
 
 func (b *Backend) Push(ctx context.Context, opts transport.Options) (transport.Result, error) {
+	if err := b.guardRemoteVaultIdentity(ctx); err != nil {
+		return b.refusedResult(transport.OperationPush, opts.DryRun, err), err
+	}
 	return b.runSequence(ctx, transport.OperationPush, opts.DryRun, pushSequence(b.Profile))
 }
 
 func (b *Backend) Pull(ctx context.Context, opts transport.Options) (transport.Result, error) {
+	if err := b.guardRemoteVaultIdentity(ctx); err != nil {
+		return b.refusedResult(transport.OperationPull, opts.DryRun, err), err
+	}
 	return b.runSequence(ctx, transport.OperationPull, opts.DryRun, pullSequence(b.Profile))
+}
+
+// refusedResult builds the Result returned when a guard refuses before any
+// rclone command runs.
+func (b *Backend) refusedResult(op transport.Operation, dry bool, err error) transport.Result {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	return transport.Result{Operation: op, OK: false, DryRun: dry, Error: err.Error(), StartedAt: now, FinishedAt: now}
+}
+
+// guardRemoteVaultIdentity refuses a push or pull when the remote folder already
+// holds a DIFFERENT vault's vault.json. Pointing two vaults at one remote folder
+// otherwise silently overwrites the first vault's wrapped keys (its vault.json),
+// making it unopenable. This is a best-effort safety net against an honest
+// mistake, not a defence against a hostile server: vaultId is unauthenticated,
+// and ANY inability to determine the remote id (first push, unreadable, or
+// unparsable) lets the operation proceed exactly as before.
+func (b *Backend) guardRemoteVaultIdentity(ctx context.Context) error {
+	p := remotes.Normalize(b.Profile)
+	localCfg, err := vault.ReadConfig(p.Vault)
+	if err != nil {
+		return nil // cannot determine local identity; do not block the operation
+	}
+	local := strings.TrimSpace(localCfg.VaultID)
+	if local == "" {
+		return nil
+	}
+	remoteID, ok := b.remoteVaultID(ctx, p)
+	if !ok || remoteID == local {
+		return nil
+	}
+	return fmt.Errorf("refusing to sync: the remote folder %s already holds a DIFFERENT vault (remote vaultId %q, local %q); two vaults must not share one remote folder — give this vault its own subfolder or a different remote", remoteMeta(p.Remote.RemotePath, p.Vault), remoteID, local)
+}
+
+// remoteVaultID reads the remote vault.json and extracts its vaultId. It returns
+// ok=false whenever the file is absent or the id cannot be found, so the caller
+// treats "unknown" as "do not block".
+func (b *Backend) remoteVaultID(ctx context.Context, p remotes.Profile) (string, bool) {
+	root := remoteMeta(p.Remote.RemotePath, p.Vault)
+	out, err := b.Runner.Run(ctx, appendBaseArgs(p, []string{"cat", joinRemote(root, vault.ConfigFileName)}))
+	if err != nil {
+		return "", false
+	}
+	return parseVaultID(out)
+}
+
+// parseVaultID extracts the non-secret vaultId from (possibly redaction-mangled)
+// vault.json text. It reads only that field, so redaction of the wrapped-key
+// lines around it does not matter.
+func parseVaultID(s string) (string, bool) {
+	m := vaultIDPattern.FindStringSubmatch(s)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
 }
 
 func (b *Backend) Sync(ctx context.Context, opts transport.Options) (transport.Result, error) {

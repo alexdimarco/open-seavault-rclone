@@ -1,7 +1,18 @@
 # Design: one remote folder per vault (remote vault isolation)
 
-Status: PROPOSED, awaiting design review (CLAUDE.md: remote config is security-sensitive).
-No code is written until this note is approved.
+Status: PART 1 IMPLEMENTED (2026-10-13, maintainer delegated the decision);
+PARTS 2 and 3 still proposed, with their open questions below unresolved.
+
+Part 1 (the identity check) shipped as the safety net that protects every
+existing setup without changing any layout: `internal/transport/rclone`'s Push
+and Pull read the remote `vault.json` and refuse when its `vaultId` differs from
+the local vault's, before any copy runs. The read is best-effort and reads only
+the non-secret `vaultId`; a first push (no remote config), an unreadable file, or
+an unparsable one all let the operation proceed exactly as before, so this stops
+an honest mistake, not a hostile server. Parts 2 (per-vault subfolder for new
+setups) and 3 (setup collision check / honest idempotent re-run) are NOT yet
+done — they change on-disk layout and setup behaviour and still want the naming
+decision in the open questions.
 
 ## Problem
 
