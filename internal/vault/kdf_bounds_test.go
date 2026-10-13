@@ -62,6 +62,7 @@ func TestDeriveWrapKeyRejectsOutOfRangeParams(t *testing.T) {
 }
 
 func TestRewrapDoesNotInheritWeakKDF(t *testing.T) {
+	requireRewrapFloor(t)
 	isolateAppHome(t)
 	root := filepath.Join(t.TempDir(), "vault")
 	createTestVault(t, root, rotOldPassword) // FastKDFConfigForTests: scrypt N=16, far below the floor
@@ -121,15 +122,16 @@ func TestRewrapDoesNotInheritWeakKDF(t *testing.T) {
 }
 
 // raiseToFloor must only RAISE: a stored scrypt with strong N but r below the
-// floor (N=2^20, r=4) used to be replaced wholesale by the 32768x8 default,
+// floor (N=2^16, r=4) used to be replaced wholesale by the 32768x8 default,
 // which has a LOWER N.
 func TestRaiseToFloorNeverLowersAnyParameter(t *testing.T) {
-	got, err := raiseToFloor(KDFConfig{Algorithm: "SCRYPT", ScryptN: 1 << 20, ScryptR: 4, ScryptP: 1})
+	requireRewrapFloor(t)
+	got, err := raiseToFloor(KDFConfig{Algorithm: "SCRYPT", ScryptN: 1 << 16, ScryptR: 4, ScryptP: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ScryptN < 1<<20 {
-		t.Errorf("N lowered from 2^20 to %d", got.ScryptN)
+	if got.ScryptN < 1<<16 {
+		t.Errorf("N lowered from 2^16 to %d", got.ScryptN)
 	}
 	if got.ScryptR < minScryptR {
 		t.Errorf("r = %d is still below the floor %d", got.ScryptR, minScryptR)
