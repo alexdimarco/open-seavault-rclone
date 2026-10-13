@@ -614,13 +614,30 @@ func clearSignedBody(data []byte) []byte {
 	return []byte(s)
 }
 
+// signatureMode resolves a requested signature mode against policy.json:
+//   - an empty request takes the policy's mode (default "optional");
+//   - a policy of "required" is a floor no request (CLI flag, GUI select) can
+//     weaken to optional or skip;
+//   - an unknown mode, in the request or the policy file, fails CLOSED to
+//     "required" - a typo such as "requird" used to behave as optional.
 func signatureMode(mode string) string {
+	valid := func(m string) bool { return m == "optional" || m == "required" || m == "skip" }
+	pol := strings.ToLower(strings.TrimSpace(LoadPolicy().SignatureMode))
+	if pol == "" {
+		pol = "optional"
+	}
+	if !valid(pol) {
+		return "required"
+	}
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode == "" {
-		mode = LoadPolicy().SignatureMode
+		mode = pol
 	}
-	if mode == "" {
-		mode = "optional"
+	if !valid(mode) {
+		return "required"
+	}
+	if pol == "required" {
+		return "required"
 	}
 	return mode
 }
